@@ -23,6 +23,7 @@ class ChatConfig:
     duckhunt_enabled: bool
     voice_transcribe: bool
     memory_enabled: bool
+    share_photo_enabled: bool = False
 
 
 class ChatRepo:
@@ -63,6 +64,7 @@ class ChatRepo:
             duckhunt_enabled=row["duckhunt_enabled"],
             voice_transcribe=row["voice_transcribe"],
             memory_enabled=row["memory_enabled"],
+            share_photo_enabled=bool(row["share_photo_enabled"]),
         )
 
     async def upsert_default_config(
@@ -72,17 +74,19 @@ class ChatRepo:
         ambient_probability: float,
         persona: str,
         duckhunt_enabled: bool,
+        share_photo_enabled: bool = False,
     ) -> ChatConfig:
         row = await self.db.fetchrow(
             """
             INSERT INTO chat_config (chat_id, response_policy, ambient_probability,
-                                     persona, duckhunt_enabled)
-            VALUES ($1, $2, $3, $4, $5)
+                                     persona, duckhunt_enabled, share_photo_enabled)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (chat_id) DO UPDATE
                 SET updated_at = chat_config.updated_at  -- no-op update to return row
             RETURNING *
             """,
-            chat_id, response_policy, ambient_probability, persona, duckhunt_enabled,
+            chat_id, response_policy, ambient_probability, persona,
+            duckhunt_enabled, share_photo_enabled,
         )
         assert row is not None
         return ChatConfig(
@@ -94,12 +98,14 @@ class ChatRepo:
             duckhunt_enabled=row["duckhunt_enabled"],
             voice_transcribe=row["voice_transcribe"],
             memory_enabled=row["memory_enabled"],
+            share_photo_enabled=bool(row["share_photo_enabled"]),
         )
 
     async def update_config(self, chat_id: int, **fields: Any) -> None:
         allowed = {
             "response_policy", "ambient_probability", "persona", "persona_custom",
             "duckhunt_enabled", "voice_transcribe", "memory_enabled",
+            "share_photo_enabled",
         }
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:

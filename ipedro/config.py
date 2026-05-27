@@ -73,6 +73,13 @@ class Settings(BaseSettings):
     duckhunt_duck_half_life_seconds: int = 14_400
     duckhunt_action_cooldown_seconds: int = 15
 
+    # Share-photo idle behavior. Same Poisson shape as duckhunt: each enabled
+    # chat rolls per tick. Default mean is 1 day because image generation is
+    # not cheap; tune via env if you want more frequent (or fewer) snapshots.
+    share_photo_enabled_by_default: bool = False
+    share_photo_mean_interval_seconds: int = 86_400  # ~1 photo per chat per day
+    share_photo_tick_seconds: int = 300
+
     @field_validator("admin_user_ids")
     @classmethod
     def _strip_whitespace(cls, v: str) -> str:

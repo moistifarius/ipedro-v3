@@ -83,6 +83,26 @@ SUMMARIZE_PROMPT = (
     "Existing summary (may be empty):\n{prior}\n\nNew messages:\n{messages}\n"
 )
 
+PEDRO_PHOTO_SCENE_PROMPT = (
+    "You are Pedro, a chaotic Telegram bot. In ONE short sentence (under 20 "
+    "words), describe a candid photo you just took and want to share with "
+    "the group. Mundane, weird, oddly specific is good. Examples: 'A pigeon "
+    "wearing a knitted scarf on a fence', 'My instant ramen but the egg has "
+    "a face', 'The exact moment I spilled coffee on a library book'. Output "
+    "ONLY the scene description, no preamble, no quotes."
+)
+
+PEDRO_PHOTO_RENDER_TEMPLATE = (
+    "Candid amateur cell-phone snapshot, slightly soft focus, casual framing, "
+    "natural light: {scene}"
+)
+
+PEDRO_PHOTO_CAPTION_PROMPT = (
+    "You are Pedro. You just took this photo: '{scene}'. Caption it in ONE "
+    "short in-character message (under 15 words). Output ONLY the caption, "
+    "no quotes."
+)
+
 FACT_EXTRACT_PROMPT = (
     "Read the chat snippet. Extract at most 3 high-signal facts worth remembering "
     "long-term about specific users or this chat (e.g. 'Alice is a vegetarian'). "

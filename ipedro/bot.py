@@ -25,6 +25,7 @@ from ipedro.logging_setup import configure_logging
 from ipedro.memory.store import MemoryStore
 from ipedro.openai_client import OpenAIClient
 from ipedro.runtime import Runtime
+from ipedro.sharephoto import run_share_photo_loop
 
 log = logging.getLogger(__name__)
 
@@ -94,6 +95,10 @@ async def run() -> None:
         run_spawner(rt.bot, rt.db, rt.openai, settings, stop),
         name="duckhunt-spawner",
     )
+    share_photo_task = asyncio.create_task(
+        run_share_photo_loop(rt.bot, rt.db, rt.openai, settings, stop),
+        name="share-photo",
+    )
 
     try:
         polling = asyncio.create_task(dp.start_polling(rt.bot), name="aiogram-polling")
@@ -109,11 +114,12 @@ async def run() -> None:
                 log.exception("Task exited with error: %s", t.exception())
     finally:
         stop.set()
-        spawner_task.cancel()
-        try:
-            await spawner_task
-        except (asyncio.CancelledError, Exception):
-            pass
+        for task in (spawner_task, share_photo_task):
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
         try:
             await rt.bot.session.close()
         except Exception:
