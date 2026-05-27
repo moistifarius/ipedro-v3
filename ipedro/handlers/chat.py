@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 
 from aiogram import F, Router
 from aiogram.types import Message
@@ -13,10 +14,33 @@ from ipedro.duckhunt.verdicts import parse_verdict
 from ipedro.handlers.common import get_or_create_chat_config
 from ipedro.memory.context_builder import build_context
 from ipedro.memory.summarizer import maybe_summarize
-from ipedro.prompts import DUCK_BEF_CHALLENGE_JUDGE_PROMPT
+from ipedro.prompts import CAT_FACT_PROMPT, DUCK_BEF_CHALLENGE_JUDGE_PROMPT
 from ipedro.runtime import Runtime
 
 log = logging.getLogger(__name__)
+
+_PEDRO_RE = re.compile(r"\bpedro\b", re.IGNORECASE)
+_CAT_WORD_RE = re.compile(
+    r"\b("
+    r"cats?|kitt(y|ies|en|ens)|felines?|"
+    r"meow(s|ed|ing)?|purr(s|ed|ing)?|"
+    r"whiskers?|tabby|calico|tomcat"
+    r")\b",
+    re.IGNORECASE,
+)
+_CAT_EMOJI = frozenset("🐈🐱😺😸😹😻😼😽🙀😿😾")
+
+
+def _mentions_pedro(text: str | None) -> bool:
+    return bool(text) and _PEDRO_RE.search(text) is not None
+
+
+def _mentions_cat(text: str | None) -> bool:
+    if not text:
+        return False
+    if _CAT_WORD_RE.search(text) is not None:
+        return True
+    return any(ch in _CAT_EMOJI for ch in text)
 
 
 def _is_command(text: str | None) -> bool:
@@ -158,9 +182,29 @@ def build_router(rt: Runtime) -> Router:
                 user_id=msg.from_user.id if msg.from_user else None,
             )
 
+        # Cat mention: drop a dubious cat fact and stop. Skip the regular
+        # AI reply so the bot doesn't both fact and chat.
+        if _mentions_cat(text):
+            await rt.bot.send_chat_action(msg.chat.id, "typing")
+            fact = await rt.openai.short_completion(CAT_FACT_PROMPT, max_tokens=120)
+            reply_text = fact or "🐈"
+            sent = await msg.reply(reply_text, disable_notification=True)
+            if cfg.memory_enabled:
+                await rt.memory.record_message(
+                    chat_id=msg.chat.id,
+                    role="assistant",
+                    content=reply_text,
+                    message_id=sent.message_id,
+                    user_id=None,
+                )
+                await maybe_summarize(rt.memory, rt.openai, rt.settings, msg.chat.id)
+            return
+
         incoming = IncomingMessage(
             text=text,
-            has_mention_of_bot=_has_bot_mention(msg, bot_username),
+            has_mention_of_bot=(
+                _has_bot_mention(msg, bot_username) or _mentions_pedro(text)
+            ),
             is_reply_to_bot=_is_reply_to_bot(msg, bot_id),
             is_command=False,
             chat_type=msg.chat.type,
