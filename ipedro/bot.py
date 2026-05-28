@@ -30,7 +30,7 @@ from ipedro.logging_setup import configure_logging
 from ipedro.celebrations import run_celebrations_loop
 from ipedro.comic import run_comic_loop
 from ipedro.kv import kv_get
-from ipedro.personas import set_pedro_prompt_override
+from ipedro.personas import set_master_prompt_override
 from ipedro.memory.store import MemoryStore
 from ipedro.openai_client import OpenAIClient
 from ipedro.persona_state import PersonaStateService
@@ -63,7 +63,12 @@ async def build_runtime(settings: Settings) -> Runtime:
     openai.attach_usage_db(db)
 
     # Pick up any persisted master-prompt override before serving requests.
-    set_pedro_prompt_override(await kv_get(db, "pedro_master_prompt"))
+    # Falls back to the legacy key set by earlier versions.
+    override = (
+        await kv_get(db, "master_prompt")
+        or await kv_get(db, "pedro_master_prompt")
+    )
+    set_master_prompt_override(override)
     memory = MemoryStore(db=db, openai=openai, pgvector_available=pgvector_available)
     return Runtime(
         settings=settings,
@@ -99,7 +104,7 @@ def build_dispatcher(rt: Runtime) -> Dispatcher:
 async def run() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
-    log.info("Starting iPedro V2")
+    log.info("Starting iDude — the Dude abides.")
     rt = await build_runtime(settings)
     dp = build_dispatcher(rt)
 

@@ -133,7 +133,7 @@ def build_router(rt: Runtime) -> Router:
                 "Set a field: /chat_config <field> <value>\n"
                 "  policy     commands|mention|reply|ambient|always\n"
                 "  ambient    <0.0-1.0>\n"
-                "  persona    pedro|neutral|<free-form>\n"
+                "  persona    dude|neutral|<free-form>\n"
                 "  duckhunt   on|off\n"
                 "  sharephoto on|off\n"
                 "  comic      on|off\n"
@@ -175,9 +175,9 @@ def build_router(rt: Runtime) -> Router:
             updates["persona"] = raw
             # Custom personas via the remaining argument tail.
             tail = (msg.text or "").split(None, 3)
-            if raw not in ("pedro", "neutral") and len(tail) == 4:
+            if raw not in ("dude", "pedro", "neutral") and len(tail) == 4:
                 updates["persona_custom"] = tail[3]
-            elif raw in ("pedro", "neutral"):
+            elif raw in ("dude", "pedro", "neutral"):
                 updates["persona_custom"] = None
         elif field == "duckhunt":
             updates["duckhunt_enabled"] = raw.lower() in ("on", "true", "1", "yes")

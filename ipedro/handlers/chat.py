@@ -22,7 +22,16 @@ from ipedro.user_flags import has_flag, maybe_auto_grudge
 
 log = logging.getLogger(__name__)
 
-_PEDRO_RE = re.compile(r"\bpedro\b", re.IGNORECASE)
+# Bare "dude" / "man" are way too common, so only the specific Dude
+# aliases trigger a name mention. Legacy "pedro" mentions still trigger.
+_DUDE_NAME_RE = re.compile(
+    r"\bthe\s+dude\b"
+    r"|\bduder(ino)?\b"
+    r"|\bel\s+duderino\b"
+    r"|\bhis\s+dudeness\b"
+    r"|\bpedro\b",
+    re.IGNORECASE,
+)
 
 # Telegram's allowed reaction emoji set (subset; the API rejects others).
 _REACTION_POOL = (
@@ -46,33 +55,38 @@ _POSITIVITY_RE = re.compile(
 )
 _CREDIT_PROBABILITY = 0.25
 _CREDIT_LINES = (
-    "you're welcome btw",
-    "yeah that was me",
-    "i told them to do that",
-    "u can thank me later",
-    "i had a hunch",
-    "i may have nudged things in that direction",
-    "happy to help (i was barely involved)",
-    "honestly i deserve most of the credit",
+    "yeah, man, that was me",
+    "you're welcome, dude",
+    "i may have had a hand in that. or maybe not. who can say.",
     "ahem.",
-    "i'll accept payment in goodwill",
+    "i'm not saying it was me. but it was me.",
+    "happy to help, more or less",
+    "i had a hunch, man",
+    "credit where it's due, you know",
+    "the dude abides — also occasionally the dude assists",
+    "this aggression will not stand. but you're welcome.",
 )
 
+# "thanks pedro" / "thanks dude" / "thanks man" — common ways someone
+# might thank the bot directly.
 _THANKS_PEDRO_RE = re.compile(
-    r"\b(thanks|thank\s*you|ty|tysm|cheers|thx)\b[\s,!.]*\bpedro\b"
-    r"|\bpedro\b[\s,!.]*\b(thanks|thank\s*you|ty|cheers|thx)\b",
+    r"\b(thanks|thank\s*you|ty|tysm|cheers|thx)\b"
+    r"[\s,!.]*\b(dude|duder|pedro|man)\b"
+    r"|\b(dude|duder|pedro|man)\b"
+    r"[\s,!.]*\b(thanks|thank\s*you|ty|cheers|thx)\b",
     re.IGNORECASE,
 )
 _THANKS_PEDRO_LINES = (
-    "took you long enough",
-    "i mean, was there ever any doubt",
-    "yeah ok",
-    "what about thanks for everything else",
-    "you're welcome, ungrateful as that was",
-    "noted. begrudgingly accepted.",
-    "i'll add it to the pile of things i've done for you",
-    "wow, gratitude. how novel.",
-    "save it. i'll need it later.",
+    "yeah, no problem, man",
+    "the dude abides",
+    "that's just, like, your gratitude, man",
+    "ah, you're alright",
+    "no big deal, dude",
+    "right on",
+    "easy, man",
+    "i'd say something but i'm pretty mellow right now",
+    "well, you know — that's just what i do",
+    "this aggression will not stand. wait. what?",
 )
 _CAT_WORD_RE = re.compile(
     r"\b("
@@ -86,7 +100,8 @@ _CAT_EMOJI = frozenset("🐈🐱😺😸😹😻😼😽🙀😿😾")
 
 
 def _mentions_pedro(text: str | None) -> bool:
-    return bool(text) and _PEDRO_RE.search(text) is not None
+    """Kept for backwards-compat; matches Dude aliases now."""
+    return bool(text) and _DUDE_NAME_RE.search(text) is not None
 
 
 def _mentions_cat(text: str | None) -> bool:
@@ -146,8 +161,8 @@ async def _transcribe_voice(rt: Runtime, msg: Message) -> str | None:
 def build_router(rt: Runtime) -> Router:
     r = Router(name="chat")
 
-    # Reply-to-bot "bad bot" / "bad pedro" deletion shortcut.
-    @r.message(F.text.lower().in_({"bad bot", "bad pedro"}))
+    # Reply-to-bot "bad bot" / "bad dude" deletion shortcut.
+    @r.message(F.text.lower().in_({"bad bot", "bad pedro", "bad dude", "bad duder"}))
     async def remove_message(msg: Message) -> None:
         if not msg.reply_to_message:
             return

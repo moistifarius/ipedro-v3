@@ -14,8 +14,8 @@ from ipedro.runtime import Runtime
 log = logging.getLogger(__name__)
 
 HELP_TEXT = (
-    "Hi! I'm iPedro V2. I chat, generate images, transcribe voice, run "
-    "duckhunt, and remember stuff over time.\n\n"
+    "Hey, man. I'm the Dude. I chat, generate images, transcribe voice, "
+    "run duckhunt, and remember stuff, more or less.\n\n"
     "Common commands:\n"
     "/start - say hi\n"
     "/help - this message\n"
@@ -72,7 +72,7 @@ HELP_TEXT = (
     "\nReply to ducks with: bang, bef, ignore.\n"
     "Bef may be refused - the duck decides. If refused, you'll get a small "
     "challenge to solve (reply to it) before you can try bef again.\n"
-    "Say 'bad bot' or 'bad pedro' as a reply to my message to delete it."
+    "Say 'bad bot' or 'bad dude' as a reply to my message to delete it."
 )
 
 
@@ -82,7 +82,11 @@ def build_router(rt: Runtime) -> Router:
     @r.message(Command("start"))
     async def start(msg: Message) -> None:
         await get_or_create_chat_config(rt, msg)
-        await msg.reply("Hello! I am iPedro V2. Type /help for commands.")
+        await msg.reply(
+            "Yeah, hey, man. I'm the Dude. Or, you know, His Dudeness, "
+            "Duder, El Duderino if you're not into the whole brevity thing. "
+            "Type /help for commands."
+        )
         await rt.command_log.add(
             msg.chat.id if msg.chat else None,
             msg.from_user.id if msg.from_user else None,

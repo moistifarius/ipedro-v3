@@ -19,10 +19,11 @@ GRUDGE_TTL = timedelta(hours=24)
 _INSULT_RE = re.compile(
     r"\b(stupid|dumb|trash|garbage|shut\s*up|fuck\s*off|fuck\s*you|"
     r"shitty|hate|useless|broken|terrible|awful|kill\s*yourself|kys|"
-    r"die|piece\s*of\s*shit)\b.{0,40}\b(pedro|bot)\b"
-    r"|\b(pedro|bot)\b.{0,40}\b(stupid|dumb|trash|garbage|shut\s*up|"
-    r"fuck\s*off|fuck\s*you|shitty|hate|useless|broken|terrible|awful|"
-    r"piece\s*of\s*shit)\b",
+    r"die|piece\s*of\s*shit)\b.{0,40}"
+    r"\b(the\s+dude|dude|duder|el\s+duderino|pedro|bot)\b"
+    r"|\b(the\s+dude|dude|duder|el\s+duderino|pedro|bot)\b.{0,40}"
+    r"\b(stupid|dumb|trash|garbage|shut\s*up|fuck\s*off|fuck\s*you|"
+    r"shitty|hate|useless|broken|terrible|awful|piece\s*of\s*shit)\b",
     re.IGNORECASE,
 )
 

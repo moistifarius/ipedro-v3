@@ -496,7 +496,7 @@ def build_router(rt: Runtime) -> Router:
 
     @r.message(Command("this_or_that"))
     async def this_or_that(msg: Message) -> None:
-        """/this_or_that A | B — Pedro decides dramatically."""
+        """/this_or_that A | B — the Dude decides dramatically."""
         await get_or_create_chat_config(rt, msg)
         raw = (msg.text or "").split(None, 1)
         if len(raw) < 2 or "|" not in raw[1]:
@@ -521,7 +521,7 @@ def build_router(rt: Runtime) -> Router:
 
     @r.message(Command("echo"))
     async def echo(msg: Message) -> None:
-        """/echo @user [topic] — Pedro mimics that user's style."""
+        """/echo @user [topic] — the Dude mimics that user's style."""
         await get_or_create_chat_config(rt, msg)
         user_id, name = await _resolve_target_user(rt, msg)
         if user_id is None:
@@ -604,7 +604,7 @@ def build_router(rt: Runtime) -> Router:
 
     @r.message(Command("lyric"))
     async def lyric(msg: Message) -> None:
-        """/lyric <line> — Pedro confidently mishears the lyric."""
+        """/lyric <line> — the Dude confidently mishears the lyric."""
         await get_or_create_chat_config(rt, msg)
         parts = (msg.text or "").split(None, 1)
         if len(parts) < 2:
@@ -732,7 +732,7 @@ def build_router(rt: Runtime) -> Router:
                 await rt.chats.update_config(chat_id, response_policy=new_policy)
         elif field.startswith("persona:"):
             new_persona = field.split(":", 1)[1]
-            if new_persona in ("pedro", "neutral"):
+            if new_persona in ("dude", "pedro", "neutral"):
                 await rt.chats.update_config(
                     chat_id, persona=new_persona, persona_custom=None,
                 )
@@ -793,7 +793,7 @@ def _config_keyboard(cfg) -> InlineKeyboardMarkup:
             ),
         ],
         [
-            b("pedro", "persona:pedro"),
+            b("dude", "persona:dude"),
             b("neutral", "persona:neutral"),
         ],
     ]

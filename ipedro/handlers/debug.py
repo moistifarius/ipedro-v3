@@ -24,15 +24,15 @@ log = logging.getLogger(__name__)
 _HELP = (
     "Debug commands (admin only):\n"
     "  /debug_help — this list\n"
-    "  /debug_sharephoto — force Pedro to generate + post a photo now\n"
+    "  /debug_sharephoto — force the Dude to generate + post a photo now\n"
     "  /debug_challenge — issue a random bef challenge (captcha|trivia|recipe)\n"
     "  /debug_captcha — issue a captcha challenge\n"
     "  /debug_trivia — issue a trivia challenge\n"
     "  /debug_recipe — issue a recipe challenge\n"
     "  /debug_duck — alias for /duckhunt (force-spawn in this chat)\n"
     "\nFor the others, just type the trigger:\n"
-    "  say 'pedro' anywhere — Pedro should reply\n"
-    "  say 'cat' / 'kitty' / 🐈 — Pedro drops a dubious cat fact\n"
+    "  say 'the dude' / 'duder' / 'el duderino' — Dude should reply\n"
+    "  say 'cat' / 'kitty' / 🐈 — Dude drops a dubious cat fact\n"
     "  type 'bang' twice within 15s — second one trips the cooldown challenge"
 )
 

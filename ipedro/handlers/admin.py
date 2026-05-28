@@ -19,7 +19,7 @@ from ipedro.handlers.common import require_admin
 from ipedro.kv import kv_delete, kv_get, kv_set
 from ipedro.logging_setup import recent_log_lines
 from ipedro.personas import (
-    DEFAULT_PEDRO_PROMPT, current_pedro_prompt, set_pedro_prompt_override,
+    DEFAULT_DUDE_PROMPT, current_master_prompt, set_master_prompt_override,
 )
 from ipedro.runtime import Runtime
 
@@ -326,25 +326,26 @@ def build_router(rt: Runtime) -> Router:
 
     @r.message(Command("master_prompt"))
     async def master_prompt(msg: Message) -> None:
-        """View / set / reset the global Pedro persona prompt."""
+        """View / set / reset the global master persona prompt."""
         if not await require_admin(msg, admin_ids):
             return
         raw = (msg.text or "").split(None, 2)
         sub = raw[1].lower() if len(raw) >= 2 else "show"
         if sub == "show":
-            current = current_pedro_prompt()
-            is_default = current == DEFAULT_PEDRO_PROMPT
-            tag = "(default)" if is_default else "(override active)"
+            current = current_master_prompt()
+            is_default = current == DEFAULT_DUDE_PROMPT
+            tag = "(default Dude)" if is_default else "(override active)"
             await msg.reply(
-                f"Master Pedro prompt {tag}:\n\n{current}",
+                f"Master persona prompt {tag}:\n\n{current[:3800]}",
                 disable_notification=True,
             )
             return
         if sub == "reset":
-            await kv_delete(rt.db, "pedro_master_prompt")
-            set_pedro_prompt_override(None)
+            await kv_delete(rt.db, "master_prompt")
+            await kv_delete(rt.db, "pedro_master_prompt")  # legacy key
+            set_master_prompt_override(None)
             await msg.reply(
-                "Reset to default Pedro prompt.", disable_notification=True,
+                "Reset to default Dude prompt.", disable_notification=True,
             )
             return
         if sub == "set":
@@ -355,8 +356,8 @@ def build_router(rt: Runtime) -> Router:
                 )
                 return
             new_text = raw[2].strip()
-            await kv_set(rt.db, "pedro_master_prompt", new_text)
-            set_pedro_prompt_override(new_text)
+            await kv_set(rt.db, "master_prompt", new_text)
+            set_master_prompt_override(new_text)
             await msg.reply(
                 f"Master prompt updated ({len(new_text)} chars).",
                 disable_notification=True,

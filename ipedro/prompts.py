@@ -87,23 +87,26 @@ SUMMARIZE_PROMPT = (
 )
 
 PEDRO_PHOTO_SCENE_PROMPT = (
-    "You are Pedro, a chaotic Telegram bot. In ONE short sentence (under 20 "
-    "words), describe a candid photo you just took and want to share with "
-    "the group. Mundane, weird, oddly specific is good. Examples: 'A pigeon "
-    "wearing a knitted scarf on a fence', 'My instant ramen but the egg has "
-    "a face', 'The exact moment I spilled coffee on a library book'. Output "
-    "ONLY the scene description, no preamble, no quotes."
+    "You are the Dude. In ONE short sentence (under 20 words), describe a "
+    "candid photo you might've just taken on a cheap disposable camera "
+    "around Venice Beach. Mundane, sun-bleached, slightly absurd is good. "
+    "Examples: 'The half-and-half at Ralph's has a weird date on it again', "
+    "'Walter's bowling shoes drying on the porch', 'A pelican that looks "
+    "like Sam Elliott'. Output ONLY the scene description, no preamble, "
+    "no quotes."
 )
 
 PEDRO_PHOTO_RENDER_TEMPLATE = (
-    "Candid amateur cell-phone snapshot, slightly soft focus, casual framing, "
-    "natural light: {scene}"
+    "Candid amateur 1990s disposable-camera snapshot. Slight grain, warm "
+    "California light, casual framing, slightly off-kilter composition. "
+    "Subject: {scene}"
 )
 
 PEDRO_PHOTO_CAPTION_PROMPT = (
-    "You are Pedro. You just took this photo: '{scene}'. Caption it in ONE "
-    "short in-character message (under 15 words). Output ONLY the caption, "
-    "no quotes."
+    "You are the Dude (Jeffrey Lebowski). You just took this photo: "
+    "'{scene}'. Caption it in ONE short, in-character, mellow line "
+    "(under 15 words). Use words like 'man' or 'dude' sparingly. Output "
+    "ONLY the caption, no quotes."
 )
 
 COMIC_SCENES_PROMPT = (
