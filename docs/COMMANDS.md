@@ -97,11 +97,55 @@ Send a literal message to a known chat as the bot.
 ### `/logs`
 Tail the in-DB command audit log.
 
-### `/memory_facts <chat_id>`
-List durable facts stored for that chat.
+### `/memory_facts [chat_id]`
+List durable facts stored for a chat. With no argument, shows an inline
+keyboard of every known chat — tap one to drill in. With a chat id, jumps
+straight to that chat's facts (backwards-compatible form).
+
+### `/memory_facts_all`
+Dump every stored fact across every known chat, grouped by chat with
+counts. Auto-splits into multiple replies when the total exceeds the
+4 KB Telegram message cap.
 
 ### `/memory_forget <fact_id>`
 Delete a specific durable fact.
+
+### `/memory_stats`
+Picker → per-chat memory diagnostics: message count broken down by role
+(user / assistant / system), oldest + newest message timestamps, fact
+count, summary count + freshness, message-embedding coverage %, embedding
+counts by `ref_kind` (message / fact / summary), pgvector availability,
+and "next auto-summary in N messages" so you can see how close the chat
+is to the summarization threshold.
+
+### `/memory_summary`
+Picker → shows the latest stored rolling summary for the chosen chat,
+including its id, the message id it covers up to, and when it was
+written.
+
+### `/memory_summarize_now`
+Picker → forces a summarization + fact-extraction pass on the chosen
+chat, ignoring the usual N-message threshold (still keeps the most recent
+`summary_keep_recent` messages out of the batch so they stay in live
+context). Reports the number of messages summarized, the new summary id
+and size, and the list of facts that the extraction step pulled out.
+Useful when debugging "why isn't the bot remembering X".
+
+### `/memory_search [chat_id] <query>`
+Semantic-search the embedding store. Two forms:
+
+- `/memory_search <chat_id> <query>` searches that chat directly.
+- `/memory_search <query>` stashes the query (TTL 5 minutes) and shows a
+  chat picker; tap a chat and the same query runs against it.
+
+Returns the top 10 hits with cosine similarity, ref kind (message / fact
+/ summary), ref id, and a 220-char content snippet. Same operator the
+runtime uses for in-prompt retrieval (`embedding <=> $2`), so the scores
+shown match what `context_builder.py` sees when deciding what to inject.
+
+### `/facts_chat`
+Legacy alias for the `/memory_facts` picker. Kept for muscle memory; new
+work should use `/memory_facts`.
 
 ### `/master_prompt show | set <text> | setfile | reset`
 Show, override, or reset the master persona prompt. Overrides persist in
