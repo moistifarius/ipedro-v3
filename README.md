@@ -55,31 +55,79 @@ cd docker && docker compose up -d --build
 
 ## Commands
 
-Full reference in [`docs/COMMANDS.md`](docs/COMMANDS.md).
+Full reference in [`docs/COMMANDS.md`](docs/COMMANDS.md). `/help` in any
+chat lists everything; bot admins get an extra admin section appended in
+a second message.
+
+### Public
 
 | Command | Purpose |
 |---|---|
-| `/start`, `/help` | Hello / list of commands |
-| `/a`, `/askai`, `/ask` | Quick one-shot answer (no memory write) |
-| `/aigen <prompt>` | Generate an image |
-| `/aiedit`, `/aivar` | Preserved aliases; require a backend SDK feature not yet wired |
+| `/start`, `/help`, `/get_chat_id` | Greeting, help, current chat id |
+| `/chat_config [field value]`, `/config` | Show / change this chat's settings (group admins / DM only); `/config` is an inline-keyboard wizard |
+| `/a`, `/askai`, `/ask <q>` | One-shot AI answer (no memory write) |
+| `/aigen`, `/generate <prompt>` | Generate an image |
+| `/aiedit`, `/aivar` | Preserved aliases; image edit/variation not wired to the current SDK |
 | `/aitranslate` | Translate a replied-to voice note (Whisper) |
 | `/catfact` | Dubious cat fact |
 | `/beneficiality` | Score whether the bot would butt in |
-| `/duckhunt` | Force-spawn a duck (if duckhunt is enabled) |
-| `/duckstats` | Per-chat leaderboard |
-| `/quackflag` | Current duck status |
-| `/chat_config` | Show/update per-chat settings (group admins / DM only) |
-| `/get_chat_id` | Show this chat id |
-| `/list_chat_ids` | Admin only |
-| `/send_message` | Admin only |
-| `/logs` | Admin only |
-| `/memory_facts`, `/memory_forget` | Admin only |
-| `/master_prompt`, `/ai_provider`, `/ai_model` | Admin only — see below |
+| `/whatdid @user` | Confidently summarize what someone's been up to |
+| `/tldr [duration]` | Summarize the recent chat (default 24h) |
+| `/mood` | Bot's current mood + word of the day |
+| `/haiku` | Haiku about the recent chat |
+| `/this_or_that A \| B` | Bot picks, dramatically |
+| `/echo @user [topic]` | Mimic that user's style |
+| `/roast @user`, `/compliment @user` | What it says on the tin |
+| `/lyric <line>` | Bot misheard it |
+| `/meme top \| bottom` | Generate a meme image |
+| `/duckhunt`, `/quackflag` | Spawn / check current duck |
+| `/duckstats`, `/duckfriends`, `/duckname <id> <name>`, `/global_leaderboard` | Duckhunt stats and management |
+| `/quote`, `/quotes`, `/unquote <id>` | Save / list / delete quotes |
+| `/catchphrases @user`, `/lexicon @user` | Their repeated phrases / top words |
+| `/heatmap` | Chat activity by hour-of-day |
+| `/whoslurking` | Users silent >7 days |
+| `/karma` | Chat karma leaderboard (👍/👎 reactions grant/dock) |
+| `/remind <duration> <text>` | Schedule a future reminder (e.g. `1h30m`) |
+| `/birthday MM-DD`, `/anniversary <name> MM-DD-YYYY`, `/dates` | Track / list chat dates |
+| `/poll Q \| A \| B \| …` | Create a poll |
+| `/confess <text>` | Anonymous confession (DM only, not admin-only) |
 
-Plus the ambient triggers from the original: `bang`, `bef`, `ignore`
-resolve an active duck (`bef` is AI-gated and may be refused — see below);
-`bad bot` / `bad pedro` as a reply to a bot message deletes that message.
+### Mod (chat admin or bot admin)
+
+| Command | Purpose |
+|---|---|
+| `/shutup @user [duration]`, `/unshutup @user` | Ignore / release a user |
+| `/snark_at @user`, `/unsnark @user` | Extra snark toward / release |
+| `/ungrudge @user` | Forgive an auto-grudge |
+| `/flags` | Active mod flags in this chat |
+
+### Bot admin (DM only)
+
+| Command | Purpose |
+|---|---|
+| `/list_chat_ids`, `/pick_chat` | Browse known chats (table / picker) |
+| `/send_message <chat_id> <text>` | Send a message to a chat as the bot |
+| `/logs [N] [filter]` | Tail the program log ring buffer |
+| `/cmdlog` | Command audit log from the DB |
+| `/cost [chat_id]` | AI spend last 7 days (works for either provider) |
+| `/master_prompt show \| set <text> \| setfile \| reset` | Global persona prompt (use `setfile` to upload a `.txt` for prompts >4079 chars) |
+| `/ai_provider show \| claude \| openai` | Switch text-completion provider |
+| `/ai_model show \| [provider] <model_id>` | Switch text model for the active (or named) provider |
+| `/quack_chat`, `/quack_all` | Admin-spawn ducks via picker / in every enabled chat |
+| `/memory_facts [chat_id]` | Inline picker (or direct lookup) of stored durable facts |
+| `/memory_facts_all` | Every stored fact across every known chat |
+| `/memory_forget <fact_id>` | Delete a fact |
+| `/memory_stats` | Per-chat memory diagnostics: counts, freshness, embedding coverage |
+| `/memory_summary` | Show the latest stored summary (picker) |
+| `/memory_summarize_now` | Force a summary + fact-extraction pass on a chat (picker) |
+| `/memory_search [chat_id] <query>` | Semantic-search the embedding store; shows top hits with similarity scores |
+| `/facts_chat` | Legacy alias for the `/memory_facts` picker |
+| `/debug_help` | Index of the debug-only commands |
+| `/debug_captcha`, `/debug_challenge`, `/debug_trivia`, `/debug_recipe`, `/debug_duck`, `/debug_sharephoto` | Force-trigger flows for testing |
+
+Plus the ambient triggers: `bang`, `bef`, `ignore` resolve an active duck
+(`bef` is AI-gated and may be refused — see below); `bad bot` / `bad
+dude` as a reply to a bot message deletes that message.
 
 ## AI providers
 

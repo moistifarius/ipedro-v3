@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import logging
+import time
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -19,11 +20,34 @@ from ipedro.duckhunt.spawner import (
 from ipedro.handlers.common import require_admin
 from ipedro.kv import kv_delete, kv_get, kv_set
 from ipedro.logging_setup import recent_log_lines
+from ipedro.memory.summarizer import force_summarize
 from ipedro.memory.tokens import count_tokens
 from ipedro.personas import (
     DEFAULT_DUDE_PROMPT, current_master_prompt, set_master_prompt_override,
 )
 from ipedro.runtime import Runtime
+
+# Admin-keyed stash for /memory_search: the user types `/memory_search <query>`
+# (the query can't fit in a 64-byte callback_data alongside the chat id), so
+# we park it here keyed by the admin's user_id and read it back when they
+# click a chat in the picker.
+_PENDING_SEARCH_QUERIES: dict[int, tuple[str, float]] = {}
+_SEARCH_QUERY_TTL = 300.0  # seconds; safety in case the admin never clicks
+
+
+def _stash_search_query(user_id: int, query: str) -> None:
+    _PENDING_SEARCH_QUERIES[user_id] = (query, time.time())
+
+
+def _pop_search_query(user_id: int) -> str | None:
+    entry = _PENDING_SEARCH_QUERIES.pop(user_id, None)
+    if entry is None:
+        return None
+    query, ts = entry
+    if time.time() - ts > _SEARCH_QUERY_TTL:
+        return None
+    return query
+
 
 # Upper bound on the byte size of an uploaded /master_prompt file. Anything
 # bigger than this is almost certainly a mistake — the in-context budget
@@ -584,26 +608,436 @@ def build_router(rt: Runtime) -> Router:
         lines.append(f"  TOTAL: ${total:.4f}")
         await msg.reply("\n".join(lines), disable_notification=True)
 
+    async def _send_facts_for(target: int, reply_to: Message | None,
+                              edit_in: Message | None) -> None:
+        """Format and send the fact list for one chat.
+
+        Either replies to `reply_to` (typed-arg path) or edits `edit_in`
+        in place (callback path).
+        """
+        facts = await rt.memory.list_facts(target, limit=50)
+        if not facts:
+            body = f"No facts stored for chat {target}."
+        else:
+            head = f"Facts for chat {target} ({len(facts)}):\n"
+            body = head + "\n".join(f"[{f.id}] {f.fact}" for f in facts)
+        body = body[:4000]
+        if reply_to:
+            await reply_to.reply(body, disable_notification=True)
+        elif edit_in:
+            try:
+                await edit_in.edit_text(body)
+            except TelegramBadRequest:
+                pass
+
     @r.message(Command("memory_facts"))
     async def memory_facts(msg: Message) -> None:
-        """Inspect durable facts for a chat. Admin-only."""
+        """Inspect durable facts. /memory_facts opens a chat picker;
+        /memory_facts <chat_id> jumps straight to that chat."""
         if not await require_admin(msg, admin_ids):
             return
         args = (msg.text or "").split()
-        if len(args) < 2:
-            await msg.reply("Usage: /memory_facts <chat_id>", disable_notification=True)
+        if len(args) >= 2:
+            try:
+                target = int(args[1])
+            except ValueError:
+                await msg.reply("Invalid chat id.", disable_notification=True)
+                return
+            await _send_facts_for(target, reply_to=msg, edit_in=None)
+            return
+        chats = await rt.chats.list_known()
+        kb = _chat_picker(chats, "mfacts")
+        if kb is None:
+            await msg.reply("No known chats yet.", disable_notification=True)
+            return
+        await msg.reply(
+            "Pick a chat to show stored facts for:",
+            reply_markup=kb,
+            disable_notification=True,
+        )
+
+    @r.callback_query(F.data.startswith("mfacts:"))
+    async def on_memory_facts(cb: CallbackQuery) -> None:
+        if not await _gate_callback(cb):
             return
         try:
-            target = int(args[1])
-        except ValueError:
-            await msg.reply("Invalid chat id.", disable_notification=True)
+            target = int(cb.data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            await cb.answer("Bad selection.", show_alert=True)
             return
-        facts = await rt.memory.list_facts(target, limit=50)
-        if not facts:
-            await msg.reply("No facts stored for that chat.", disable_notification=True)
+        await _send_facts_for(target, reply_to=None, edit_in=cb.message)
+        await cb.answer()
+
+    @r.message(Command("memory_facts_all"))
+    async def memory_facts_all(msg: Message) -> None:
+        """Dump every fact across every known chat, grouped by chat."""
+        if not await require_admin(msg, admin_ids):
             return
-        out = "\n".join(f"[{f.id}] {f.fact}" for f in facts)
-        await msg.reply(out[:4000], disable_notification=True)
+        chats = await rt.chats.list_known()
+        if not chats:
+            await msg.reply("No known chats yet.", disable_notification=True)
+            return
+        sections: list[str] = []
+        total_facts = 0
+        chats_with_facts = 0
+        for c in chats:
+            facts = await rt.memory.list_facts(c["chat_id"], limit=100)
+            if not facts:
+                continue
+            chats_with_facts += 1
+            total_facts += len(facts)
+            head = f"━ {_chat_label(c)} [{c['chat_id']}] ({len(facts)}):"
+            body = "\n".join(f"  [{f.id}] {f.fact}" for f in facts)
+            sections.append(f"{head}\n{body}")
+        if not sections:
+            await msg.reply(
+                "No facts stored in any known chat yet.",
+                disable_notification=True,
+            )
+            return
+        footer = (
+            f"\n\nTotal: {total_facts} facts across "
+            f"{chats_with_facts} chat(s)."
+        )
+        # Telegram caps outbound at 4096; chunk sections so each reply fits.
+        chunks: list[str] = []
+        current = ""
+        for section in sections:
+            piece = ("\n\n" if current else "") + section
+            if len(current) + len(piece) > 3900:
+                chunks.append(current)
+                current = section
+            else:
+                current += piece
+        if current:
+            chunks.append(current)
+        # Footer attaches to the last chunk if it fits, else gets its own.
+        if chunks and len(chunks[-1]) + len(footer) <= 3900:
+            chunks[-1] += footer
+        else:
+            chunks.append(footer.lstrip())
+        for chunk in chunks:
+            await msg.reply(chunk, disable_notification=True)
+
+    @r.message(Command("memory_stats"))
+    async def memory_stats(msg: Message) -> None:
+        """Picker → per-chat memory diagnostics: counts, freshness,
+        embedding coverage, summary state."""
+        if not await require_admin(msg, admin_ids):
+            return
+        chats = await rt.chats.list_known()
+        kb = _chat_picker(chats, "mstats")
+        if kb is None:
+            await msg.reply("No known chats yet.", disable_notification=True)
+            return
+        await msg.reply(
+            "Pick a chat for memory stats:",
+            reply_markup=kb,
+            disable_notification=True,
+        )
+
+    @r.callback_query(F.data.startswith("mstats:"))
+    async def on_memory_stats(cb: CallbackQuery) -> None:
+        if not await _gate_callback(cb):
+            return
+        try:
+            target = int(cb.data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            await cb.answer("Bad selection.", show_alert=True)
+            return
+        # Per-chat aggregates via direct SQL (admin-only diagnostic, not a
+        # hot path; cheaper than adding a half-dozen one-off repo methods).
+        msg_rows = await rt.db.fetch(
+            "SELECT role, COUNT(*) AS n, MIN(created_at) AS oldest, "
+            "MAX(created_at) AS newest FROM messages "
+            "WHERE chat_id = $1 GROUP BY role",
+            target,
+        )
+        emb_rows = await rt.db.fetch(
+            "SELECT ref_kind, COUNT(*) AS n FROM embeddings "
+            "WHERE chat_id = $1 GROUP BY ref_kind",
+            target,
+        )
+        fact_count = await rt.db.fetchval(
+            "SELECT COUNT(*) FROM facts WHERE chat_id = $1", target,
+        )
+        summary_row = await rt.db.fetchrow(
+            "SELECT COUNT(*) AS n, MAX(created_at) AS newest "
+            "FROM summaries WHERE chat_id = $1",
+            target,
+        )
+        latest_summary = await rt.memory.latest_summary(target)
+        # Embedding coverage % for messages.
+        msg_total = sum(r["n"] for r in msg_rows) or 0
+        msg_embed_count = next(
+            (r["n"] for r in emb_rows if r["ref_kind"] == "message"), 0,
+        )
+        coverage = (msg_embed_count / msg_total * 100) if msg_total else 0
+        roles_line = ", ".join(
+            f"{r['role']}={r['n']}" for r in msg_rows
+        ) or "(none)"
+        oldest = min(
+            (r["oldest"] for r in msg_rows if r["oldest"]), default=None,
+        )
+        newest = max(
+            (r["newest"] for r in msg_rows if r["newest"]), default=None,
+        )
+        emb_breakdown = ", ".join(
+            f"{r['ref_kind']}={r['n']}" for r in emb_rows
+        ) or "(none)"
+        next_summary_at = rt.settings.summary_trigger_messages
+        since_last_summary = 0
+        if latest_summary:
+            since_last_summary = await rt.memory.messages.count_since(
+                target, latest_summary.covers_until_id,
+            )
+        else:
+            since_last_summary = msg_total
+        lines = [
+            f"📊 Memory stats — chat {target}",
+            "",
+            f"Messages: {msg_total} ({roles_line})",
+            f"  oldest: {oldest}",
+            f"  newest: {newest}",
+            "",
+            f"Facts: {fact_count}",
+            f"Summaries: {summary_row['n']} (latest at {summary_row['newest']})",
+            f"  next auto-summarize in: "
+            f"{max(0, next_summary_at - since_last_summary)} message(s)"
+            f"  (have {since_last_summary} since last)",
+            "",
+            f"Embeddings: {emb_breakdown}",
+            f"  message embedding coverage: {coverage:.1f}% "
+            f"({msg_embed_count}/{msg_total})",
+            f"  pgvector available: {rt.memory.pgvector_available}",
+            f"  embedding model: {rt.openai.embedding_model} "
+            f"(dim={rt.openai.embedding_dim})",
+        ]
+        body = "\n".join(lines)
+        if cb.message:
+            try:
+                await cb.message.edit_text(body[:4000])
+            except TelegramBadRequest:
+                pass
+        await cb.answer()
+
+    @r.message(Command("memory_summary"))
+    async def memory_summary(msg: Message) -> None:
+        """Picker → show the latest stored summary for the chat."""
+        if not await require_admin(msg, admin_ids):
+            return
+        chats = await rt.chats.list_known()
+        kb = _chat_picker(chats, "msum")
+        if kb is None:
+            await msg.reply("No known chats yet.", disable_notification=True)
+            return
+        await msg.reply(
+            "Pick a chat to show its latest summary:",
+            reply_markup=kb,
+            disable_notification=True,
+        )
+
+    @r.callback_query(F.data.startswith("msum:"))
+    async def on_memory_summary(cb: CallbackQuery) -> None:
+        if not await _gate_callback(cb):
+            return
+        try:
+            target = int(cb.data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            await cb.answer("Bad selection.", show_alert=True)
+            return
+        summary = await rt.memory.latest_summary(target)
+        if summary is None:
+            body = f"No summary stored for chat {target} yet."
+        else:
+            head = (
+                f"Latest summary for chat {target}\n"
+                f"id={summary.id} covers_until={summary.covers_until_id} "
+                f"at {summary.created_at}\n\n"
+            )
+            body = head + summary.summary
+        if cb.message:
+            try:
+                await cb.message.edit_text(body[:4000])
+            except TelegramBadRequest:
+                pass
+        await cb.answer()
+
+    @r.message(Command("memory_summarize_now"))
+    async def memory_summarize_now(msg: Message) -> None:
+        """Picker → force a summarization + fact-extraction pass on a chat,
+        ignoring the message-count threshold."""
+        if not await require_admin(msg, admin_ids):
+            return
+        chats = await rt.chats.list_known()
+        kb = _chat_picker(chats, "mforce")
+        if kb is None:
+            await msg.reply("No known chats yet.", disable_notification=True)
+            return
+        await msg.reply(
+            "Pick a chat to force-summarize:",
+            reply_markup=kb,
+            disable_notification=True,
+        )
+
+    @r.callback_query(F.data.startswith("mforce:"))
+    async def on_memory_summarize_now(cb: CallbackQuery) -> None:
+        if not await _gate_callback(cb):
+            return
+        try:
+            target = int(cb.data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            await cb.answer("Bad selection.", show_alert=True)
+            return
+        await cb.answer("Running summarizer…")
+        try:
+            report = await force_summarize(
+                rt.memory, rt.openai, rt.settings, target,
+            )
+        except Exception as exc:
+            log.warning("force_summarize failed for chat %s: %s", target, exc)
+            if cb.message:
+                try:
+                    await cb.message.edit_text(
+                        f"Summarizer failed: {exc}",
+                    )
+                except TelegramBadRequest:
+                    pass
+            return
+        if not report.get("ok"):
+            body = (
+                f"Skipped chat {target}: {report.get('reason', 'unknown')}"
+            )
+        else:
+            facts_added = report.get("facts_added", [])
+            facts_block = (
+                "\n".join(f"  - {f}" for f in facts_added)
+                if facts_added else "  (none)"
+            )
+            body = (
+                f"Force-summarized chat {target}.\n"
+                f"  messages summarized: {report['messages_summarized']}\n"
+                f"  summary id: {report['summary_id']} "
+                f"({report['summary_chars']} chars)\n"
+                f"  facts added ({len(facts_added)}):\n{facts_block}"
+            )
+        if cb.message:
+            try:
+                await cb.message.edit_text(body[:4000])
+            except TelegramBadRequest:
+                pass
+
+    @r.message(Command("memory_search"))
+    async def memory_search(msg: Message) -> None:
+        """Semantic-search the embedding store.
+
+        /memory_search <query>             → picker, then search the chosen chat
+        /memory_search <chat_id> <query>   → search that chat directly
+        """
+        if not await require_admin(msg, admin_ids):
+            return
+        parts = (msg.text or "").split(None, 2)
+        if len(parts) < 2:
+            await msg.reply(
+                "Usage: /memory_search <query>\n"
+                "   or: /memory_search <chat_id> <query>",
+                disable_notification=True,
+            )
+            return
+        # Try the two-arg form first (chat_id then query).
+        target: int | None = None
+        query: str
+        if len(parts) >= 3:
+            try:
+                target = int(parts[1])
+                query = parts[2].strip()
+            except ValueError:
+                # `parts[1]` isn't an int → treat whole tail as the query.
+                query = (parts[1] + " " + parts[2]).strip()
+        else:
+            query = parts[1].strip()
+        if not query:
+            await msg.reply("Empty query.", disable_notification=True)
+            return
+        if target is not None:
+            await _run_memory_search(msg, target, query)
+            return
+        # No chat_id → stash the query and let the admin pick a chat.
+        if msg.from_user is None:
+            await msg.reply("Can't identify caller.", disable_notification=True)
+            return
+        _stash_search_query(msg.from_user.id, query)
+        chats = await rt.chats.list_known()
+        kb = _chat_picker(chats, "msrch")
+        if kb is None:
+            await msg.reply("No known chats yet.", disable_notification=True)
+            return
+        await msg.reply(
+            f"Search query stashed ({len(query)} chars). "
+            "Pick a chat to search:",
+            reply_markup=kb,
+            disable_notification=True,
+        )
+
+    async def _run_memory_search(target_msg: Message, chat_id: int,
+                                 query: str) -> None:
+        hits = await rt.memory.semantic_search(chat_id, query, k=10)
+        if not hits:
+            await target_msg.reply(
+                f"No semantic hits in chat {chat_id} for "
+                f"{query!r} (pgvector available: "
+                f"{rt.memory.pgvector_available}).",
+                disable_notification=True,
+            )
+            return
+        head = (
+            f"🔎 Top {len(hits)} hits in chat {chat_id} for {query!r}:\n"
+        )
+        body_lines = []
+        for h in hits:
+            sim = h.get("similarity", 0)
+            kind = h.get("ref_kind", "?")
+            ref_id = h.get("ref_id", "?")
+            content = (h.get("content") or "").replace("\n", " ")
+            if len(content) > 220:
+                content = content[:220] + "…"
+            body_lines.append(
+                f"  [{sim:.3f}] ({kind} #{ref_id}) {content}"
+            )
+        await target_msg.reply(
+            (head + "\n".join(body_lines))[:4000],
+            disable_notification=True,
+        )
+
+    @r.callback_query(F.data.startswith("msrch:"))
+    async def on_memory_search(cb: CallbackQuery) -> None:
+        if not await _gate_callback(cb):
+            return
+        try:
+            target = int(cb.data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            await cb.answer("Bad selection.", show_alert=True)
+            return
+        if cb.from_user is None:
+            await cb.answer("Can't identify caller.", show_alert=True)
+            return
+        query = _pop_search_query(cb.from_user.id)
+        if query is None:
+            await cb.answer(
+                "Search query expired — re-run /memory_search.",
+                show_alert=True,
+            )
+            return
+        await cb.answer("Searching…")
+        # Replace the picker with a placeholder while we work.
+        if cb.message:
+            try:
+                await cb.message.edit_text(
+                    f"Searching chat {target} for {query!r}…",
+                )
+            except TelegramBadRequest:
+                pass
+            await _run_memory_search(cb.message, target, query)
 
     @r.message(Command("memory_forget"))
     async def memory_forget(msg: Message) -> None:
