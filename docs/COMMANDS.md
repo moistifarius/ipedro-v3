@@ -100,7 +100,7 @@ Send a literal message to a known chat as the bot.
 ### `/logs`
 Tail the in-DB command audit log.
 
-### `/duckstats_reset [chat_id] [user_id | all]`
+### `/duckstats_reset [chat_id] [user | all]`
 Clear duckhunt scoreboard rows. Three forms:
 
 - `/duckstats_reset` — picker of every known chat; tap one to see its
@@ -108,13 +108,37 @@ Clear duckhunt scoreboard rows. Three forms:
   "Reset ALL" to wipe the chat's entire leaderboard.
 - `/duckstats_reset <chat_id>` — skip the chat picker; jumps straight
   to the leaderboard for that chat.
-- `/duckstats_reset <chat_id> <user_id>` — direct reset (no menus).
+- `/duckstats_reset <chat_id> <user>` — direct reset (no menus); `<user>`
+  may be a numeric Telegram id, `@username`, or a bare display name
+  (case-insensitive).
 - `/duckstats_reset <chat_id> all` — direct wipe of the chat's whole
-  leaderboard.
+  leaderboard (now confirms with a Y/N prompt when triggered from the
+  picker; the typed-arg form still wipes immediately).
 
 Only deletes from `duck_stats` (the per-user aggregate row). Friendship
 roster and named ducks live in `duck_events` and are NOT touched —
 `/duckfriends` will still show the same list afterwards.
+
+### `/duckstats_edit [chat_id] [user]`
+Interactive editor for one user's duckhunt stats. Three forms:
+
+- `/duckstats_edit` — chat picker → user picker → editor.
+- `/duckstats_edit <chat_id>` — skip the chat picker.
+- `/duckstats_edit <chat_id> <user>` — direct, where `<user>` is a
+  numeric Telegram id, `@username`, or display name (case-insensitive).
+
+The editor shows points / killed / befriended / misses / streak /
+best_streak. Tapping a field opens a delta picker with -100 / -10 / -1
+/ +1 / +10 / +100 buttons plus "Set to 0" and "Set to custom…".
+"Set to custom…" parks a wait-for-DM state (60s TTL) — the admin's next
+plain-numeric DM is parsed and applied. All edits clamp at 0.
+`display_name` and `last_action_at` are auto-managed and not editable.
+
+### `/manage`
+One-screen menu of every admin operation. Five categories (Memory /
+Duckhunt / AI providers / Chats / Debug & status) each opening a
+sub-menu of buttons that fire the same underlying handlers as the
+individual slash commands.
 
 ### `/memory_facts [chat_id]`
 List durable facts stored for a chat. With no argument, shows an inline
