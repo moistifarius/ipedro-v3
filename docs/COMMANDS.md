@@ -97,6 +97,22 @@ Send a literal message to a known chat as the bot.
 ### `/logs`
 Tail the in-DB command audit log.
 
+### `/duckstats_reset [chat_id] [user_id | all]`
+Clear duckhunt scoreboard rows. Three forms:
+
+- `/duckstats_reset` — picker of every known chat; tap one to see its
+  top-20 leaderboard, then tap a user to reset just them, or tap
+  "Reset ALL" to wipe the chat's entire leaderboard.
+- `/duckstats_reset <chat_id>` — skip the chat picker; jumps straight
+  to the leaderboard for that chat.
+- `/duckstats_reset <chat_id> <user_id>` — direct reset (no menus).
+- `/duckstats_reset <chat_id> all` — direct wipe of the chat's whole
+  leaderboard.
+
+Only deletes from `duck_stats` (the per-user aggregate row). Friendship
+roster and named ducks live in `duck_events` and are NOT touched —
+`/duckfriends` will still show the same list afterwards.
+
 ### `/memory_facts [chat_id]`
 List durable facts stored for a chat. With no argument, shows an inline
 keyboard of every known chat — tap one to drill in. With a chat id, jumps
