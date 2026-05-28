@@ -25,6 +25,7 @@ class ChatConfig:
     memory_enabled: bool
     share_photo_enabled: bool = False
     comic_enabled: bool = False
+    fortune_enabled: bool = False
 
 
 class ChatRepo:
@@ -67,6 +68,7 @@ class ChatRepo:
             memory_enabled=row["memory_enabled"],
             share_photo_enabled=bool(row["share_photo_enabled"]),
             comic_enabled=bool(row["comic_enabled"]),
+            fortune_enabled=bool(row["fortune_enabled"]),
         )
 
     async def upsert_default_config(
@@ -102,13 +104,14 @@ class ChatRepo:
             memory_enabled=row["memory_enabled"],
             share_photo_enabled=bool(row["share_photo_enabled"]),
             comic_enabled=bool(row["comic_enabled"]),
+            fortune_enabled=bool(row["fortune_enabled"]),
         )
 
     async def update_config(self, chat_id: int, **fields: Any) -> None:
         allowed = {
             "response_policy", "ambient_probability", "persona", "persona_custom",
             "duckhunt_enabled", "voice_transcribe", "memory_enabled",
-            "share_photo_enabled", "comic_enabled",
+            "share_photo_enabled", "comic_enabled", "fortune_enabled",
         }
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:

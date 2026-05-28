@@ -20,8 +20,8 @@ from aiogram.types import (
 
 from ipedro.handlers.common import display_name, get_or_create_chat_config
 from ipedro.prompts import (
-    COMPLIMENT_PROMPT, ECHO_PROMPT, HAIKU_PROMPT, ROAST_PROMPT,
-    THIS_OR_THAT_PROMPT, TLDR_PROMPT,
+    COMPLIMENT_PROMPT, ECHO_PROMPT, HAIKU_PROMPT, MISHEARD_LYRIC_PROMPT,
+    ROAST_PROMPT, THIS_OR_THAT_PROMPT, TLDR_PROMPT,
 )
 from ipedro.reminders import add_reminder, parse_duration
 from ipedro.runtime import Runtime
@@ -602,6 +602,62 @@ def build_router(rt: Runtime) -> Router:
             disable_notification=True,
         )
 
+    @r.message(Command("lyric"))
+    async def lyric(msg: Message) -> None:
+        """/lyric <line> — Pedro confidently mishears the lyric."""
+        await get_or_create_chat_config(rt, msg)
+        parts = (msg.text or "").split(None, 1)
+        if len(parts) < 2:
+            await msg.reply(
+                "Usage: /lyric <a line of lyrics>",
+                disable_notification=True,
+            )
+            return
+        line = parts[1].strip()[:300]
+        await rt.bot.send_chat_action(msg.chat.id, "typing")
+        out = await rt.openai.short_completion(
+            MISHEARD_LYRIC_PROMPT.format(line=line),
+            max_tokens=120, chat_id=msg.chat.id,
+        )
+        if not out:
+            await msg.reply("(my ears are clean today)", disable_notification=True)
+            return
+        await msg.reply(
+            f"I'm pretty sure they actually say:\n\n\"{out}\"",
+            disable_notification=True,
+        )
+
+    @r.message(Command("whoslurking"))
+    async def whoslurking(msg: Message) -> None:
+        """/whoslurking — users who've spoken here but not in the last 7 days."""
+        await get_or_create_chat_config(rt, msg)
+        rows = await rt.db.fetch(
+            """
+            SELECT m.user_id,
+                   MAX(m.created_at) AS last_seen,
+                   COALESCE(MAX(u.first_name), MAX(u.username)) AS name
+              FROM messages m
+              LEFT JOIN users u ON u.user_id = m.user_id
+             WHERE m.chat_id = $1 AND m.user_id IS NOT NULL
+             GROUP BY m.user_id
+            HAVING MAX(m.created_at) < NOW() - INTERVAL '7 days'
+             ORDER BY last_seen DESC
+             LIMIT 20
+            """,
+            msg.chat.id,
+        )
+        if not rows:
+            await msg.reply(
+                "No lurkers. Everyone's recently said something.",
+                disable_notification=True,
+            )
+            return
+        lines = ["👻 Lurkers (no messages in 7+ days):"]
+        for r_ in rows:
+            since = r_["last_seen"].strftime("%Y-%m-%d")
+            lines.append(f"  {r_['name'] or r_['user_id']} — last seen {since}")
+        await msg.reply("\n".join(lines), disable_notification=True)
+
     @r.message(Command("meme"))
     async def meme(msg: Message) -> None:
         """/meme top text | bottom text (or just a single line)."""
@@ -663,6 +719,7 @@ def build_router(rt: Runtime) -> Router:
             "duckhunt": ("duckhunt_enabled", not cfg.duckhunt_enabled),
             "sharephoto": ("share_photo_enabled", not cfg.share_photo_enabled),
             "comic": ("comic_enabled", not cfg.comic_enabled),
+            "fortune": ("fortune_enabled", not cfg.fortune_enabled),
             "voice": ("voice_transcribe", not cfg.voice_transcribe),
             "memory": ("memory_enabled", not cfg.memory_enabled),
         }
@@ -708,9 +765,10 @@ def _config_keyboard(cfg) -> InlineKeyboardMarkup:
         ],
         [
             b(f"Comic: {on if cfg.comic_enabled else off}", "comic"),
-            b(f"Voice: {on if cfg.voice_transcribe else off}", "voice"),
+            b(f"Fortune: {on if cfg.fortune_enabled else off}", "fortune"),
         ],
         [
+            b(f"Voice: {on if cfg.voice_transcribe else off}", "voice"),
             b(f"Memory: {on if cfg.memory_enabled else off}", "memory"),
         ],
         [

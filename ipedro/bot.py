@@ -24,10 +24,13 @@ from ipedro.handlers import chat as chat_h
 from ipedro.handlers import debug as debug_h
 from ipedro.handlers import duckhunt as duck_h
 from ipedro.handlers import karma as karma_h
+from ipedro.handlers import mod as mod_h
 from ipedro.handlers import utility as utility_h
 from ipedro.logging_setup import configure_logging
 from ipedro.celebrations import run_celebrations_loop
 from ipedro.comic import run_comic_loop
+from ipedro.kv import kv_get
+from ipedro.personas import set_pedro_prompt_override
 from ipedro.memory.store import MemoryStore
 from ipedro.openai_client import OpenAIClient
 from ipedro.persona_state import PersonaStateService
@@ -58,6 +61,9 @@ async def build_runtime(settings: Settings) -> Runtime:
         embedding_dim=settings.openai_embedding_dim,
     )
     openai.attach_usage_db(db)
+
+    # Pick up any persisted master-prompt override before serving requests.
+    set_pedro_prompt_override(await kv_get(db, "pedro_master_prompt"))
     memory = MemoryStore(db=db, openai=openai, pgvector_available=pgvector_available)
     return Runtime(
         settings=settings,
@@ -81,6 +87,7 @@ def build_dispatcher(rt: Runtime) -> Dispatcher:
     dp.include_router(basics_h.build_router(rt))
     dp.include_router(admin_h.build_router(rt))
     dp.include_router(debug_h.build_router(rt))
+    dp.include_router(mod_h.build_router(rt))
     dp.include_router(utility_h.build_router(rt))
     dp.include_router(karma_h.build_router(rt))
     dp.include_router(ai_h.build_router(rt))

@@ -17,7 +17,7 @@ from aiogram import Bot
 
 from ipedro.db.pool import Database
 from ipedro.openai_client import OpenAIClient
-from ipedro.prompts import YEAR_RETRO_PROMPT
+from ipedro.prompts import FORTUNE_PROMPT, YEAR_RETRO_PROMPT
 
 log = logging.getLogger(__name__)
 
@@ -103,6 +103,40 @@ async def _maybe_yearly_retro(
             log.warning("Retro send failed for %s: %s", chat_id, exc)
 
 
+async def _maybe_daily_fortune(
+    bot: Bot, db: Database, openai: OpenAIClient,
+) -> None:
+    """Once per UTC day per opted-in chat, post a short fortune."""
+    today = datetime.now(timezone.utc).date()
+    chats = await db.fetch(
+        "SELECT c.chat_id FROM chats c "
+        "JOIN chat_config cfg ON cfg.chat_id = c.chat_id "
+        "LEFT JOIN chat_state cs ON cs.chat_id = c.chat_id "
+        "WHERE cfg.fortune_enabled = TRUE "
+        "  AND (cs.last_fortune_date IS NULL OR cs.last_fortune_date < $1)",
+        today,
+    )
+    for c in chats:
+        chat_id = c["chat_id"]
+        fortune = await openai.short_completion(
+            FORTUNE_PROMPT, max_tokens=60, chat_id=chat_id,
+        )
+        if not fortune:
+            continue
+        try:
+            await bot.send_message(chat_id, f"🥠 {fortune}")
+            await db.execute(
+                "INSERT INTO chat_state (chat_id, last_fortune_date) "
+                "VALUES ($1, $2) "
+                "ON CONFLICT (chat_id) DO UPDATE "
+                "SET last_fortune_date = EXCLUDED.last_fortune_date",
+                chat_id, today,
+            )
+            log.info("Fortune posted in chat %s.", chat_id)
+        except Exception as exc:  # pragma: no cover
+            log.warning("Fortune send failed for %s: %s", chat_id, exc)
+
+
 async def run_ambient_loops(
     bot: Bot, db: Database, openai: OpenAIClient, stop: asyncio.Event,
 ) -> None:
@@ -111,6 +145,7 @@ async def run_ambient_loops(
         try:
             await _maybe_surface_confession(bot, db)
             await _maybe_yearly_retro(bot, db, openai)
+            await _maybe_daily_fortune(bot, db, openai)
             wait = _TICK_SECONDS
         except Exception as exc:
             log.exception("Ambient loop iteration failed: %s", exc)

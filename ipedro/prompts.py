@@ -125,6 +125,20 @@ COMIC_RENDER_TEMPLATE = (
     "Panel 4: {p4}"
 )
 
+MISHEARD_LYRIC_PROMPT = (
+    "Take the song lyric below. Pretend you misheard it but plausibly — "
+    "use real words that sound similar, keep the rhythm, end up with a "
+    "phrase that's slightly absurd or domestic. Output ONLY your misheard "
+    "version, no preamble, no quotes.\n\n"
+    "Lyric: {line}"
+)
+
+FORTUNE_PROMPT = (
+    "Generate a single fortune-cookie style fortune. One sentence (max 20 "
+    "words). Be weird, oddly specific, oracular. Avoid generic 'good things "
+    "come' clichés. Output ONLY the fortune, no preamble, no number."
+)
+
 HAIKU_PROMPT = (
     "Compose a single haiku (5-7-5 syllables, three lines) inspired by the "
     "chat snippet below. Be evocative, a little weird, in character as a "

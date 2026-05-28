@@ -301,6 +301,36 @@ CREATE INDEX IF NOT EXISTS confessions_unsurfaced_idx
 ALTER TABLE chat_state
     ADD COLUMN IF NOT EXISTS last_retrospective_year INTEGER;
 
+-- Per-(chat,user) moderation flags ---------------------------------------
+-- One row per active flag. flag is 'shutup' | 'snark' | 'grudge'. The
+-- grudge flag is auto-managed (insults add it, decays after 24h);
+-- shutup/snark are admin-set via /shutup / /snark_at.
+CREATE TABLE IF NOT EXISTS user_flags (
+    chat_id    BIGINT NOT NULL REFERENCES chats(chat_id) ON DELETE CASCADE,
+    user_id    BIGINT NOT NULL,
+    flag       TEXT NOT NULL,
+    expires_at TIMESTAMPTZ,
+    note       TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (chat_id, user_id, flag)
+);
+
+CREATE INDEX IF NOT EXISTS user_flags_lookup_idx
+    ON user_flags (chat_id, user_id, flag);
+
+-- Daily fortune cookie opt-in + last-posted-date
+ALTER TABLE chat_config
+    ADD COLUMN IF NOT EXISTS fortune_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE chat_state
+    ADD COLUMN IF NOT EXISTS last_fortune_date DATE;
+
+-- Generic key/value store for global tunables (e.g. the master Pedro prompt).
+CREATE TABLE IF NOT EXISTS kv_store (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- One outstanding bef challenge per (chat, user). The user must reply to
 -- `prompt_message_id` with an answer that the AI judge accepts before they
 -- can attempt /bef again. There is no time-based cooldown on bef itself;

@@ -18,6 +18,7 @@ from ipedro.memory.context_builder import build_context
 from ipedro.memory.summarizer import maybe_summarize
 from ipedro.prompts import CAT_FACT_PROMPT, DUCK_BEF_CHALLENGE_JUDGE_PROMPT
 from ipedro.runtime import Runtime
+from ipedro.user_flags import has_flag, maybe_auto_grudge
 
 log = logging.getLogger(__name__)
 
@@ -231,6 +232,18 @@ def build_router(rt: Runtime) -> Router:
         bot_id = bot_me.id
         bot_username = bot_me.username
 
+        # Shut-up gate: silently drop everything from a shutup'd user.
+        from_user_id = msg.from_user.id if msg.from_user else None
+        if await has_flag(rt.db, msg.chat.id, from_user_id, "shutup"):
+            return
+
+        # Auto-grudge: insults toward the bot earn a 24h snark flag.
+        if await maybe_auto_grudge(rt.db, msg.chat.id, from_user_id, text):
+            log.info(
+                "Auto-grudge added: chat=%s user=%s text=%r",
+                msg.chat.id, from_user_id, text[:80],
+            )
+
         # Record the inbound message (token-counted, optionally embedded).
         if cfg.memory_enabled:
             await rt.memory.record_message(
@@ -238,7 +251,7 @@ def build_router(rt: Runtime) -> Router:
                 role="user",
                 content=text,
                 message_id=msg.message_id,
-                user_id=msg.from_user.id if msg.from_user else None,
+                user_id=from_user_id,
             )
 
         # "thanks pedro" → passive-aggressive line. Intercepts before the
@@ -323,7 +336,20 @@ def build_router(rt: Runtime) -> Router:
         await rt.bot.send_chat_action(msg.chat.id, "typing")
 
         state = await rt.persona_state.current(msg.chat.id)
-        extra = rt.persona_state.to_system_prompt(state) or None
+        extra_bits = []
+        base_extra = rt.persona_state.to_system_prompt(state)
+        if base_extra:
+            extra_bits.append(base_extra)
+        snark_flag = await has_flag(rt.db, msg.chat.id, from_user_id, "snark")
+        grudge_flag = await has_flag(rt.db, msg.chat.id, from_user_id, "grudge")
+        if snark_flag or grudge_flag:
+            why = "they recently insulted you" if grudge_flag else "by request"
+            extra_bits.append(
+                f"The user you're replying to right now is on your shit list "
+                f"({why}). Be markedly snarkier and more dismissive to them, "
+                f"without being cruel. Don't acknowledge the list."
+            )
+        extra = "\n\n".join(extra_bits) or None
         ctx = await build_context(
             store=rt.memory,
             settings=rt.settings,

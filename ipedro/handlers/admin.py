@@ -16,6 +16,11 @@ from ipedro.duckhunt.spawner import (
     build_quack_message, duckhunt_enabled_chat_ids, duckhunt_enabled_chats,
 )
 from ipedro.handlers.common import require_admin
+from ipedro.kv import kv_delete, kv_get, kv_set
+from ipedro.logging_setup import recent_log_lines
+from ipedro.personas import (
+    DEFAULT_PEDRO_PROMPT, current_pedro_prompt, set_pedro_prompt_override,
+)
 from ipedro.runtime import Runtime
 
 log = logging.getLogger(__name__)
@@ -96,6 +101,50 @@ def build_router(rt: Runtime) -> Router:
 
     @r.message(Command("logs"))
     async def logs_cmd(msg: Message) -> None:
+        """Tail the bot's actual program logs.
+
+        Usage: /logs [N] [filter]   e.g. /logs 50 spawner
+        N defaults to 50, filter is a case-insensitive substring.
+        """
+        if not await require_admin(msg, admin_ids):
+            return
+        parts = (msg.text or "").split(None, 2)
+        limit = 50
+        needle: str | None = None
+        if len(parts) >= 2:
+            try:
+                limit = max(1, min(200, int(parts[1])))
+            except ValueError:
+                needle = parts[1]
+        if len(parts) >= 3:
+            needle = parts[2]
+        lines = recent_log_lines(limit=limit, contains=needle)
+        if not lines:
+            await msg.reply(
+                "No log lines (yet, or none match the filter).",
+                disable_notification=True,
+            )
+            return
+        body = "\n".join(lines)
+        # Telegram caps a single message at 4096 chars; chunk and send.
+        chunks: list[str] = []
+        buf = ""
+        for ln in lines:
+            extra = ln + "\n"
+            if len(buf) + len(extra) > 3800:
+                chunks.append(buf)
+                buf = extra
+            else:
+                buf += extra
+        if buf:
+            chunks.append(buf)
+        for i, chunk in enumerate(chunks[:5], 1):
+            header = f"-- logs ({i}/{len(chunks)}) --\n" if len(chunks) > 1 else ""
+            await msg.reply(header + chunk, disable_notification=True)
+
+    @r.message(Command("cmdlog"))
+    async def cmdlog(msg: Message) -> None:
+        """Command audit log (was previously /logs)."""
         if not await require_admin(msg, admin_ids):
             return
         rows = await rt.command_log.tail(30)
@@ -274,6 +323,49 @@ def build_router(rt: Runtime) -> Router:
             except TelegramBadRequest:
                 pass
         await cb.answer(str(target))
+
+    @r.message(Command("master_prompt"))
+    async def master_prompt(msg: Message) -> None:
+        """View / set / reset the global Pedro persona prompt."""
+        if not await require_admin(msg, admin_ids):
+            return
+        raw = (msg.text or "").split(None, 2)
+        sub = raw[1].lower() if len(raw) >= 2 else "show"
+        if sub == "show":
+            current = current_pedro_prompt()
+            is_default = current == DEFAULT_PEDRO_PROMPT
+            tag = "(default)" if is_default else "(override active)"
+            await msg.reply(
+                f"Master Pedro prompt {tag}:\n\n{current}",
+                disable_notification=True,
+            )
+            return
+        if sub == "reset":
+            await kv_delete(rt.db, "pedro_master_prompt")
+            set_pedro_prompt_override(None)
+            await msg.reply(
+                "Reset to default Pedro prompt.", disable_notification=True,
+            )
+            return
+        if sub == "set":
+            if len(raw) < 3 or not raw[2].strip():
+                await msg.reply(
+                    "Usage: /master_prompt set <new full prompt text>",
+                    disable_notification=True,
+                )
+                return
+            new_text = raw[2].strip()
+            await kv_set(rt.db, "pedro_master_prompt", new_text)
+            set_pedro_prompt_override(new_text)
+            await msg.reply(
+                f"Master prompt updated ({len(new_text)} chars).",
+                disable_notification=True,
+            )
+            return
+        await msg.reply(
+            "Usage: /master_prompt show | set <text> | reset",
+            disable_notification=True,
+        )
 
     @r.message(Command("cost"))
     async def cost(msg: Message) -> None:
