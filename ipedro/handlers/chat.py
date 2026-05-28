@@ -181,17 +181,32 @@ def build_router(rt: Runtime) -> Router:
         cfg = await get_or_create_chat_config(rt, msg)
 
         # Bef-challenge solution intercept: if the message is a reply to a
-        # tracked challenge prompt, judge it via the AI and short-circuit
+        # tracked challenge prompt, OR the user has a pending challenge in
+        # this chat and sends any text, judge it via the AI and short-circuit
         # before any other handling (memory, AI reply, etc.).
+        #
+        # Two ways to surface a challenge match:
+        #   1. The user formally replied to the prompt photo/message → look
+        #      it up by (chat_id, prompt_message_id).
+        #   2. The user typed the answer as plain text → look up by
+        #      (chat_id, user_id). The bef_challenges PK guarantees only one
+        #      outstanding challenge per (chat, user), so any text they send
+        #      while a challenge is pending becomes the attempt. This mirrors
+        #      the "Solve the challenge first" rule the bef action enforces.
         if (
             cfg.duckhunt_enabled
             and msg.from_user is not None
-            and msg.reply_to_message is not None
             and (msg.text or msg.caption)
         ):
-            challenge = await rt.duckhunt.find_bef_challenge_by_prompt(
-                msg.chat.id, msg.reply_to_message.message_id,
-            )
+            challenge = None
+            if msg.reply_to_message is not None:
+                challenge = await rt.duckhunt.find_bef_challenge_by_prompt(
+                    msg.chat.id, msg.reply_to_message.message_id,
+                )
+            if challenge is None:
+                challenge = await rt.duckhunt.get_bef_challenge(
+                    msg.chat.id, msg.from_user.id,
+                )
             if challenge and challenge.user_id == msg.from_user.id:
                 answer = (msg.text or msg.caption or "").strip()
                 verdict: bool | None
