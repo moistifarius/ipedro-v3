@@ -227,16 +227,27 @@ class AIClient:
         temperature: float = 1.0,
         chat_id: int | None = None,
     ) -> str | None:
-        """Route a chat completion to the active text provider."""
-        if self._text_provider == "claude" and self._anthropic is not None:
-            return await self._chat_claude(
-                messages, max_tokens=max_tokens,
+        """Route a chat completion to the active text provider.
+
+        The inner provider methods are decorated with tenacity; on
+        exhausted retries tenacity raises a RetryError (and the inner
+        try/except blocks re-raise the SDK's APIError so retries
+        actually fire). Convert any of those to None here so callers
+        get the same graceful degradation regardless of provider.
+        """
+        try:
+            if self._text_provider == "claude" and self._anthropic is not None:
+                return await self._chat_claude(
+                    messages, max_tokens=max_tokens,
+                    temperature=temperature, chat_id=chat_id,
+                )
+            return await self._chat_openai(
+                messages, model=model, max_tokens=max_tokens,
                 temperature=temperature, chat_id=chat_id,
             )
-        return await self._chat_openai(
-            messages, model=model, max_tokens=max_tokens,
-            temperature=temperature, chat_id=chat_id,
-        )
+        except Exception as exc:
+            log.error("chat() final failure (%s): %s", self._text_provider, exc)
+            return None
 
     async def short_completion(
         self, prompt: str, *, max_tokens: int = 200,
@@ -278,6 +289,10 @@ class AIClient:
                 cost_usd=_openai_text_price(m, pt, ct),
             )
             return (choice.message.content or "").strip() or None
+        except OpenAIAPIError:
+            # Let tenacity's @retry see this and retry; the wrapping
+            # chat() catches whatever survives exhaustion.
+            raise
         except Exception as exc:
             log.error("OpenAI chat error: %s", exc)
             return None
