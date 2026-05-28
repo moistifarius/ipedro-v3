@@ -22,9 +22,11 @@ from ipedro.handlers import basics as basics_h
 from ipedro.handlers import chat as chat_h
 from ipedro.handlers import debug as debug_h
 from ipedro.handlers import duckhunt as duck_h
+from ipedro.handlers import utility as utility_h
 from ipedro.logging_setup import configure_logging
 from ipedro.memory.store import MemoryStore
 from ipedro.openai_client import OpenAIClient
+from ipedro.reminders import run_reminders_loop
 from ipedro.runtime import Runtime
 from ipedro.sharephoto import run_share_photo_loop
 
@@ -72,6 +74,7 @@ def build_dispatcher(rt: Runtime) -> Dispatcher:
     dp.include_router(basics_h.build_router(rt))
     dp.include_router(admin_h.build_router(rt))
     dp.include_router(debug_h.build_router(rt))
+    dp.include_router(utility_h.build_router(rt))
     dp.include_router(ai_h.build_router(rt))
     dp.include_router(duck_h.build_router(rt))
     dp.include_router(chat_h.build_router(rt))
@@ -101,6 +104,10 @@ async def run() -> None:
         run_share_photo_loop(rt.bot, rt.db, rt.openai, settings, stop),
         name="share-photo",
     )
+    reminders_task = asyncio.create_task(
+        run_reminders_loop(rt.bot, rt.db, stop),
+        name="reminders",
+    )
 
     try:
         polling = asyncio.create_task(dp.start_polling(rt.bot), name="aiogram-polling")
@@ -116,7 +123,7 @@ async def run() -> None:
                 log.exception("Task exited with error: %s", t.exception())
     finally:
         stop.set()
-        for task in (spawner_task, share_photo_task):
+        for task in (spawner_task, share_photo_task, reminders_task):
             task.cancel()
             try:
                 await task

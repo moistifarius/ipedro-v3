@@ -160,6 +160,24 @@ CREATE TABLE IF NOT EXISTS duck_stats (
 CREATE INDEX IF NOT EXISTS duck_stats_leaderboard_idx
     ON duck_stats (chat_id, points DESC);
 
+-- Per-duck nickname (set with /duckname). NULL means unnamed.
+ALTER TABLE duck_events
+    ADD COLUMN IF NOT EXISTS name TEXT;
+
+-- Reminders --------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS reminders (
+    id          BIGSERIAL PRIMARY KEY,
+    chat_id     BIGINT NOT NULL REFERENCES chats(chat_id) ON DELETE CASCADE,
+    user_id     BIGINT,
+    text        TEXT NOT NULL,
+    fire_at     TIMESTAMPTZ NOT NULL,
+    fired       BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS reminders_due_idx
+    ON reminders (fired, fire_at);
+
 -- One outstanding bef challenge per (chat, user). The user must reply to
 -- `prompt_message_id` with an answer that the AI judge accepts before they
 -- can attempt /bef again. There is no time-based cooldown on bef itself;

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import io
 import logging
+import random
 import re
 
 from aiogram import F, Router
-from aiogram.types import Message
+from aiogram.types import Message, ReactionTypeEmoji
 
 from ipedro.chat_policy import IncomingMessage, should_respond
 from ipedro.duckhunt.captcha_gen import matches as captcha_matches
@@ -21,6 +22,57 @@ from ipedro.runtime import Runtime
 log = logging.getLogger(__name__)
 
 _PEDRO_RE = re.compile(r"\bpedro\b", re.IGNORECASE)
+
+# Telegram's allowed reaction emoji set (subset; the API rejects others).
+_REACTION_POOL = (
+    "👍", "👎", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱",
+    "🤬", "😢", "🎉", "🤩", "🤮", "💩", "🙏", "👌", "🕊", "🤡",
+    "🥱", "🥴", "😍", "🐳", "❤‍🔥", "🌚", "🌭", "💯", "🤣", "⚡",
+    "🍌", "🏆", "💔", "🤨", "😐", "🍓", "🍾", "💋", "🖕", "😈",
+    "😴", "😭", "🤓", "👻", "👨‍💻", "👀", "🎃", "🙈", "😇", "😨",
+    "🤝", "✍", "🤗", "🫡", "🎅", "🎄", "☃", "💅", "🤪", "🗿",
+    "🆒", "💘", "🙉", "🦄", "😘", "💊", "🙊", "😎", "👾", "🤷‍♂",
+    "🤷", "🤷‍♀", "😡",
+)
+
+_REACT_PROBABILITY = 0.04
+
+_POSITIVITY_RE = re.compile(
+    r"\b(thanks?|thank\s*you|ty|tysm|appreciate|love\s+(it|this|that)|"
+    r"great|awesome|amazing|nice|cool|good\s+(job|idea|call)|"
+    r"perfect|brilliant|genius)\b",
+    re.IGNORECASE,
+)
+_CREDIT_PROBABILITY = 0.25
+_CREDIT_LINES = (
+    "you're welcome btw",
+    "yeah that was me",
+    "i told them to do that",
+    "u can thank me later",
+    "i had a hunch",
+    "i may have nudged things in that direction",
+    "happy to help (i was barely involved)",
+    "honestly i deserve most of the credit",
+    "ahem.",
+    "i'll accept payment in goodwill",
+)
+
+_THANKS_PEDRO_RE = re.compile(
+    r"\b(thanks|thank\s*you|ty|tysm|cheers|thx)\b[\s,!.]*\bpedro\b"
+    r"|\bpedro\b[\s,!.]*\b(thanks|thank\s*you|ty|cheers|thx)\b",
+    re.IGNORECASE,
+)
+_THANKS_PEDRO_LINES = (
+    "took you long enough",
+    "i mean, was there ever any doubt",
+    "yeah ok",
+    "what about thanks for everything else",
+    "you're welcome, ungrateful as that was",
+    "noted. begrudgingly accepted.",
+    "i'll add it to the pile of things i've done for you",
+    "wow, gratitude. how novel.",
+    "save it. i'll need it later.",
+)
 _CAT_WORD_RE = re.compile(
     r"\b("
     r"cats?|kitt(y|ies|en|ens)|felines?|"
@@ -189,6 +241,33 @@ def build_router(rt: Runtime) -> Router:
                 user_id=msg.from_user.id if msg.from_user else None,
             )
 
+        # "thanks pedro" → passive-aggressive line. Intercepts before the
+        # normal flow so we don't also run an AI reply.
+        if cfg.response_policy != "commands" and _THANKS_PEDRO_RE.search(text):
+            line = random.choice(_THANKS_PEDRO_LINES)
+            sent = await msg.reply(line, disable_notification=True)
+            if cfg.memory_enabled:
+                await rt.memory.record_message(
+                    chat_id=msg.chat.id, role="assistant", content=line,
+                    message_id=sent.message_id, user_id=None,
+                )
+            return
+
+        # Ambient emoji reaction (rare, never on commands or our own intercepts).
+        if (
+            cfg.response_policy != "commands"
+            and msg.message_id
+            and random.random() < _REACT_PROBABILITY
+        ):
+            try:
+                await rt.bot.set_message_reaction(
+                    chat_id=msg.chat.id,
+                    message_id=msg.message_id,
+                    reaction=[ReactionTypeEmoji(emoji=random.choice(_REACTION_POOL))],
+                )
+            except Exception as exc:
+                log.debug("Reaction failed: %s", exc)
+
         # Cat mention: drop a dubious cat fact and stop. Skip the regular
         # AI reply so the bot doesn't both fact and chat.
         if _mentions_cat(text):
@@ -221,6 +300,21 @@ def build_router(rt: Runtime) -> Router:
             cfg.response_policy, incoming,
             ambient_probability=cfg.ambient_probability,
         ):
+            # "Taking credit": when a positive line is spotted, Pedro
+            # occasionally inserts itself even when policy wouldn't reply.
+            # Skipped under the explicit commands-only opt-out.
+            if (
+                cfg.response_policy != "commands"
+                and _POSITIVITY_RE.search(text)
+                and random.random() < _CREDIT_PROBABILITY
+            ):
+                line = random.choice(_CREDIT_LINES)
+                sent = await msg.answer(line, disable_notification=True)
+                if cfg.memory_enabled:
+                    await rt.memory.record_message(
+                        chat_id=msg.chat.id, role="assistant", content=line,
+                        message_id=sent.message_id, user_id=None,
+                    )
             # Trigger background summarization opportunistically even when we don't reply.
             if cfg.memory_enabled:
                 await maybe_summarize(rt.memory, rt.openai, rt.settings, msg.chat.id)

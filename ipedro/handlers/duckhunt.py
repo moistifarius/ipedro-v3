@@ -151,11 +151,45 @@ def build_router(rt: Runtime) -> Router:
         )
         lines = [f"🦆 Friends ({total}):"]
         for d in roster:
+            name_part = f" \"{d['name']}\"" if d.get("name") else ""
             lines.append(
-                f"  duck #{d['id']} [{d['rarity']}] "
+                f"  duck #{d['id']}{name_part} [{d['rarity']}] "
                 f"— {d['resolved_at']:%Y-%m-%d %H:%M}"
             )
+        lines.append("\nTip: /duckname <id> <name> to name one.")
         await msg.reply("\n".join(lines), disable_notification=True)
+
+    @r.message(Command("duckname"))
+    async def duckname(msg: Message) -> None:
+        """Name one of your befriended ducks: /duckname <duck_id> <name>."""
+        if not msg.from_user:
+            return
+        parts = (msg.text or "").split(None, 2)
+        if len(parts) < 3:
+            await msg.reply(
+                "Usage: /duckname <duck_id> <name>",
+                disable_notification=True,
+            )
+            return
+        try:
+            duck_id = int(parts[1])
+        except ValueError:
+            await msg.reply("Bad duck id.", disable_notification=True)
+            return
+        name = parts[2].strip()[:60]
+        ok = await rt.duckhunt.name_duck(
+            msg.chat.id, msg.from_user.id, duck_id, name,
+        )
+        if ok:
+            await msg.reply(
+                f"🦆 Duck #{duck_id} is now \"{name}\".",
+                disable_notification=True,
+            )
+        else:
+            await msg.reply(
+                "You haven't befriended that duck here.",
+                disable_notification=True,
+            )
 
     @r.message(F.text.lower().in_({"bang", "ignore"}))
     async def bang_or_ignore(msg: Message) -> None:

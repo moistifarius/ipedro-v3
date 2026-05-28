@@ -310,7 +310,7 @@ class DuckhuntService:
     ) -> list[dict[str, Any]]:
         rows = await self.db.fetch(
             """
-            SELECT id, rarity, resolved_at
+            SELECT id, rarity, resolved_at, name
               FROM duck_events
              WHERE chat_id = $1 AND resolved_by = $2 AND resolved_action = 'bef'
              ORDER BY resolved_at DESC
@@ -319,6 +319,23 @@ class DuckhuntService:
             chat_id, user_id, limit,
         )
         return [dict(r) for r in rows]
+
+    async def name_duck(
+        self, chat_id: int, user_id: int, duck_id: int, name: str,
+    ) -> bool:
+        """Set the name on a duck the caller has befriended. Returns False if not theirs."""
+        res = await self.db.execute(
+            """
+            UPDATE duck_events SET name = $1
+             WHERE id = $2 AND chat_id = $3
+               AND resolved_by = $4 AND resolved_action = 'bef'
+            """,
+            name, duck_id, chat_id, user_id,
+        )
+        try:
+            return int(res.split()[-1]) > 0
+        except Exception:
+            return False
 
     async def quack_flag(self, chat_id: int) -> bool:
         return await self.active_duck(chat_id) is not None
