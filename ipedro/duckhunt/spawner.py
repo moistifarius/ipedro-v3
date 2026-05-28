@@ -189,7 +189,7 @@ async def run_spawner(
                     try:
                         await bot.send_message(
                             chat_id,
-                            "🦆 *the duck wanders off, never to be seen again.*",
+                            "🦆 The duck wandered off.",
                             disable_notification=True,
                         )
                     except Exception as exc:  # pragma: no cover

@@ -291,7 +291,7 @@ def build_router(rt: Runtime) -> Router:
             # No active duck. Reply briefly instead of silent return so the
             # user gets feedback when a stale /quackflag misled them.
             await msg.reply(
-                "🦆 No duck here. Wait for one to spawn.",
+                "🦆 There's no ducks around right now, are you feeling okay?",
                 disable_notification=True,
             )
             return
@@ -333,7 +333,7 @@ def build_router(rt: Runtime) -> Router:
         duck = await rt.duckhunt.active_duck(msg.chat.id)
         if not duck:
             await msg.reply(
-                "🦆 No duck here. Wait for one to spawn.",
+                "🦆 There's no ducks around right now, are you feeling okay?",
                 disable_notification=True,
             )
             return
