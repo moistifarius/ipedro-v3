@@ -114,6 +114,7 @@ a second message.
 | `/ai_provider show \| claude \| openai` | Switch text-completion provider |
 | `/ai_model show \| [provider] <model_id>` | Switch text model for the active (or named) provider |
 | `/quack_chat`, `/quack_all` | Admin-spawn ducks via picker / in every enabled chat |
+| `/duckstats_reset [chat_id] [user_id\|all]` | Wipe a user's (or every user's) duck_stats counters in a chat; leaderboard-style picker if no args |
 | `/memory_facts [chat_id]` | Inline picker (or direct lookup) of stored durable facts |
 | `/memory_facts_all` | Every stored fact across every known chat |
 | `/memory_forget <fact_id>` | Delete a fact |

@@ -1056,4 +1056,188 @@ def build_router(rt: Runtime) -> Router:
         await rt.memory.delete_fact(fid)
         await msg.reply(f"Deleted fact {fid}.", disable_notification=True)
 
+    # ---------------------------------------------------------------- duckstats reset
+    async def _render_chat_user_resetter(target: int) -> tuple[str, InlineKeyboardMarkup | None]:
+        """Build the leaderboard-style picker used to choose a user (or
+        'all') to reset within one chat. Returns (text, keyboard)."""
+        rows = await rt.db.fetch(
+            "SELECT user_id, display_name, points, killed, befriended, misses "
+            "  FROM duck_stats "
+            " WHERE chat_id = $1 "
+            " ORDER BY points DESC, killed DESC "
+            " LIMIT 20",
+            target,
+        )
+        if not rows:
+            return (
+                f"No duck stats stored for chat {target}.",
+                None,
+            )
+        kb_rows: list[list[InlineKeyboardButton]] = []
+        for r in rows:
+            label = (
+                f"{(r['display_name'] or str(r['user_id']))[:30]} — "
+                f"{r['points']}pts ({r['killed']}🔫 {r['befriended']}🤝)"
+            )[:60]
+            kb_rows.append([InlineKeyboardButton(
+                text=label,
+                callback_data=f"dsru:{target}:{r['user_id']}",
+            )])
+        kb_rows.append([InlineKeyboardButton(
+            text=f"⚠️  Reset ALL {len(rows)} users in this chat",
+            callback_data=f"dsra:{target}",
+        )])
+        head = (
+            f"Top {len(rows)} duckhunters in chat {target}.\n"
+            "Tap one to reset their stats, or 'Reset ALL' to clear the whole "
+            "chat's leaderboard.\n\n"
+            "(Friendships and named ducks live in duck_events and are NOT "
+            "touched by this — only the duck_stats counters are cleared.)"
+        )
+        return head, InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+    async def _do_reset_user_stats(target: int, user_id: int) -> int:
+        """Delete the duck_stats row. Returns 1 on hit, 0 on miss."""
+        status = await rt.db.execute(
+            "DELETE FROM duck_stats WHERE chat_id = $1 AND user_id = $2",
+            target, user_id,
+        )
+        try:
+            return int(status.split()[-1])
+        except (ValueError, IndexError):
+            return 0
+
+    async def _do_reset_all_in_chat(target: int) -> int:
+        status = await rt.db.execute(
+            "DELETE FROM duck_stats WHERE chat_id = $1", target,
+        )
+        try:
+            return int(status.split()[-1])
+        except (ValueError, IndexError):
+            return 0
+
+    @r.message(Command("duckstats_reset"))
+    async def duckstats_reset(msg: Message) -> None:
+        """Reset duckhunt counters (admin-only).
+
+        /duckstats_reset                       → chat picker → user picker
+        /duckstats_reset <chat_id>             → user picker for that chat
+        /duckstats_reset <chat_id> <user_id>   → direct reset of one user
+        /duckstats_reset <chat_id> all         → wipe the whole chat's stats
+        """
+        if not await require_admin(msg, admin_ids):
+            return
+        parts = (msg.text or "").split()
+        if len(parts) >= 3:
+            try:
+                chat_id = int(parts[1])
+            except ValueError:
+                await msg.reply("Invalid chat id.", disable_notification=True)
+                return
+            if parts[2].lower() == "all":
+                n = await _do_reset_all_in_chat(chat_id)
+                await msg.reply(
+                    f"Wiped duck_stats for chat {chat_id} ({n} row(s) deleted).",
+                    disable_notification=True,
+                )
+                return
+            try:
+                user_id = int(parts[2])
+            except ValueError:
+                await msg.reply(
+                    "Invalid user id (use a numeric Telegram user id, or "
+                    "'all' to wipe the whole chat).",
+                    disable_notification=True,
+                )
+                return
+            n = await _do_reset_user_stats(chat_id, user_id)
+            await msg.reply(
+                f"Reset duck_stats for user {user_id} in chat {chat_id} "
+                f"({n} row(s) deleted).",
+                disable_notification=True,
+            )
+            return
+        if len(parts) == 2:
+            try:
+                chat_id = int(parts[1])
+            except ValueError:
+                await msg.reply("Invalid chat id.", disable_notification=True)
+                return
+            text, kb = await _render_chat_user_resetter(chat_id)
+            await msg.reply(
+                text, reply_markup=kb, disable_notification=True,
+            )
+            return
+        # No args → chat picker first.
+        chats = await rt.chats.list_known()
+        kb = _chat_picker(chats, "dsr")
+        if kb is None:
+            await msg.reply("No known chats yet.", disable_notification=True)
+            return
+        await msg.reply(
+            "Pick a chat to manage duckhunt stats for:",
+            reply_markup=kb,
+            disable_notification=True,
+        )
+
+    @r.callback_query(F.data.startswith("dsr:"))
+    async def on_dsr_chat_picked(cb: CallbackQuery) -> None:
+        if not await _gate_callback(cb):
+            return
+        try:
+            target = int(cb.data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            await cb.answer("Bad selection.", show_alert=True)
+            return
+        text, kb = await _render_chat_user_resetter(target)
+        if cb.message:
+            try:
+                await cb.message.edit_text(text, reply_markup=kb)
+            except TelegramBadRequest:
+                pass
+        await cb.answer()
+
+    @r.callback_query(F.data.startswith("dsru:"))
+    async def on_dsr_user_picked(cb: CallbackQuery) -> None:
+        if not await _gate_callback(cb):
+            return
+        try:
+            _, chat_id_s, user_id_s = cb.data.split(":", 2)
+            chat_id = int(chat_id_s)
+            user_id = int(user_id_s)
+        except (ValueError, IndexError):
+            await cb.answer("Bad selection.", show_alert=True)
+            return
+        n = await _do_reset_user_stats(chat_id, user_id)
+        body = (
+            f"Reset duck_stats for user {user_id} in chat {chat_id} "
+            f"({n} row(s) deleted)."
+        )
+        if cb.message:
+            try:
+                await cb.message.edit_text(body)
+            except TelegramBadRequest:
+                pass
+        await cb.answer("Stats reset.")
+
+    @r.callback_query(F.data.startswith("dsra:"))
+    async def on_dsr_reset_all(cb: CallbackQuery) -> None:
+        if not await _gate_callback(cb):
+            return
+        try:
+            target = int(cb.data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            await cb.answer("Bad selection.", show_alert=True)
+            return
+        n = await _do_reset_all_in_chat(target)
+        body = (
+            f"Wiped duck_stats for chat {target} ({n} row(s) deleted)."
+        )
+        if cb.message:
+            try:
+                await cb.message.edit_text(body)
+            except TelegramBadRequest:
+                pass
+        await cb.answer("Chat wiped.")
+
     return r
