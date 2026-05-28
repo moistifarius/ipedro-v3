@@ -193,6 +193,41 @@ CREATE TABLE IF NOT EXISTS chat_state (
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Saved quotes (per chat) ---------------------------------------------------
+CREATE TABLE IF NOT EXISTS quotes (
+    id                BIGSERIAL PRIMARY KEY,
+    chat_id           BIGINT NOT NULL REFERENCES chats(chat_id) ON DELETE CASCADE,
+    quoted_user_id    BIGINT,
+    quoted_name       TEXT,
+    text              TEXT NOT NULL,
+    saved_by          BIGINT,
+    source_message_id BIGINT,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS quotes_chat_idx ON quotes (chat_id);
+
+-- Birthdays / anniversaries -------------------------------------------------
+-- One row per (chat_id, user_id, label). Year is optional; if set we can
+-- compute "Nth anniversary" / "age". The daily celebrations loop posts when
+-- today's MM-DD matches and last_celebrated is older than today.
+CREATE TABLE IF NOT EXISTS chat_dates (
+    id              BIGSERIAL PRIMARY KEY,
+    chat_id         BIGINT NOT NULL REFERENCES chats(chat_id) ON DELETE CASCADE,
+    user_id         BIGINT,
+    label           TEXT NOT NULL,                   -- "birthday", "anniversary", etc.
+    month           SMALLINT NOT NULL,
+    day             SMALLINT NOT NULL,
+    year            SMALLINT,
+    note            TEXT,
+    last_celebrated DATE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (chat_id, user_id, label)
+);
+
+CREATE INDEX IF NOT EXISTS chat_dates_today_idx
+    ON chat_dates (month, day);
+
 -- One outstanding bef challenge per (chat, user). The user must reply to
 -- `prompt_message_id` with an answer that the AI judge accepts before they
 -- can attempt /bef again. There is no time-based cooldown on bef itself;

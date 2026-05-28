@@ -106,6 +106,12 @@ PEDRO_PHOTO_CAPTION_PROMPT = (
     "no quotes."
 )
 
+TLDR_PROMPT = (
+    "TL;DR of the recent chat below. 3-7 bullet points, in chronological "
+    "order, third-person, no preamble, drop fluff, keep names. Output "
+    "only the bullets.\n\nMessages:\n{messages}"
+)
+
 FACT_EXTRACT_PROMPT = (
     "Read the chat snippet. Extract at most 3 high-signal facts worth remembering "
     "long-term about specific users or this chat (e.g. 'Alice is a vegetarian'). "

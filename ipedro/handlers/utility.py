@@ -1,14 +1,22 @@
-"""General-purpose user commands: /remind, /poll, /whatdid, /mood."""
+"""General-purpose user commands.
+
+/remind, /poll, /whatdid, /mood, /quote(s), /unquote, /tldr,
+/birthday, /anniversary, /dates, /catchphrases, /lexicon, /heatmap.
+"""
 
 from __future__ import annotations
 
 import logging
+import re
+from collections import Counter
+from datetime import date, datetime, timedelta, timezone
 
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
 from ipedro.handlers.common import display_name, get_or_create_chat_config
+from ipedro.prompts import TLDR_PROMPT
 from ipedro.reminders import add_reminder, parse_duration
 from ipedro.runtime import Runtime
 
@@ -23,6 +31,60 @@ _WHATDID_PROMPT = (
     "absurd theory about what they've been up to elsewhere.\n\n"
     "Messages from {name}:\n{messages}"
 )
+
+# English-ish stopwords for /lexicon and /catchphrases.
+_STOPWORDS = frozenset((
+    "the a an and or but if then so of to in on at for with by from as is are "
+    "was were be been being have has had do does did will would could should "
+    "i you he she it we they me him her them my your his its our their this "
+    "that these those there here what when where why how who which not no yes "
+    "just like get got go going make made one two too also very really only "
+    "can may might must about into out up down over under more most some any "
+    "im ive id youre dont didnt wont cant couldnt shouldnt thats whats hes "
+    "shes were arent isnt wasnt werent havent hasnt hadnt ill youll well "
+    "theyll theres heres lol lmao haha ok okay yeah yep nope nah"
+).split())
+
+_WORD_RE = re.compile(r"[A-Za-z']+")
+_DATE_FORMATS = (
+    "%Y-%m-%d", "%m-%d-%Y", "%m/%d/%Y", "%m-%d", "%m/%d", "%d %b", "%b %d",
+    "%B %d", "%d %B",
+)
+
+
+def _parse_user_date(raw: str) -> tuple[int, int, int | None] | None:
+    raw = raw.strip()
+    for fmt in _DATE_FORMATS:
+        try:
+            dt = datetime.strptime(raw, fmt)
+            year = dt.year if "%Y" in fmt else None
+            return dt.month, dt.day, year
+        except ValueError:
+            continue
+    return None
+
+
+async def _resolve_target_user(
+    rt: Runtime, msg: Message,
+) -> tuple[int | None, str]:
+    """Reply-to wins; else @username; else None. Returns (user_id, display)."""
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        u = msg.reply_to_message.from_user
+        return u.id, display_name(u)
+    parts = (msg.text or "").split(None, 2)
+    if len(parts) >= 2:
+        arg = parts[1].strip().lstrip("@")
+        row = await rt.db.fetchrow(
+            "SELECT user_id, first_name, last_name, username "
+            "  FROM users WHERE LOWER(username) = LOWER($1) LIMIT 1",
+            arg,
+        )
+        if row:
+            name = (
+                f"{row['first_name'] or ''} {row['last_name'] or ''}"
+            ).strip() or row["username"] or arg
+            return row["user_id"], name
+    return None, ""
 
 
 def build_router(rt: Runtime) -> Router:
@@ -151,4 +213,317 @@ def build_router(rt: Runtime) -> Router:
         except Exception as exc:
             await msg.reply(f"Poll failed: {exc}", disable_notification=True)
 
+    @r.message(Command("quote"))
+    async def quote(msg: Message) -> None:
+        """/quote (reply to a message) saves it; /quote on its own = random quote."""
+        await get_or_create_chat_config(rt, msg)
+        if msg.reply_to_message and (
+            msg.reply_to_message.text or msg.reply_to_message.caption
+        ):
+            target = msg.reply_to_message
+            body = (target.text or target.caption or "").strip()
+            qname = display_name(target.from_user) if target.from_user else "anonymous"
+            qid = await rt.db.fetchval(
+                "INSERT INTO quotes (chat_id, quoted_user_id, quoted_name, "
+                "                    text, saved_by, source_message_id) "
+                "VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+                msg.chat.id,
+                target.from_user.id if target.from_user else None,
+                qname, body[:2000],
+                msg.from_user.id if msg.from_user else None,
+                target.message_id,
+            )
+            await msg.reply(
+                f"📜 Saved as quote #{qid}.", disable_notification=True,
+            )
+            return
+        # No reply → random quote
+        row = await rt.db.fetchrow(
+            "SELECT id, quoted_name, text FROM quotes "
+            " WHERE chat_id = $1 ORDER BY random() LIMIT 1",
+            msg.chat.id,
+        )
+        if not row:
+            await msg.reply(
+                "No quotes saved yet. Reply to a message with /quote to save one.",
+                disable_notification=True,
+            )
+            return
+        await msg.reply(
+            f"📜 #{row['id']} — {row['quoted_name']}:\n\"{row['text']}\"",
+            disable_notification=True,
+        )
+
+    @r.message(Command("quotes"))
+    async def quotes_list(msg: Message) -> None:
+        await get_or_create_chat_config(rt, msg)
+        rows = await rt.db.fetch(
+            "SELECT id, quoted_name, text FROM quotes "
+            " WHERE chat_id = $1 ORDER BY id DESC LIMIT 20",
+            msg.chat.id,
+        )
+        if not rows:
+            await msg.reply("No quotes yet.", disable_notification=True)
+            return
+        lines = [f"📜 #{r['id']} {r['quoted_name']}: {r['text'][:120]}" for r in rows]
+        await msg.reply("\n".join(lines)[:4000], disable_notification=True)
+
+    @r.message(Command("unquote"))
+    async def unquote(msg: Message) -> None:
+        parts = (msg.text or "").split()
+        if len(parts) < 2:
+            await msg.reply("Usage: /unquote <id>", disable_notification=True)
+            return
+        try:
+            qid = int(parts[1])
+        except ValueError:
+            await msg.reply("Bad id.", disable_notification=True)
+            return
+        res = await rt.db.execute(
+            "DELETE FROM quotes WHERE id = $1 AND chat_id = $2",
+            qid, msg.chat.id,
+        )
+        deleted = int(res.split()[-1]) if res else 0
+        await msg.reply(
+            "Deleted." if deleted else "Not found in this chat.",
+            disable_notification=True,
+        )
+
+    @r.message(Command("tldr"))
+    async def tldr(msg: Message) -> None:
+        """/tldr [duration] — summarize the last window (default 24h)."""
+        await get_or_create_chat_config(rt, msg)
+        parts = (msg.text or "").split()
+        window_seconds = 86400
+        if len(parts) >= 2:
+            parsed = parse_duration(parts[1])
+            if parsed is None:
+                await msg.reply(
+                    "Bad duration. Try /tldr 6h or /tldr 2d.",
+                    disable_notification=True,
+                )
+                return
+            window_seconds = parsed
+        since = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+        rows = await rt.db.fetch(
+            "SELECT role, content FROM messages "
+            " WHERE chat_id = $1 AND created_at >= $2 "
+            " ORDER BY id ASC LIMIT 300",
+            msg.chat.id, since,
+        )
+        if not rows:
+            await msg.reply(
+                "Nothing to summarize in that window.",
+                disable_notification=True,
+            )
+            return
+        joined = "\n".join(f"{r['role']}: {r['content']}" for r in rows)
+        await rt.bot.send_chat_action(msg.chat.id, "typing")
+        out = await rt.openai.short_completion(
+            TLDR_PROMPT.format(messages=joined[:12000]), max_tokens=400,
+        )
+        await msg.reply(out or "(empty)", disable_notification=True)
+
+    @r.message(Command("birthday"))
+    async def birthday(msg: Message) -> None:
+        await _set_date(rt, msg, label="birthday")
+
+    @r.message(Command("anniversary"))
+    async def anniversary(msg: Message) -> None:
+        await _set_date(rt, msg, label="anniversary")
+
+    @r.message(Command("dates"))
+    async def dates(msg: Message) -> None:
+        await get_or_create_chat_config(rt, msg)
+        rows = await rt.db.fetch(
+            "SELECT user_id, label, month, day, year, note "
+            "  FROM chat_dates WHERE chat_id = $1 "
+            " ORDER BY month, day",
+            msg.chat.id,
+        )
+        if not rows:
+            await msg.reply(
+                "No dates tracked here yet. Use /birthday MM-DD or "
+                "/anniversary <name> MM-DD-YYYY.",
+                disable_notification=True,
+            )
+            return
+        lines = []
+        for r in rows:
+            user_row = await rt.db.fetchrow(
+                "SELECT first_name, username FROM users WHERE user_id = $1",
+                r["user_id"],
+            ) if r["user_id"] else None
+            who = (
+                (user_row and (user_row["first_name"] or user_row["username"]))
+                or "—"
+            )
+            year_part = f"/{r['year']}" if r["year"] else ""
+            note_part = f" ({r['note']})" if r["note"] else ""
+            lines.append(
+                f"{r['month']:02d}-{r['day']:02d}{year_part}  "
+                f"{r['label']:<12} {who}{note_part}"
+            )
+        await msg.reply("\n".join(lines)[:4000], disable_notification=True)
+
+    @r.message(Command("catchphrases"))
+    async def catchphrases(msg: Message) -> None:
+        await get_or_create_chat_config(rt, msg)
+        user_id, name = await _resolve_target_user(rt, msg)
+        if user_id is None:
+            await msg.reply(
+                "Usage: /catchphrases @username (or reply to someone).",
+                disable_notification=True,
+            )
+            return
+        rows = await rt.db.fetch(
+            "SELECT content FROM messages "
+            " WHERE chat_id = $1 AND user_id = $2 "
+            " ORDER BY id DESC LIMIT 1000",
+            msg.chat.id, user_id,
+        )
+        if not rows:
+            await msg.reply(
+                f"No messages from {name} here.", disable_notification=True,
+            )
+            return
+        phrases: Counter[str] = Counter()
+        for r in rows:
+            tokens = [t.lower() for t in _WORD_RE.findall(r["content"])]
+            tokens = [t for t in tokens if t not in _STOPWORDS and len(t) > 2]
+            for n in (3, 4):
+                for i in range(len(tokens) - n + 1):
+                    phrases[" ".join(tokens[i:i + n])] += 1
+        top = [(p, c) for p, c in phrases.most_common(50) if c >= 3][:10]
+        if not top:
+            await msg.reply(
+                f"{name} doesn't repeat any phrases noticeably.",
+                disable_notification=True,
+            )
+            return
+        body = "\n".join(f"  ×{c:<3} {p}" for p, c in top)
+        await msg.reply(
+            f"{name}'s catchphrases:\n{body}", disable_notification=True,
+        )
+
+    @r.message(Command("lexicon"))
+    async def lexicon(msg: Message) -> None:
+        await get_or_create_chat_config(rt, msg)
+        user_id, name = await _resolve_target_user(rt, msg)
+        if user_id is None:
+            await msg.reply(
+                "Usage: /lexicon @username (or reply to someone).",
+                disable_notification=True,
+            )
+            return
+        rows = await rt.db.fetch(
+            "SELECT content FROM messages "
+            " WHERE chat_id = $1 AND user_id = $2 "
+            " ORDER BY id DESC LIMIT 2000",
+            msg.chat.id, user_id,
+        )
+        if not rows:
+            await msg.reply(
+                f"No messages from {name} here.", disable_notification=True,
+            )
+            return
+        counts: Counter[str] = Counter()
+        for r in rows:
+            for t in _WORD_RE.findall(r["content"]):
+                t = t.lower()
+                if len(t) <= 2 or t in _STOPWORDS:
+                    continue
+                counts[t] += 1
+        top = counts.most_common(20)
+        if not top:
+            await msg.reply(
+                f"{name} hasn't said much.", disable_notification=True,
+            )
+            return
+        body = "\n".join(f"  ×{c:<4} {w}" for w, c in top)
+        await msg.reply(
+            f"{name}'s top words:\n{body}", disable_notification=True,
+        )
+
+    @r.message(Command("heatmap"))
+    async def heatmap(msg: Message) -> None:
+        await get_or_create_chat_config(rt, msg)
+        rows = await rt.db.fetch(
+            "SELECT EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC')::int AS h, "
+            "       COUNT(*) AS c "
+            "  FROM messages WHERE chat_id = $1 "
+            " GROUP BY h ORDER BY h",
+            msg.chat.id,
+        )
+        if not rows:
+            await msg.reply(
+                "Not enough chat history.", disable_notification=True,
+            )
+            return
+        by_hour = {int(r["h"]): int(r["c"]) for r in rows}
+        peak = max(by_hour.values())
+        lines = ["Hour-of-day activity (UTC):"]
+        for h in range(24):
+            c = by_hour.get(h, 0)
+            bar_len = int((c / peak) * 24) if peak else 0
+            lines.append(f"  {h:02d}  {'█' * bar_len}{'·' * (24 - bar_len)}  {c}")
+        await msg.reply("\n".join(lines), disable_notification=True)
+
     return r
+
+
+async def _set_date(rt: Runtime, msg: Message, *, label: str) -> None:
+    """Shared body for /birthday and /anniversary.
+
+    Forms:
+      /birthday MM-DD                       — set caller's birthday
+      /birthday @user MM-DD-YYYY            — set someone else's
+      /anniversary "wedding" MM-DD-YYYY     — set chat-level anniversary
+    """
+    await get_or_create_chat_config(rt, msg)
+    parts = (msg.text or "").split(None, 3)
+    if len(parts) < 2:
+        await msg.reply(
+            f"Usage: /{label} MM-DD  (or /{label} @user MM-DD-YYYY)",
+            disable_notification=True,
+        )
+        return
+    target_user_id: int | None = msg.from_user.id if msg.from_user else None
+    note: str | None = None
+    arg_tokens: list[str] = []
+    for tok in parts[1:]:
+        if tok.startswith("@"):
+            row = await rt.db.fetchrow(
+                "SELECT user_id FROM users WHERE LOWER(username) = LOWER($1)",
+                tok[1:],
+            )
+            target_user_id = row["user_id"] if row else None
+        else:
+            arg_tokens.append(tok)
+    if not arg_tokens:
+        await msg.reply("Need a date.", disable_notification=True)
+        return
+    date_tok = arg_tokens[-1]
+    if len(arg_tokens) > 1:
+        note = " ".join(arg_tokens[:-1])[:60]
+    parsed = _parse_user_date(date_tok)
+    if not parsed:
+        await msg.reply(
+            "Couldn't parse the date. Try MM-DD or MM-DD-YYYY.",
+            disable_notification=True,
+        )
+        return
+    month, day, year = parsed
+    await rt.db.execute(
+        "INSERT INTO chat_dates (chat_id, user_id, label, month, day, year, note) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7) "
+        "ON CONFLICT (chat_id, user_id, label) DO UPDATE "
+        "SET month = EXCLUDED.month, day = EXCLUDED.day, year = EXCLUDED.year, "
+        "    note = EXCLUDED.note",
+        msg.chat.id, target_user_id, label, month, day, year, note,
+    )
+    await msg.reply(
+        f"Got it: {label} on {month:02d}-{day:02d}"
+        f"{f'/{year}' if year else ''}.",
+        disable_notification=True,
+    )
