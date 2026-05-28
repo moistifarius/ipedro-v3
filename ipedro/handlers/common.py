@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Iterable
 
 from aiogram.types import Message
@@ -11,6 +12,23 @@ from ipedro.auth import AuthContext, is_admin
 from ipedro.runtime import Runtime
 
 log = logging.getLogger(__name__)
+
+_CAT_TO_PUSSY_RE = re.compile(r"\bcats?\b", re.IGNORECASE)
+
+
+def _cat_sub(m: re.Match[str]) -> str:
+    word = m.group(0)
+    repl = "pussies" if word.lower().endswith("s") else "pussy"
+    if word.isupper():
+        return repl.upper()
+    if word[:1].isupper():
+        return repl[:1].upper() + repl[1:]
+    return repl
+
+
+def catify(text: str) -> str:
+    """Replace standalone 'cat' / 'cats' with 'pussy' / 'pussies', preserving case."""
+    return _CAT_TO_PUSSY_RE.sub(_cat_sub, text)
 
 
 def auth_ctx(message: Message) -> AuthContext:

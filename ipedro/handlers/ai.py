@@ -9,7 +9,7 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, Message
 
-from ipedro.handlers.common import get_or_create_chat_config
+from ipedro.handlers.common import catify, get_or_create_chat_config
 from ipedro.memory.context_builder import build_context
 from ipedro.memory.summarizer import maybe_summarize
 from ipedro.prompts import (
@@ -96,7 +96,7 @@ def build_router(rt: Runtime) -> Router:
     async def catfact(msg: Message) -> None:
         await msg.bot.send_chat_action(msg.chat.id, "typing")
         fact = await rt.openai.short_completion(CAT_FACT_PROMPT, max_tokens=120)
-        await msg.reply(fact or "🐈", disable_notification=True)
+        await msg.reply(catify(fact or "🐈"), disable_notification=True)
 
     @r.message(Command("beneficiality"))
     async def beneficiality(msg: Message) -> None:

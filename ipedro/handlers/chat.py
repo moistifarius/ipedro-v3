@@ -12,7 +12,7 @@ from aiogram.types import Message
 from ipedro.chat_policy import IncomingMessage, should_respond
 from ipedro.duckhunt.captcha_gen import matches as captcha_matches
 from ipedro.duckhunt.verdicts import parse_verdict
-from ipedro.handlers.common import get_or_create_chat_config
+from ipedro.handlers.common import catify, get_or_create_chat_config
 from ipedro.memory.context_builder import build_context
 from ipedro.memory.summarizer import maybe_summarize
 from ipedro.prompts import CAT_FACT_PROMPT, DUCK_BEF_CHALLENGE_JUDGE_PROMPT
@@ -194,7 +194,7 @@ def build_router(rt: Runtime) -> Router:
         if _mentions_cat(text):
             await rt.bot.send_chat_action(msg.chat.id, "typing")
             fact = await rt.openai.short_completion(CAT_FACT_PROMPT, max_tokens=120)
-            reply_text = fact or "🐈"
+            reply_text = catify(fact or "🐈")
             sent = await msg.reply(reply_text, disable_notification=True)
             if cfg.memory_enabled:
                 await rt.memory.record_message(
