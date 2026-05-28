@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     default_response_policy_private: ResponsePolicy = "always"
     default_response_policy_group: ResponsePolicy = "mention"
     default_ambient_probability: float = 0.03
-    default_persona: str = "pedro"
+    default_persona: str = "dude"
 
     # Duckhunt
     duckhunt_enabled_by_default: bool = False

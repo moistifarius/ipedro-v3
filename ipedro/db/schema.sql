@@ -160,6 +160,177 @@ CREATE TABLE IF NOT EXISTS duck_stats (
 CREATE INDEX IF NOT EXISTS duck_stats_leaderboard_idx
     ON duck_stats (chat_id, points DESC);
 
+-- Per-duck nickname (set with /duckname). NULL means unnamed.
+ALTER TABLE duck_events
+    ADD COLUMN IF NOT EXISTS name TEXT;
+
+-- Reminders --------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS reminders (
+    id          BIGSERIAL PRIMARY KEY,
+    chat_id     BIGINT NOT NULL REFERENCES chats(chat_id) ON DELETE CASCADE,
+    user_id     BIGINT,
+    text        TEXT NOT NULL,
+    fire_at     TIMESTAMPTZ NOT NULL,
+    fired       BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS reminders_due_idx
+    ON reminders (fired, fire_at);
+
+-- Per-chat persona state ----------------------------------------------------
+-- Holds the chat's current mood, word-of-the-day, and any currently-stuck
+-- word that Pedro fixates on. All three are nullable and refreshed lazily
+-- when build_context runs.
+CREATE TABLE IF NOT EXISTS chat_state (
+    chat_id               BIGINT PRIMARY KEY REFERENCES chats(chat_id) ON DELETE CASCADE,
+    mood                  TEXT,
+    mood_set_at           TIMESTAMPTZ,
+    word_of_day           TEXT,
+    word_of_day_at        TIMESTAMPTZ,
+    stuck_word            TEXT,
+    stuck_word_expires_at TIMESTAMPTZ,
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Saved quotes (per chat) ---------------------------------------------------
+CREATE TABLE IF NOT EXISTS quotes (
+    id                BIGSERIAL PRIMARY KEY,
+    chat_id           BIGINT NOT NULL REFERENCES chats(chat_id) ON DELETE CASCADE,
+    quoted_user_id    BIGINT,
+    quoted_name       TEXT,
+    text              TEXT NOT NULL,
+    saved_by          BIGINT,
+    source_message_id BIGINT,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS quotes_chat_idx ON quotes (chat_id);
+
+-- Birthdays / anniversaries -------------------------------------------------
+-- One row per (chat_id, user_id, label). Year is optional; if set we can
+-- compute "Nth anniversary" / "age". The daily celebrations loop posts when
+-- today's MM-DD matches and last_celebrated is older than today.
+CREATE TABLE IF NOT EXISTS chat_dates (
+    id              BIGSERIAL PRIMARY KEY,
+    chat_id         BIGINT NOT NULL REFERENCES chats(chat_id) ON DELETE CASCADE,
+    user_id         BIGINT,
+    label           TEXT NOT NULL,                   -- "birthday", "anniversary", etc.
+    month           SMALLINT NOT NULL,
+    day             SMALLINT NOT NULL,
+    year            SMALLINT,
+    note            TEXT,
+    last_celebrated DATE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (chat_id, user_id, label)
+);
+
+CREATE INDEX IF NOT EXISTS chat_dates_today_idx
+    ON chat_dates (month, day);
+
+-- Daily comic strip opt-in --------------------------------------------------
+ALTER TABLE chat_config
+    ADD COLUMN IF NOT EXISTS comic_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE chat_config
+    ADD COLUMN IF NOT EXISTS last_comic_at TIMESTAMPTZ;
+
+-- Boss-duck columns ---------------------------------------------------------
+-- A boss duck takes multiple hits across multiple users to defeat. If
+-- boss_required_hits is NULL the row is a normal duck.
+ALTER TABLE duck_events
+    ADD COLUMN IF NOT EXISTS boss_required_hits INTEGER;
+ALTER TABLE duck_events
+    ADD COLUMN IF NOT EXISTS boss_current_hits INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS duck_boss_hits (
+    duck_id   BIGINT NOT NULL REFERENCES duck_events(id) ON DELETE CASCADE,
+    user_id   BIGINT NOT NULL,
+    display_name TEXT NOT NULL,
+    hits      INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (duck_id, user_id)
+);
+
+-- OpenAI usage log (cost tracking) ------------------------------------------
+CREATE TABLE IF NOT EXISTS openai_usage (
+    id                BIGSERIAL PRIMARY KEY,
+    chat_id           BIGINT,
+    kind              TEXT NOT NULL,         -- chat | embed | image | transcribe | translate
+    model             TEXT,
+    prompt_tokens     INTEGER,
+    completion_tokens INTEGER,
+    total_tokens      INTEGER,
+    cost_usd          REAL,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS openai_usage_chat_recent_idx
+    ON openai_usage (chat_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS openai_usage_recent_idx
+    ON openai_usage (created_at DESC);
+
+-- Karma --------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS karma (
+    chat_id      BIGINT NOT NULL REFERENCES chats(chat_id) ON DELETE CASCADE,
+    user_id      BIGINT NOT NULL,
+    display_name TEXT NOT NULL,
+    score        INTEGER NOT NULL DEFAULT 0,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (chat_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS karma_chat_score_idx
+    ON karma (chat_id, score DESC);
+
+-- Anonymous confessions ----------------------------------------------------
+-- chat_id is intentionally nullable — confessions live in a global pool
+-- and can surface in any chat. submitted_by is stored for audit but never
+-- displayed.
+CREATE TABLE IF NOT EXISTS confessions (
+    id           BIGSERIAL PRIMARY KEY,
+    submitted_by BIGINT,
+    text         TEXT NOT NULL,
+    surfaced_at  TIMESTAMPTZ,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS confessions_unsurfaced_idx
+    ON confessions (surfaced_at) WHERE surfaced_at IS NULL;
+
+-- Track the last year we posted a year-in-review per chat, so we don't
+-- double-fire on Dec 31.
+ALTER TABLE chat_state
+    ADD COLUMN IF NOT EXISTS last_retrospective_year INTEGER;
+
+-- Per-(chat,user) moderation flags ---------------------------------------
+-- One row per active flag. flag is 'shutup' | 'snark' | 'grudge'. The
+-- grudge flag is auto-managed (insults add it, decays after 24h);
+-- shutup/snark are admin-set via /shutup / /snark_at.
+CREATE TABLE IF NOT EXISTS user_flags (
+    chat_id    BIGINT NOT NULL REFERENCES chats(chat_id) ON DELETE CASCADE,
+    user_id    BIGINT NOT NULL,
+    flag       TEXT NOT NULL,
+    expires_at TIMESTAMPTZ,
+    note       TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (chat_id, user_id, flag)
+);
+
+CREATE INDEX IF NOT EXISTS user_flags_lookup_idx
+    ON user_flags (chat_id, user_id, flag);
+
+-- Daily fortune cookie opt-in + last-posted-date
+ALTER TABLE chat_config
+    ADD COLUMN IF NOT EXISTS fortune_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE chat_state
+    ADD COLUMN IF NOT EXISTS last_fortune_date DATE;
+
+-- Generic key/value store for global tunables (e.g. the master Pedro prompt).
+CREATE TABLE IF NOT EXISTS kv_store (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- One outstanding bef challenge per (chat, user). The user must reply to
 -- `prompt_message_id` with an answer that the AI judge accepts before they
 -- can attempt /bef again. There is no time-based cooldown on bef itself;

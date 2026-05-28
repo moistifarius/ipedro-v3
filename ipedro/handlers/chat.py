@@ -4,22 +4,90 @@ from __future__ import annotations
 
 import io
 import logging
+import random
 import re
 
 from aiogram import F, Router
-from aiogram.types import Message
+from aiogram.types import Message, ReactionTypeEmoji
 
 from ipedro.chat_policy import IncomingMessage, should_respond
+from ipedro.duckhunt.captcha_gen import matches as captcha_matches
 from ipedro.duckhunt.verdicts import parse_verdict
-from ipedro.handlers.common import get_or_create_chat_config
+from ipedro.handlers.common import catify, get_or_create_chat_config
 from ipedro.memory.context_builder import build_context
 from ipedro.memory.summarizer import maybe_summarize
 from ipedro.prompts import CAT_FACT_PROMPT, DUCK_BEF_CHALLENGE_JUDGE_PROMPT
 from ipedro.runtime import Runtime
+from ipedro.user_flags import has_flag, maybe_auto_grudge
 
 log = logging.getLogger(__name__)
 
-_PEDRO_RE = re.compile(r"\bpedro\b", re.IGNORECASE)
+# Bare "dude" / "man" are way too common, so only the specific Dude
+# aliases trigger a name mention. Legacy "pedro" mentions still trigger.
+_DUDE_NAME_RE = re.compile(
+    r"\bthe\s+dude\b"
+    r"|\bduder(ino)?\b"
+    r"|\bel\s+duderino\b"
+    r"|\bhis\s+dudeness\b"
+    r"|\bpedro\b",
+    re.IGNORECASE,
+)
+
+# Telegram's allowed reaction emoji set (subset; the API rejects others).
+_REACTION_POOL = (
+    "👍", "👎", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱",
+    "🤬", "😢", "🎉", "🤩", "🤮", "💩", "🙏", "👌", "🕊", "🤡",
+    "🥱", "🥴", "😍", "🐳", "❤‍🔥", "🌚", "🌭", "💯", "🤣", "⚡",
+    "🍌", "🏆", "💔", "🤨", "😐", "🍓", "🍾", "💋", "🖕", "😈",
+    "😴", "😭", "🤓", "👻", "👨‍💻", "👀", "🎃", "🙈", "😇", "😨",
+    "🤝", "✍", "🤗", "🫡", "🎅", "🎄", "☃", "💅", "🤪", "🗿",
+    "🆒", "💘", "🙉", "🦄", "😘", "💊", "🙊", "😎", "👾", "🤷‍♂",
+    "🤷", "🤷‍♀", "😡",
+)
+
+_REACT_PROBABILITY = 0.04
+
+_POSITIVITY_RE = re.compile(
+    r"\b(thanks?|thank\s*you|ty|tysm|appreciate|love\s+(it|this|that)|"
+    r"great|awesome|amazing|nice|cool|good\s+(job|idea|call)|"
+    r"perfect|brilliant|genius)\b",
+    re.IGNORECASE,
+)
+_CREDIT_PROBABILITY = 0.25
+_CREDIT_LINES = (
+    "yeah, man, that was me",
+    "you're welcome, dude",
+    "i may have had a hand in that. or maybe not. who can say.",
+    "ahem.",
+    "i'm not saying it was me. but it was me.",
+    "happy to help, more or less",
+    "i had a hunch, man",
+    "credit where it's due, you know",
+    "the dude abides — also occasionally the dude assists",
+    "this aggression will not stand. but you're welcome.",
+)
+
+# "thanks pedro" / "thanks dude" / "thanks man" — common ways someone
+# might thank the bot directly.
+_THANKS_PEDRO_RE = re.compile(
+    r"\b(thanks|thank\s*you|ty|tysm|cheers|thx)\b"
+    r"[\s,!.]*\b(dude|duder|pedro|man)\b"
+    r"|\b(dude|duder|pedro|man)\b"
+    r"[\s,!.]*\b(thanks|thank\s*you|ty|cheers|thx)\b",
+    re.IGNORECASE,
+)
+_THANKS_PEDRO_LINES = (
+    "yeah, no problem, man",
+    "the dude abides",
+    "that's just, like, your gratitude, man",
+    "ah, you're alright",
+    "no big deal, dude",
+    "right on",
+    "easy, man",
+    "i'd say something but i'm pretty mellow right now",
+    "well, you know — that's just what i do",
+    "this aggression will not stand. wait. what?",
+)
 _CAT_WORD_RE = re.compile(
     r"\b("
     r"cats?|kitt(y|ies|en|ens)|felines?|"
@@ -32,7 +100,8 @@ _CAT_EMOJI = frozenset("🐈🐱😺😸😹😻😼😽🙀😿😾")
 
 
 def _mentions_pedro(text: str | None) -> bool:
-    return bool(text) and _PEDRO_RE.search(text) is not None
+    """Kept for backwards-compat; matches Dude aliases now."""
+    return bool(text) and _DUDE_NAME_RE.search(text) is not None
 
 
 def _mentions_cat(text: str | None) -> bool:
@@ -92,8 +161,8 @@ async def _transcribe_voice(rt: Runtime, msg: Message) -> str | None:
 def build_router(rt: Runtime) -> Router:
     r = Router(name="chat")
 
-    # Reply-to-bot "bad bot" / "bad pedro" deletion shortcut.
-    @r.message(F.text.lower().in_({"bad bot", "bad pedro"}))
+    # Reply-to-bot "bad bot" / "bad dude" deletion shortcut.
+    @r.message(F.text.lower().in_({"bad bot", "bad pedro", "bad dude", "bad duder"}))
     async def remove_message(msg: Message) -> None:
         if not msg.reply_to_message:
             return
@@ -125,16 +194,22 @@ def build_router(rt: Runtime) -> Router:
             )
             if challenge and challenge.user_id == msg.from_user.id:
                 answer = (msg.text or msg.caption or "").strip()
-                ai_text = await rt.openai.chat(
-                    [{
-                        "role": "user",
-                        "content": DUCK_BEF_CHALLENGE_JUDGE_PROMPT.format(
-                            challenge=challenge.challenge, answer=answer,
-                        ),
-                    }],
-                    max_tokens=120, temperature=1.0,
-                )
-                verdict, line = parse_verdict(ai_text, "PASS", "FAIL")
+                verdict: bool | None
+                line: str | None
+                if challenge.kind == "captcha":
+                    verdict = captcha_matches(challenge.challenge, answer)
+                    line = None
+                else:
+                    ai_text = await rt.openai.chat(
+                        [{
+                            "role": "user",
+                            "content": DUCK_BEF_CHALLENGE_JUDGE_PROMPT.format(
+                                challenge=challenge.challenge, answer=answer,
+                            ),
+                        }],
+                        max_tokens=120, temperature=1.0,
+                    )
+                    verdict, line = parse_verdict(ai_text, "PASS", "FAIL")
                 log.info(
                     "bef challenge judge: chat=%s user=%s kind=%s verdict=%s",
                     msg.chat.id, msg.from_user.id, challenge.kind, verdict,
@@ -172,6 +247,18 @@ def build_router(rt: Runtime) -> Router:
         bot_id = bot_me.id
         bot_username = bot_me.username
 
+        # Shut-up gate: silently drop everything from a shutup'd user.
+        from_user_id = msg.from_user.id if msg.from_user else None
+        if await has_flag(rt.db, msg.chat.id, from_user_id, "shutup"):
+            return
+
+        # Auto-grudge: insults toward the bot earn a 24h snark flag.
+        if await maybe_auto_grudge(rt.db, msg.chat.id, from_user_id, text):
+            log.info(
+                "Auto-grudge added: chat=%s user=%s text=%r",
+                msg.chat.id, from_user_id, text[:80],
+            )
+
         # Record the inbound message (token-counted, optionally embedded).
         if cfg.memory_enabled:
             await rt.memory.record_message(
@@ -179,15 +266,42 @@ def build_router(rt: Runtime) -> Router:
                 role="user",
                 content=text,
                 message_id=msg.message_id,
-                user_id=msg.from_user.id if msg.from_user else None,
+                user_id=from_user_id,
             )
+
+        # "thanks pedro" → passive-aggressive line. Intercepts before the
+        # normal flow so we don't also run an AI reply.
+        if cfg.response_policy != "commands" and _THANKS_PEDRO_RE.search(text):
+            line = random.choice(_THANKS_PEDRO_LINES)
+            sent = await msg.reply(line, disable_notification=True)
+            if cfg.memory_enabled:
+                await rt.memory.record_message(
+                    chat_id=msg.chat.id, role="assistant", content=line,
+                    message_id=sent.message_id, user_id=None,
+                )
+            return
+
+        # Ambient emoji reaction (rare, never on commands or our own intercepts).
+        if (
+            cfg.response_policy != "commands"
+            and msg.message_id
+            and random.random() < _REACT_PROBABILITY
+        ):
+            try:
+                await rt.bot.set_message_reaction(
+                    chat_id=msg.chat.id,
+                    message_id=msg.message_id,
+                    reaction=[ReactionTypeEmoji(emoji=random.choice(_REACTION_POOL))],
+                )
+            except Exception as exc:
+                log.debug("Reaction failed: %s", exc)
 
         # Cat mention: drop a dubious cat fact and stop. Skip the regular
         # AI reply so the bot doesn't both fact and chat.
         if _mentions_cat(text):
             await rt.bot.send_chat_action(msg.chat.id, "typing")
             fact = await rt.openai.short_completion(CAT_FACT_PROMPT, max_tokens=120)
-            reply_text = fact or "🐈"
+            reply_text = catify(fact or "🐈")
             sent = await msg.reply(reply_text, disable_notification=True)
             if cfg.memory_enabled:
                 await rt.memory.record_message(
@@ -214,6 +328,21 @@ def build_router(rt: Runtime) -> Router:
             cfg.response_policy, incoming,
             ambient_probability=cfg.ambient_probability,
         ):
+            # "Taking credit": when a positive line is spotted, Pedro
+            # occasionally inserts itself even when policy wouldn't reply.
+            # Skipped under the explicit commands-only opt-out.
+            if (
+                cfg.response_policy != "commands"
+                and _POSITIVITY_RE.search(text)
+                and random.random() < _CREDIT_PROBABILITY
+            ):
+                line = random.choice(_CREDIT_LINES)
+                sent = await msg.answer(line, disable_notification=True)
+                if cfg.memory_enabled:
+                    await rt.memory.record_message(
+                        chat_id=msg.chat.id, role="assistant", content=line,
+                        message_id=sent.message_id, user_id=None,
+                    )
             # Trigger background summarization opportunistically even when we don't reply.
             if cfg.memory_enabled:
                 await maybe_summarize(rt.memory, rt.openai, rt.settings, msg.chat.id)
@@ -221,6 +350,21 @@ def build_router(rt: Runtime) -> Router:
 
         await rt.bot.send_chat_action(msg.chat.id, "typing")
 
+        state = await rt.persona_state.current(msg.chat.id)
+        extra_bits = []
+        base_extra = rt.persona_state.to_system_prompt(state)
+        if base_extra:
+            extra_bits.append(base_extra)
+        snark_flag = await has_flag(rt.db, msg.chat.id, from_user_id, "snark")
+        grudge_flag = await has_flag(rt.db, msg.chat.id, from_user_id, "grudge")
+        if snark_flag or grudge_flag:
+            why = "they recently insulted you" if grudge_flag else "by request"
+            extra_bits.append(
+                f"The user you're replying to right now is on your shit list "
+                f"({why}). Be markedly snarkier and more dismissive to them, "
+                f"without being cruel. Don't acknowledge the list."
+            )
+        extra = "\n\n".join(extra_bits) or None
         ctx = await build_context(
             store=rt.memory,
             settings=rt.settings,
@@ -228,8 +372,11 @@ def build_router(rt: Runtime) -> Router:
             persona=cfg.persona,
             persona_custom=cfg.persona_custom,
             latest_user_text=text,
+            extra_system=extra,
         )
-        reply = await rt.openai.chat(ctx.messages, max_tokens=500)
+        reply = await rt.openai.chat(
+            ctx.messages, max_tokens=500, chat_id=msg.chat.id,
+        )
         if not reply:
             return
 

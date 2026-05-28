@@ -27,14 +27,15 @@ from aiogram import Bot
 
 from ipedro.config import Settings
 from ipedro.db.pool import Database
-from ipedro.duckhunt.service import DuckhuntService
+from ipedro.duckhunt.scoring import current_holiday
+from ipedro.duckhunt.service import ActiveDuck, DuckhuntService
 from ipedro.openai_client import OpenAIClient
 from ipedro.prompts import DUCK_QUACK_PROMPT
 
 log = logging.getLogger(__name__)
 
 
-async def _duckhunt_enabled_chat_ids(db: Database) -> list[int]:
+async def duckhunt_enabled_chat_ids(db: Database) -> list[int]:
     rows = await db.fetch(
         "SELECT c.chat_id FROM chats c "
         "JOIN chat_config cfg ON cfg.chat_id = c.chat_id "
@@ -43,23 +44,109 @@ async def _duckhunt_enabled_chat_ids(db: Database) -> list[int]:
     return [r["chat_id"] for r in rows]
 
 
-async def _build_quack_message(openai: OpenAIClient) -> str:
+async def duckhunt_enabled_chats(db: Database) -> list[dict]:
+    """Return enabled chats with chat_id, title, type so a UI can label them."""
+    rows = await db.fetch(
+        "SELECT c.chat_id, c.title, c.type FROM chats c "
+        "JOIN chat_config cfg ON cfg.chat_id = c.chat_id "
+        "WHERE cfg.duckhunt_enabled = TRUE "
+        "ORDER BY c.last_seen DESC"
+    )
+    return [dict(r) for r in rows]
+
+
+# Quirky, vibes-only hints. Each tier has a few options; one is picked per
+# spawn. The exact rarity is never named — the flavor lets observant
+# players guess without making it a plain announcement.
+_RARITY_HINTS: dict[str, tuple[str, ...]] = {
+    "common": (
+        "",
+        " (just a duck)",
+        " (perfectly average)",
+    ),
+    "uncommon": (
+        " (one feather looks oddly shiny)",
+        " (it carries itself with confidence)",
+        " ✨",
+    ),
+    "rare": (
+        " ✨ (something glints)",
+        " (the light bends a little around it)",
+        " (you swear it just winked)",
+    ),
+    "epic": (
+        " ✨✨ (it's GLOWING. that's not normal.)",
+        " (the colors on its feathers keep shifting)",
+        " 💫 (you feel briefly important)",
+    ),
+    "legendary": (
+        " 👑💎✨ (the air HUMS around it)",
+        " ✨💎 (you forget your name for a second)",
+        " 👑 (somehow it is wearing a crown)",
+        " (reality wobbles. there is a duck.)",
+    ),
+}
+
+
+def rarity_hint(rarity: str) -> str:
+    """Pick a flavor-only hint for a given rarity. Empty string for some."""
+    return random.choice(_RARITY_HINTS.get(rarity, ("",)))
+
+
+async def build_quack_message(
+    openai: OpenAIClient, rarity: str, *,
+    is_boss: bool = False, holiday: tuple[str, str] | None = None,
+) -> str:
     msg = await openai.short_completion(DUCK_QUACK_PROMPT, max_tokens=120)
-    return (msg or "🦆 quack!").strip()
+    body = (msg or "🦆 quack!").strip()
+    hint = rarity_hint(rarity)
+    extra: list[str] = []
+    if holiday:
+        extra.append(f"\n[{holiday[0]} duck — {holiday[1]}]")
+    if is_boss:
+        extra.append("\n👹 *this one is BIG. one person can't take it alone.*")
+    return f"{body}{hint}{''.join(extra)}" if hint or extra else body
+
+
+async def build_quack_message_for(
+    openai: OpenAIClient, duck: ActiveDuck,
+) -> str:
+    return await build_quack_message(
+        openai, duck.rarity,
+        is_boss=duck.is_boss, holiday=current_holiday(),
+    )
+
+
+async def _recent_activity_factor(db: Database, chat_id: int) -> float:
+    """Scale spawn probability by chat activity in the last hour.
+
+    Quiet chats spawn at ~0.4x the base rate; busy chats at up to ~2x.
+    Uses a soft log-curve so a single very active chat doesn't dominate.
+    """
+    val = await db.fetchval(
+        "SELECT COUNT(*) FROM messages "
+        " WHERE chat_id = $1 AND created_at >= NOW() - INTERVAL '1 hour'",
+        chat_id,
+    )
+    n = int(val or 0)
+    # 0 msgs → 0.4, 10 msgs → 1.0, 40 msgs → ~1.5, 200 msgs → ~2.0
+    import math
+    return 0.4 + min(1.6, math.log1p(n) / math.log1p(40))
 
 
 async def _maybe_spawn(
     chat_id: int, p_spawn: float, bot: Bot, service: DuckhuntService,
-    openai: OpenAIClient, settings: Settings,
+    openai: OpenAIClient, settings: Settings, db: Database,
 ) -> None:
-    if random.random() >= p_spawn:
+    factor = await _recent_activity_factor(db, chat_id)
+    if random.random() >= min(1.0, p_spawn * factor):
         return
     if await service.active_duck(chat_id):
         return
     duck = await service.spawn_duck(
         chat_id, settings.duckhunt_duck_lifetime_seconds,
     )
-    text = await _build_quack_message(openai)
+    text = await build_quack_message_for(openai, duck)
     try:
         await bot.send_message(chat_id, text, disable_notification=True)
     except Exception as exc:  # pragma: no cover
@@ -97,8 +184,10 @@ async def run_spawner(
             if departed:
                 log.info("Probabilistic departure: %d duck(s) wandered off.", len(departed))
 
-            for chat_id in await _duckhunt_enabled_chat_ids(db):
-                await _maybe_spawn(chat_id, p_spawn, bot, service, openai, settings)
+            for chat_id in await duckhunt_enabled_chat_ids(db):
+                await _maybe_spawn(
+                    chat_id, p_spawn, bot, service, openai, settings, db,
+                )
 
             wait = tick
         except Exception as exc:

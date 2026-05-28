@@ -9,7 +9,7 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, Message
 
-from ipedro.handlers.common import get_or_create_chat_config
+from ipedro.handlers.common import catify, get_or_create_chat_config
 from ipedro.memory.context_builder import build_context
 from ipedro.memory.summarizer import maybe_summarize
 from ipedro.prompts import (
@@ -96,7 +96,7 @@ def build_router(rt: Runtime) -> Router:
     async def catfact(msg: Message) -> None:
         await msg.bot.send_chat_action(msg.chat.id, "typing")
         fact = await rt.openai.short_completion(CAT_FACT_PROMPT, max_tokens=120)
-        await msg.reply(fact or "🐈", disable_notification=True)
+        await msg.reply(catify(fact or "🐈"), disable_notification=True)
 
     @r.message(Command("beneficiality"))
     async def beneficiality(msg: Message) -> None:
@@ -126,14 +126,18 @@ def build_router(rt: Runtime) -> Router:
                 f"Persona: {cfg.persona}\n"
                 f"Duckhunt enabled: {cfg.duckhunt_enabled}\n"
                 f"Share-photo enabled: {cfg.share_photo_enabled}\n"
+                f"Comic enabled: {cfg.comic_enabled}\n"
+                f"Fortune enabled: {cfg.fortune_enabled}\n"
                 f"Voice transcribe: {cfg.voice_transcribe}\n"
                 f"Memory enabled: {cfg.memory_enabled}\n\n"
                 "Set a field: /chat_config <field> <value>\n"
                 "  policy     commands|mention|reply|ambient|always\n"
                 "  ambient    <0.0-1.0>\n"
-                "  persona    pedro|neutral|<free-form>\n"
+                "  persona    dude|neutral|<free-form>\n"
                 "  duckhunt   on|off\n"
                 "  sharephoto on|off\n"
+                "  comic      on|off\n"
+                "  fortune    on|off\n"
                 "  voice      on|off\n"
                 "  memory     on|off",
                 disable_notification=True,
@@ -171,14 +175,18 @@ def build_router(rt: Runtime) -> Router:
             updates["persona"] = raw
             # Custom personas via the remaining argument tail.
             tail = (msg.text or "").split(None, 3)
-            if raw not in ("pedro", "neutral") and len(tail) == 4:
+            if raw not in ("dude", "pedro", "neutral") and len(tail) == 4:
                 updates["persona_custom"] = tail[3]
-            elif raw in ("pedro", "neutral"):
+            elif raw in ("dude", "pedro", "neutral"):
                 updates["persona_custom"] = None
         elif field == "duckhunt":
             updates["duckhunt_enabled"] = raw.lower() in ("on", "true", "1", "yes")
         elif field in ("sharephoto", "share_photo"):
             updates["share_photo_enabled"] = raw.lower() in ("on", "true", "1", "yes")
+        elif field == "comic":
+            updates["comic_enabled"] = raw.lower() in ("on", "true", "1", "yes")
+        elif field == "fortune":
+            updates["fortune_enabled"] = raw.lower() in ("on", "true", "1", "yes")
         elif field == "voice":
             updates["voice_transcribe"] = raw.lower() in ("on", "true", "1", "yes")
         elif field == "memory":

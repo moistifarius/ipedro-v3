@@ -1,4 +1,4 @@
-"""Idle behavior: Pedro periodically takes a photo and shares it.
+"""Idle behavior: the Dude periodically takes a photo and shares it.
 
 Same Poisson shape as the duck spawner. Each tick, every chat that has
 opted in (`share_photo_enabled = TRUE`) independently rolls
@@ -57,7 +57,7 @@ async def _take_and_post_photo(
     try:
         await bot.send_photo(
             chat_id,
-            BufferedInputFile(image, filename="pedro.png"),
+            BufferedInputFile(image, filename="dude.png"),
             caption=caption,
             disable_notification=True,
         )

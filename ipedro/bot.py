@@ -16,14 +16,25 @@ from ipedro.db.pool import Database, set_db
 from ipedro.db.repositories import ChatRepo, CommandLogRepo, UserRepo
 from ipedro.duckhunt.service import DuckhuntService
 from ipedro.duckhunt.spawner import run_spawner
+from ipedro.ambient_loops import run_ambient_loops
 from ipedro.handlers import admin as admin_h
 from ipedro.handlers import ai as ai_h
 from ipedro.handlers import basics as basics_h
 from ipedro.handlers import chat as chat_h
+from ipedro.handlers import debug as debug_h
 from ipedro.handlers import duckhunt as duck_h
+from ipedro.handlers import karma as karma_h
+from ipedro.handlers import mod as mod_h
+from ipedro.handlers import utility as utility_h
 from ipedro.logging_setup import configure_logging
+from ipedro.celebrations import run_celebrations_loop
+from ipedro.comic import run_comic_loop
+from ipedro.kv import kv_get
+from ipedro.personas import set_master_prompt_override
 from ipedro.memory.store import MemoryStore
 from ipedro.openai_client import OpenAIClient
+from ipedro.persona_state import PersonaStateService
+from ipedro.reminders import run_reminders_loop
 from ipedro.runtime import Runtime
 from ipedro.sharephoto import run_share_photo_loop
 
@@ -49,6 +60,15 @@ async def build_runtime(settings: Settings) -> Runtime:
         embedding_model=settings.openai_embedding_model,
         embedding_dim=settings.openai_embedding_dim,
     )
+    openai.attach_usage_db(db)
+
+    # Pick up any persisted master-prompt override before serving requests.
+    # Falls back to the legacy key set by earlier versions.
+    override = (
+        await kv_get(db, "master_prompt")
+        or await kv_get(db, "pedro_master_prompt")
+    )
+    set_master_prompt_override(override)
     memory = MemoryStore(db=db, openai=openai, pgvector_available=pgvector_available)
     return Runtime(
         settings=settings,
@@ -60,6 +80,7 @@ async def build_runtime(settings: Settings) -> Runtime:
         chats=ChatRepo(db),
         users=UserRepo(db),
         command_log=CommandLogRepo(db),
+        persona_state=PersonaStateService(db),
         pgvector_available=pgvector_available,
     )
 
@@ -70,6 +91,10 @@ def build_dispatcher(rt: Runtime) -> Dispatcher:
     # then the catch-all chat handler.
     dp.include_router(basics_h.build_router(rt))
     dp.include_router(admin_h.build_router(rt))
+    dp.include_router(debug_h.build_router(rt))
+    dp.include_router(mod_h.build_router(rt))
+    dp.include_router(utility_h.build_router(rt))
+    dp.include_router(karma_h.build_router(rt))
     dp.include_router(ai_h.build_router(rt))
     dp.include_router(duck_h.build_router(rt))
     dp.include_router(chat_h.build_router(rt))
@@ -79,7 +104,7 @@ def build_dispatcher(rt: Runtime) -> Dispatcher:
 async def run() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
-    log.info("Starting iPedro V2")
+    log.info("Starting iDude — the Dude abides.")
     rt = await build_runtime(settings)
     dp = build_dispatcher(rt)
 
@@ -99,9 +124,31 @@ async def run() -> None:
         run_share_photo_loop(rt.bot, rt.db, rt.openai, settings, stop),
         name="share-photo",
     )
+    reminders_task = asyncio.create_task(
+        run_reminders_loop(rt.bot, rt.db, stop),
+        name="reminders",
+    )
+    celebrations_task = asyncio.create_task(
+        run_celebrations_loop(rt.bot, rt.db, stop),
+        name="celebrations",
+    )
+    comic_task = asyncio.create_task(
+        run_comic_loop(rt.bot, rt.db, rt.openai, stop),
+        name="comic",
+    )
+    ambient_task = asyncio.create_task(
+        run_ambient_loops(rt.bot, rt.db, rt.openai, stop),
+        name="ambient-loops",
+    )
 
     try:
-        polling = asyncio.create_task(dp.start_polling(rt.bot), name="aiogram-polling")
+        polling = asyncio.create_task(
+            dp.start_polling(
+                rt.bot,
+                allowed_updates=dp.resolve_used_update_types(),
+            ),
+            name="aiogram-polling",
+        )
         # Wait until either polling exits or stop is signaled.
         done, _ = await asyncio.wait(
             {polling, asyncio.create_task(stop.wait(), name="stop-waiter")},
@@ -114,7 +161,10 @@ async def run() -> None:
                 log.exception("Task exited with error: %s", t.exception())
     finally:
         stop.set()
-        for task in (spawner_task, share_photo_task):
+        for task in (
+            spawner_task, share_photo_task, reminders_task,
+            celebrations_task, comic_task, ambient_task,
+        ):
             task.cancel()
             try:
                 await task

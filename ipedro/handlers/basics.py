@@ -14,8 +14,8 @@ from ipedro.runtime import Runtime
 log = logging.getLogger(__name__)
 
 HELP_TEXT = (
-    "Hi! I'm iPedro V2. I chat, generate images, transcribe voice, run "
-    "duckhunt, and remember stuff over time.\n\n"
+    "Hey, man. I'm the Dude. I chat, generate images, transcribe voice, "
+    "run duckhunt, and remember stuff, more or less.\n\n"
     "Common commands:\n"
     "/start - say hi\n"
     "/help - this message\n"
@@ -30,13 +30,49 @@ HELP_TEXT = (
     "/duckhunt - spawn a duck in this chat (if duckhunt enabled)\n"
     "/duckstats - leaderboard for this chat\n"
     "/duckfriends - your roster of befriended ducks here\n"
+    "/duckname <id> <name> - name one of your befriended ducks\n"
     "/quackflag - is there an active duck?\n"
+    "/remind <duration> <text> - schedule a future reminder (e.g. 1h30m)\n"
+    "/poll Q | A | B | ... - create a poll\n"
+    "/whatdid <@user> - confidently summarize what someone's been up to\n"
+    "/mood - show my current mood + word of the day\n"
+    "/quote - reply to a msg to save it, or call alone for a random quote\n"
+    "/quotes - list recent quotes\n"
+    "/unquote <id> - delete a saved quote\n"
+    "/tldr [duration] - summarize the recent chat (default 24h)\n"
+    "/birthday MM-DD - set your birthday\n"
+    "/anniversary <name> MM-DD-YYYY - set a chat anniversary\n"
+    "/dates - list all tracked dates here\n"
+    "/catchphrases <@user> - their repeated phrases\n"
+    "/lexicon <@user> - their top words\n"
+    "/heatmap - this chat's activity by hour-of-day\n"
+    "/meme top text | bottom text - generate a meme image\n"
+    "/config - inline-keyboard settings wizard\n"
+    "/global_leaderboard - duck leaderboard across all chats\n"
+    "/haiku - haiku about the recent chat\n"
+    "/this_or_that A | B - I decide, dramatically\n"
+    "/echo @user [topic] - I mimic their style\n"
+    "/roast @user, /compliment @user\n"
+    "/karma - chat karma leaderboard (react with 👍/👎 to grant/dock)\n"
+    "/confess <text> (DM only) - anonymously submit a confession\n"
+    "/lyric <line> - I mishear the lyric\n"
+    "/whoslurking - users silent for >7 days\n"
+    "\n"
+    "Mod (admin or chat creator/admin):\n"
+    "/shutup @user [duration] - I ignore them\n"
+    "/unshutup @user - release\n"
+    "/snark_at @user - extra snark toward them\n"
+    "/unsnark @user, /ungrudge @user - release\n"
+    "/flags - active flags in this chat\n"
+    "\n"
+    "(admin DM only) /master_prompt show|set|reset - my master persona prompt\n"
+    "(admin DM only) /logs [N] [filter] - real program logs from the ring buffer\n"
     "/get_chat_id - show this chat's id\n"
     "/chat_config - show or change response policy/persona\n"
     "\nReply to ducks with: bang, bef, ignore.\n"
     "Bef may be refused - the duck decides. If refused, you'll get a small "
     "challenge to solve (reply to it) before you can try bef again.\n"
-    "Say 'bad bot' or 'bad pedro' as a reply to my message to delete it."
+    "Say 'bad bot' or 'bad dude' as a reply to my message to delete it."
 )
 
 
@@ -46,7 +82,11 @@ def build_router(rt: Runtime) -> Router:
     @r.message(Command("start"))
     async def start(msg: Message) -> None:
         await get_or_create_chat_config(rt, msg)
-        await msg.reply("Hello! I am iPedro V2. Type /help for commands.")
+        await msg.reply(
+            "Yeah, hey, man. I'm the Dude. Or, you know, His Dudeness, "
+            "Duder, El Duderino if you're not into the whole brevity thing. "
+            "Type /help for commands."
+        )
         await rt.command_log.add(
             msg.chat.id if msg.chat else None,
             msg.from_user.id if msg.from_user else None,

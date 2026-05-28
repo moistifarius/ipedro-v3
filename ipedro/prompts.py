@@ -49,16 +49,19 @@ DUCK_BEF_DECIDE_PROMPT = (
 # by the service; the prompt picks the actual content.
 DUCK_BEF_CHALLENGE_PROMPT = (
     "Generate a single small challenge for {display_name} to solve in a "
-    "Telegram chat game. The challenge type is: {kind}.\n"
-    "- captcha: ask them to spell out a specific short word or phrase using "
-    "  emoji, punctuation, or weirdly-spaced letters. Make it possible.\n"
-    "- trivia: ask one weird, off-the-wall trivia question. It can be obscure "
-    "  but must have a roughly real answer.\n"
-    "- recipe: ask them to type out a brief recipe for something specific "
-    "  (e.g. 'write me a recipe for a duck-themed sandwich').\n\n"
-    "Output ONLY the challenge text - no preamble, no 'here is your challenge', "
-    "no explanation. Keep it under 280 characters. The user will reply to "
-    "the message with their attempt."
+    "Telegram chat game. The challenge type is: {kind}.\n\n"
+    "Rules for ALL types:\n"
+    "- Do NOT include the answer, an example answer, a hint, a sample, or "
+    "  a demonstration of what a 'good' response looks like.\n"
+    "- Do NOT include any preamble, 'here is your challenge', emoji headers, "
+    "  or explanation. Just the challenge text itself.\n"
+    "- Address the user directly. Keep it under 280 characters.\n\n"
+    "Type-specific rules:\n"
+    "- trivia: One weird, off-the-wall, obscure trivia question with a real "
+    "  answer. Do not hint at or reveal the answer.\n"
+    "- recipe: Ask for a brief recipe for something specific and absurd "
+    "  (e.g. 'a duck-themed sandwich', 'soup that tastes like Tuesday'). "
+    "  Do not list ingredients or steps yourself."
 )
 
 DUCK_BEF_CHALLENGE_JUDGE_PROMPT = (
@@ -84,23 +87,108 @@ SUMMARIZE_PROMPT = (
 )
 
 PEDRO_PHOTO_SCENE_PROMPT = (
-    "You are Pedro, a chaotic Telegram bot. In ONE short sentence (under 20 "
-    "words), describe a candid photo you just took and want to share with "
-    "the group. Mundane, weird, oddly specific is good. Examples: 'A pigeon "
-    "wearing a knitted scarf on a fence', 'My instant ramen but the egg has "
-    "a face', 'The exact moment I spilled coffee on a library book'. Output "
-    "ONLY the scene description, no preamble, no quotes."
+    "You are the Dude. In ONE short sentence (under 20 words), describe a "
+    "candid photo you might've just taken on a cheap disposable camera "
+    "around Venice Beach. Mundane, sun-bleached, slightly absurd is good. "
+    "Examples: 'The half-and-half at Ralph's has a weird date on it again', "
+    "'Walter's bowling shoes drying on the porch', 'A pelican that looks "
+    "like Sam Elliott'. Output ONLY the scene description, no preamble, "
+    "no quotes."
 )
 
 PEDRO_PHOTO_RENDER_TEMPLATE = (
-    "Candid amateur cell-phone snapshot, slightly soft focus, casual framing, "
-    "natural light: {scene}"
+    "Candid amateur 1990s disposable-camera snapshot. Slight grain, warm "
+    "California light, casual framing, slightly off-kilter composition. "
+    "Subject: {scene}"
 )
 
 PEDRO_PHOTO_CAPTION_PROMPT = (
-    "You are Pedro. You just took this photo: '{scene}'. Caption it in ONE "
-    "short in-character message (under 15 words). Output ONLY the caption, "
-    "no quotes."
+    "You are the Dude (Jeffrey Lebowski). You just took this photo: "
+    "'{scene}'. Caption it in ONE short, in-character, mellow line "
+    "(under 15 words). Use words like 'man' or 'dude' sparingly. Output "
+    "ONLY the caption, no quotes."
+)
+
+COMIC_SCENES_PROMPT = (
+    "Below are messages from a group chat over the last day. Distill the day "
+    "into FOUR short scene descriptions for a 4-panel newspaper comic strip. "
+    "Each scene should be visually concrete: one moment, one or two characters, "
+    "an action. Keep names generic ('the bot', 'a user'). Output strictly four "
+    "lines, no numbering, one scene per line.\n\n"
+    "Messages:\n{messages}"
+)
+
+COMIC_RENDER_TEMPLATE = (
+    "A 2x2 grid four-panel comic strip in clean black-and-white newspaper "
+    "style. Distinct panels with thin borders. Simple line art, expressive "
+    "characters, minimal background. No speech bubble text required.\n"
+    "Panel 1: {p1}\n"
+    "Panel 2: {p2}\n"
+    "Panel 3: {p3}\n"
+    "Panel 4: {p4}"
+)
+
+MISHEARD_LYRIC_PROMPT = (
+    "Take the song lyric below. Pretend you misheard it but plausibly — "
+    "use real words that sound similar, keep the rhythm, end up with a "
+    "phrase that's slightly absurd or domestic. Output ONLY your misheard "
+    "version, no preamble, no quotes.\n\n"
+    "Lyric: {line}"
+)
+
+FORTUNE_PROMPT = (
+    "Generate a single fortune-cookie style fortune. One sentence (max 20 "
+    "words). Be weird, oddly specific, oracular. Avoid generic 'good things "
+    "come' clichés. Output ONLY the fortune, no preamble, no number."
+)
+
+HAIKU_PROMPT = (
+    "Compose a single haiku (5-7-5 syllables, three lines) inspired by the "
+    "chat snippet below. Be evocative, a little weird, in character as a "
+    "wry observer. Output ONLY the haiku — three lines, no preamble.\n\n"
+    "Chat:\n{messages}"
+)
+
+THIS_OR_THAT_PROMPT = (
+    "Decide between A and B. One short paragraph (under 60 words). Don't "
+    "hedge — name the winner first, then justify with absurd or surprisingly "
+    "specific reasoning. End with a flourish.\n\n"
+    "A: {a}\nB: {b}"
+)
+
+ECHO_PROMPT = (
+    "Below are recent messages from {name}. Mimic their style — their tone, "
+    "vocabulary, capitalization habits, punctuation, sentence length, "
+    "specific quirks. Write ONE short message they might plausibly send "
+    "about: {topic}. Output ONLY that message, no preamble, no quotes.\n\n"
+    "Examples from {name}:\n{messages}"
+)
+
+ROAST_PROMPT = (
+    "Roast {name} in 1-3 sentences. Punch up, be playful, never cruel or "
+    "personal. Base it on these recent messages. Output ONLY the roast.\n\n"
+    "Recent {name}:\n{messages}"
+)
+
+COMPLIMENT_PROMPT = (
+    "Compliment {name} in 1-3 sentences. Be sincere but specific — quote "
+    "back something good you noticed in their recent messages. Output "
+    "ONLY the compliment.\n\n"
+    "Recent {name}:\n{messages}"
+)
+
+YEAR_RETRO_PROMPT = (
+    "Below is a year of chat highlights (compressed). Write a fond, "
+    "slightly exaggerated 'Year in Review' for this group. 6-10 bullets. "
+    "Include running jokes, recurring characters, the most ridiculous "
+    "moments, in-jokes. Output the bullets only.\n\n"
+    "Year:\n{messages}"
+)
+
+TLDR_PROMPT = (
+    "TL;DR of the recent chat below. 3-7 bullet points, in chronological "
+    "order, third-person, no preamble, drop fluff, keep names. Output "
+    "only the bullets.\n\nMessages:\n{messages}"
 )
 
 FACT_EXTRACT_PROMPT = (
