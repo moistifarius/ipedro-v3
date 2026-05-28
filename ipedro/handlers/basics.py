@@ -84,6 +84,7 @@ HELP_TEXT_PUBLIC = (
 
 HELP_TEXT_ADMIN = (
     "Bot admin (DM only):\n"
+    "/manage - one-screen menu of every admin function (categorized)\n"
     "/list_chat_ids - list all known chats\n"
     "/pick_chat - picker that returns a chat id\n"
     "/send_message <chat_id> <text> - send a message as the bot\n"
@@ -100,7 +101,8 @@ HELP_TEXT_ADMIN = (
     "/quack_chat - picker → spawn a duck in that chat\n"
     "/quack_all - spawn a duck in every duckhunt-enabled chat\n"
     "/duckstats_reset - picker → wipe one user's (or all users') "
-    "duck_stats counters in a chat\n"
+    "duck_stats counters in a chat (accepts @username)\n"
+    "/duckstats_edit - picker → user → field/+/- editor for one user's stats\n"
     "\n"
     "Memory / embeddings:\n"
     "/memory_facts [chat_id] - picker (or direct) of stored facts\n"

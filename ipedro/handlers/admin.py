@@ -59,6 +59,58 @@ _MASTER_PROMPT_FILE_MAX_BYTES = 64 * 1024
 log = logging.getLogger(__name__)
 
 
+async def _resolve_user_id(rt, chat_id: int, ref: str) -> int | None:
+    """Resolve an admin-supplied user reference.
+
+    Accepts numeric ('12345', '@12345'), bare or @-prefixed username, or
+    bare display name. Resolution priority:
+      1. Numeric → int() directly (no DB).
+      2. users.username case-insensitive LIMIT 1.
+      3. duck_stats.display_name case-insensitive scoped to chat_id LIMIT 1.
+      4. None.
+    """
+    if ref is None:
+        return None
+    # Strip a SINGLE leading '@' so '@bob' looks like 'bob', but '@@bob'
+    # becomes '@bob' (we then treat it as a username with a literal '@').
+    stripped = ref[1:] if ref.startswith("@") else ref
+    if not stripped:
+        return None
+    # Numeric → int() directly (no DB).
+    if stripped.isdigit():
+        try:
+            return int(stripped)
+        except ValueError:
+            return None
+    # Username lookup, case-insensitive.
+    row = await rt.db.fetchrow(
+        "SELECT user_id FROM users WHERE LOWER(username) = LOWER($1) LIMIT 1",
+        stripped,
+    )
+    if row:
+        return int(row["user_id"])
+    # Display-name lookup scoped to the chat. Log a warning if multiple
+    # display_name rows match — the picked row is arbitrary.
+    count = await rt.db.fetchval(
+        "SELECT COUNT(*) FROM duck_stats "
+        "WHERE chat_id = $1 AND LOWER(display_name) = LOWER($2)",
+        chat_id, stripped,
+    )
+    if count and int(count) > 1:
+        log.warning(
+            "Multiple display_name matches for %r in chat %s; picked arbitrary.",
+            stripped, chat_id,
+        )
+    row = await rt.db.fetchrow(
+        "SELECT user_id FROM duck_stats "
+        "WHERE chat_id = $1 AND LOWER(display_name) = LOWER($2) LIMIT 1",
+        chat_id, stripped,
+    )
+    if row:
+        return int(row["user_id"])
+    return None
+
+
 def _chat_label(chat: dict) -> str:
     title = chat.get("title")
     if title:
@@ -66,21 +118,451 @@ def _chat_label(chat: dict) -> str:
     return f"{chat['type']} {chat['chat_id']}"[:60]
 
 
-def _chat_picker(chats: list[dict], action: str) -> InlineKeyboardMarkup | None:
+# Sticky last-pick per admin user. Maps admin_user_id -> (chat_id, last_ts).
+# A 10-minute TTL keeps it from getting stale.
+_LAST_PICKED_CHAT: dict[int, tuple[int, float]] = {}
+_LAST_PICKED_TTL = 600.0  # seconds
+
+# Page size for paginated chat pickers.
+_CHAT_PICKER_PAGE_SIZE = 20
+
+
+def _expired(cmd: str) -> str:
+    return f"Selection expired — re-run /{cmd} to start over."
+
+
+def _parse_picker_cb(data: str) -> tuple[str, int] | None:
+    """Parse `action:p:N` → ("page", N), or `action:N` → ("pick", N).
+    Returns None on malformed input."""
+    parts = data.split(":", 2)
+    if len(parts) < 2:
+        return None
+    try:
+        if len(parts) == 3 and parts[1] == "p":
+            return ("page", int(parts[2]))
+        return ("pick", int(parts[1]))
+    except ValueError:
+        return None
+
+
+def _chat_picker(
+    chats: list[dict],
+    action: str,
+    *,
+    paginate: bool = False,
+    page: int = 0,
+    admin_user_id: int | None = None,
+) -> InlineKeyboardMarkup | None:
     """Build a one-button-per-row picker. action is the callback prefix.
 
     Telegram caps callback_data at 64 bytes; the chat_id alone fits well
-    inside that. We cap rows at 50 to keep the keyboard usable.
+    inside that. When paginate=True and the chat list exceeds the page
+    size, splits into pages with prev/next buttons. When admin_user_id is
+    provided, prepends a "last pick" sticky row (if within TTL) on page 0.
     """
     if not chats:
         return None
-    rows = [
-        [InlineKeyboardButton(
+    body_rows: list[list[InlineKeyboardButton]] = []
+    paginated = paginate and len(chats) > _CHAT_PICKER_PAGE_SIZE
+    if paginated:
+        total_pages = (len(chats) + _CHAT_PICKER_PAGE_SIZE - 1) // _CHAT_PICKER_PAGE_SIZE
+        page = max(0, min(page, total_pages - 1))
+        start = page * _CHAT_PICKER_PAGE_SIZE
+        sliced = chats[start:start + _CHAT_PICKER_PAGE_SIZE]
+    else:
+        total_pages = 1
+        page = 0
+        # Preserve original cap of 50 when not paginating.
+        sliced = chats[:50]
+    # Sticky last-pick row (only on page 0).
+    if admin_user_id is not None and page == 0:
+        entry = _LAST_PICKED_CHAT.get(admin_user_id)
+        if entry is not None:
+            pinned_id, pinned_ts = entry
+            if time.time() - pinned_ts < _LAST_PICKED_TTL:
+                pinned_chat = next(
+                    (c for c in chats if c["chat_id"] == pinned_id), None,
+                )
+                if pinned_chat is not None:
+                    body_rows.append([InlineKeyboardButton(
+                        text=f"⭐ {_chat_label(pinned_chat)} (last pick)",
+                        callback_data=f"{action}:{pinned_id}",
+                    )])
+    # Main body rows.
+    for c in sliced:
+        body_rows.append([InlineKeyboardButton(
             text=_chat_label(c), callback_data=f"{action}:{c['chat_id']}",
-        )]
-        for c in chats[:50]
+        )])
+    # Pagination row, if applicable.
+    if paginated:
+        if page > 0:
+            prev_btn = InlineKeyboardButton(
+                text="← prev", callback_data=f"{action}:p:{page-1}",
+            )
+        else:
+            prev_btn = InlineKeyboardButton(text="·", callback_data="noop")
+        if page < total_pages - 1:
+            next_btn = InlineKeyboardButton(
+                text="next →", callback_data=f"{action}:p:{page+1}",
+            )
+        else:
+            next_btn = InlineKeyboardButton(text="·", callback_data="noop")
+        mid = InlineKeyboardButton(
+            text=f"{page+1}/{total_pages}", callback_data="noop",
+        )
+        body_rows.append([prev_btn, mid, next_btn])
+    return InlineKeyboardMarkup(inline_keyboard=body_rows)
+
+
+def _confirmation_keyboard(original_cb: str) -> InlineKeyboardMarkup:
+    """Confirm/cancel keyboard pair for destructive ops.
+
+    Appends ':confirm' and ':cancel' to the supplied callback prefix; the
+    handler that owns the prefix must dispatch on the suffix.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="⚠️ YES, do it",
+            callback_data=f"{original_cb}:confirm",
+        ),
+        InlineKeyboardButton(
+            text="Cancel",
+            callback_data=f"{original_cb}:cancel",
+        ),
+    ]])
+
+
+# Cross-link action rows appended to existing admin results. The
+# callbacks fall into three top-level prefixes:
+#   mst:* — after /memory_stats (or anywhere we render memory diagnostics)
+#   mfx:* — after /memory_facts (per-chat) or /memory_summarize_now
+#   aip:* — after /ai_provider show
+def _mst_action_row(chat_id: int) -> list[InlineKeyboardButton]:
+    """Bottom row after /memory_stats."""
+    return [
+        InlineKeyboardButton(text="Show facts",     callback_data=f"mst:facts:{chat_id}"),
+        InlineKeyboardButton(text="Force summarize", callback_data=f"mst:force:{chat_id}"),
+        InlineKeyboardButton(text="Edit duckstats", callback_data=f"mst:edit:{chat_id}"),
+        InlineKeyboardButton(text="← chats",        callback_data="mst:back"),
     ]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _mfx_action_row(chat_id: int) -> list[InlineKeyboardButton]:
+    """Bottom row after /memory_facts (per-chat result)."""
+    return [
+        InlineKeyboardButton(text="Force re-extract", callback_data=f"mfx:reextract:{chat_id}"),
+        InlineKeyboardButton(text="Stats",            callback_data=f"mfx:stats:{chat_id}"),
+        InlineKeyboardButton(text="← chats",          callback_data="mfx:back"),
+    ]
+
+
+def _aip_action_row() -> list[InlineKeyboardButton]:
+    """Bottom row after /ai_provider show."""
+    return [
+        InlineKeyboardButton(text="→ Claude",       callback_data="aip:switch:claude"),
+        InlineKeyboardButton(text="→ OpenAI",       callback_data="aip:switch:openai"),
+        InlineKeyboardButton(text="Claude models",  callback_data="aip:list:claude"),
+        InlineKeyboardButton(text="OpenAI models",  callback_data="aip:list:openai"),
+    ]
+
+
+# ----- /manage hub keyboards -------------------------------------------------
+def _mgm_top_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💾 Memory",          callback_data="mgm:memory")],
+        [InlineKeyboardButton(text="🦆 Duckhunt",        callback_data="mgm:duck")],
+        [InlineKeyboardButton(text="🤖 AI providers",    callback_data="mgm:ai")],
+        [InlineKeyboardButton(text="💬 Chats",           callback_data="mgm:chats")],
+        [InlineKeyboardButton(text="🛠 Debug & status",  callback_data="mgm:debug")],
+    ])
+
+
+def _mgm_memory_submenu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Facts (per chat)",        callback_data="mgm:memory:facts")],
+        [InlineKeyboardButton(text="Stats (per chat)",        callback_data="mgm:memory:stats")],
+        [InlineKeyboardButton(text="Summary (per chat)",      callback_data="mgm:memory:summary")],
+        [InlineKeyboardButton(text="Force summarize",         callback_data="mgm:memory:force")],
+        [InlineKeyboardButton(text="← back",                  callback_data="mgm:top")],
+    ])
+
+
+def _mgm_duck_submenu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Edit user's stats",       callback_data="mgm:duck:edit")],
+        [InlineKeyboardButton(text="Reset stats",             callback_data="mgm:duck:reset")],
+        [InlineKeyboardButton(text="Spawn in one chat",       callback_data="mgm:duck:spawn")],
+        [InlineKeyboardButton(text="Spawn in all chats",      callback_data="mgm:duck:spawnall")],
+        [InlineKeyboardButton(text="← back",                  callback_data="mgm:top")],
+    ])
+
+
+def _mgm_ai_submenu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Show provider",           callback_data="mgm:ai:show")],
+        [InlineKeyboardButton(text="→ Claude",                callback_data="aip:switch:claude")],
+        [InlineKeyboardButton(text="→ OpenAI",                callback_data="aip:switch:openai")],
+        [InlineKeyboardButton(text="Claude models",           callback_data="aip:list:claude")],
+        [InlineKeyboardButton(text="OpenAI models",           callback_data="aip:list:openai")],
+        [InlineKeyboardButton(text="← back",                  callback_data="mgm:top")],
+    ])
+
+
+def _mgm_chats_submenu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="List chat ids",           callback_data="mgm:chats:list")],
+        [InlineKeyboardButton(text="Pick chat (copy id)",     callback_data="mgm:chats:pick")],
+        [InlineKeyboardButton(text="← back",                  callback_data="mgm:top")],
+    ])
+
+
+def _mgm_debug_submenu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Status",                  callback_data="mgm:debug:status")],
+        [InlineKeyboardButton(text="Recent logs",             callback_data="mgm:debug:logs")],
+        [InlineKeyboardButton(text="Cost (7d)",               callback_data="mgm:debug:cost")],
+        [InlineKeyboardButton(text="Command log",             callback_data="mgm:debug:cmdlog")],
+        [InlineKeyboardButton(text="← back",                  callback_data="mgm:top")],
+    ])
+
+
+# Manifest of valid mgm:* leaves used by the dispatcher and the
+# completeness test. Keep this in sync with the submenu builders above.
+_MGM_LEAVES: tuple[str, ...] = (
+    "mgm:top",
+    "mgm:memory", "mgm:memory:facts", "mgm:memory:stats",
+    "mgm:memory:summary", "mgm:memory:force",
+    "mgm:duck", "mgm:duck:edit", "mgm:duck:reset",
+    "mgm:duck:spawn", "mgm:duck:spawnall",
+    "mgm:ai", "mgm:ai:show",
+    "mgm:chats", "mgm:chats:list", "mgm:chats:pick",
+    "mgm:debug", "mgm:debug:status", "mgm:debug:logs",
+    "mgm:debug:cost", "mgm:debug:cmdlog",
+)
+
+
+# Known text models for /ai_model and aip:list pickers. Promotes the
+# private price-table keys without coupling admin.py to openai_client
+# internals. Update by hand when adding a new model price entry.
+_KNOWN_CLAUDE_TEXT_MODELS: tuple[str, ...] = (
+    "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5",
+    "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5",
+)
+_KNOWN_OPENAI_TEXT_MODELS: tuple[str, ...] = (
+    "gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1",
+)
+
+
+# Pending custom-value entries for the /duckstats_edit "Set to custom…"
+# button. Keyed by admin user_id → (chat_id, user_id, field, ts).
+_PENDING_CUSTOM_VALUES: dict[int, tuple[int, int, str, float]] = {}
+_CUSTOM_VALUE_TTL = 60.0  # seconds
+
+# Whitelist of duck_stats columns the editor is allowed to touch. The
+# field-name interpolation in _apply_duckstat_delta / _set_duckstat_field
+# is SQL-injection-safe because field is membership-checked here first.
+# NEVER add anything outside the six editable fields without a code review.
+_DUCKSTAT_EDITABLE_FIELDS: tuple[str, ...] = (
+    "points", "killed", "befriended", "misses", "streak", "best_streak",
+)
+
+
+async def _apply_duckstat_delta(
+    db, chat_id: int, user_id: int, field: str, delta: int,
+) -> tuple[bool, int | None]:
+    """Apply a +/-delta to one duckstat field, clamping at 0. Returns
+    (ok, new_value). Returns (False, None) when the row doesn't exist
+    or the field is not whitelisted."""
+    if field not in _DUCKSTAT_EDITABLE_FIELDS:
+        return False, None
+    row = await db.fetchrow(
+        f"UPDATE duck_stats SET {field} = GREATEST(0, {field} + $3) "
+        " WHERE chat_id = $1 AND user_id = $2 "
+        f"RETURNING {field}",
+        chat_id, user_id, delta,
+    )
+    if row is None:
+        return False, None
+    return True, int(row[field])
+
+
+async def _set_duckstat_field(
+    db, chat_id: int, user_id: int, field: str, value: int,
+) -> tuple[bool, int | None]:
+    """Absolute SET (not delta). Clamps at 0. Used by 'Set to 0' and
+    custom-value entry."""
+    if field not in _DUCKSTAT_EDITABLE_FIELDS:
+        return False, None
+    clamped = max(0, value)
+    row = await db.fetchrow(
+        f"UPDATE duck_stats SET {field} = $3 "
+        " WHERE chat_id = $1 AND user_id = $2 "
+        f"RETURNING {field}",
+        chat_id, user_id, clamped,
+    )
+    if row is None:
+        return False, None
+    return True, int(row[field])
+
+
+def _render_duckstat_field_picker(
+    chat_id: int, user_id: int, field: str, current_value: int,
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Build the field-edit keyboard (deltas + set + custom + back)."""
+    head = f"{field}: {current_value}\n\nTap a delta or set:"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="-100", callback_data=f"dse:delta:{chat_id}:{user_id}:{field}:-100"),
+            InlineKeyboardButton(text="-10",  callback_data=f"dse:delta:{chat_id}:{user_id}:{field}:-10"),
+            InlineKeyboardButton(text="-1",   callback_data=f"dse:delta:{chat_id}:{user_id}:{field}:-1"),
+            InlineKeyboardButton(text="+1",   callback_data=f"dse:delta:{chat_id}:{user_id}:{field}:+1"),
+            InlineKeyboardButton(text="+10",  callback_data=f"dse:delta:{chat_id}:{user_id}:{field}:+10"),
+            InlineKeyboardButton(text="+100", callback_data=f"dse:delta:{chat_id}:{user_id}:{field}:+100"),
+        ],
+        [
+            InlineKeyboardButton(text="Set to 0",       callback_data=f"dse:zero:{chat_id}:{user_id}:{field}"),
+            InlineKeyboardButton(text="Set to custom…", callback_data=f"dse:custom:{chat_id}:{user_id}:{field}"),
+        ],
+        [InlineKeyboardButton(text="← back to fields", callback_data=f"dse:user:{chat_id}:{user_id}")],
+    ])
+    return head, kb
+
+
+async def _open_picker(
+    rt,
+    *,
+    reply_to: Message | None = None,
+    edit_in: Message | None = None,
+    prompt: str,
+    action: str,
+    fetcher=None,
+    paginate: bool = True,
+    admin_user_id: int | None = None,
+    empty_message: str = "No known chats yet.",
+) -> None:
+    """One-stop helper to render a chat picker either as a fresh reply
+    (when reply_to is given) or by editing an existing message (edit_in).
+
+    Used by /manage's submenu buttons. Existing slash-command pickers
+    don't route through this — they construct their keyboards inline.
+    """
+    if fetcher is None:
+        chats = await rt.chats.list_known()
+    else:
+        chats = await fetcher()
+    kb = _chat_picker(
+        chats, action,
+        paginate=paginate, page=0,
+        admin_user_id=admin_user_id,
+    )
+    if kb is None:
+        body = empty_message
+    else:
+        body = prompt
+    if reply_to:
+        await reply_to.reply(
+            body, reply_markup=kb, disable_notification=True,
+        )
+    elif edit_in:
+        try:
+            await edit_in.edit_text(body, reply_markup=kb)
+        except TelegramBadRequest:
+            pass
+
+
+async def _top_users_for_chat(db, chat_id: int, limit: int = 20) -> list[dict]:
+    rows = await db.fetch(
+        "SELECT user_id, display_name, points, killed, befriended, misses "
+        "  FROM duck_stats "
+        " WHERE chat_id = $1 "
+        " ORDER BY points DESC, killed DESC "
+        " LIMIT $2",
+        chat_id, limit,
+    )
+    return [dict(r) for r in rows]
+
+
+def _user_picker(
+    rows: list[dict],
+    action: str,
+    *,
+    with_reset_all_for_chat_id: int | None = None,
+) -> InlineKeyboardMarkup | None:
+    """Build a per-user picker keyboard. `action` is the callback prefix
+    (e.g. 'dsru:CHATID' or 'dse:user:CHATID'). Optionally appends a
+    'Reset ALL' bulk button at the bottom when given a chat id."""
+    if not rows:
+        return None
+    kb_rows: list[list[InlineKeyboardButton]] = []
+    for r in rows:
+        name = (r['display_name'] or str(r['user_id']))[:30]
+        label = (
+            f"{name} — {r['points']}pts "
+            f"({r['killed']}🔫 {r['befriended']}🤝)"
+        )[:60]
+        kb_rows.append([InlineKeyboardButton(
+            text=label,
+            callback_data=f"{action}:{r['user_id']}",
+        )])
+    if with_reset_all_for_chat_id is not None:
+        kb_rows.append([InlineKeyboardButton(
+            text=f"⚠️  Reset ALL {len(rows)} users in this chat",
+            callback_data=f"dsra:{with_reset_all_for_chat_id}",
+        )])
+    return InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+
+def _render_summary_report(report: dict, chat_id: int) -> str:
+    """Format a `force_summarize` return value into the admin-visible
+    text body. Used by both the old `on_memory_summarize_now` callback
+    and the new mst:/mfx: cross-link buttons."""
+    if not report.get("ok"):
+        return f"Skipped chat {chat_id}: {report.get('reason', 'unknown')}"
+    facts_added = report.get("facts_added", [])
+    facts_block = (
+        "\n".join(f"  - {f}" for f in facts_added)
+        if facts_added else "  (none)"
+    )
+    return (
+        f"Force-summarized chat {chat_id}.\n"
+        f"  messages summarized: {report['messages_summarized']}\n"
+        f"  summary id: {report['summary_id']} "
+        f"({report['summary_chars']} chars)\n"
+        f"  facts added ({len(facts_added)}):\n{facts_block}"
+    )
+
+
+async def _with_working_placeholder(
+    cb,
+    head_text: str,
+    work,
+) -> None:
+    """Edit cb.message to '<head>\n\n⏳ Working…' immediately, run work(),
+    then re-edit to its result. On exception, edit to '❌ Failed: <reason>'.
+
+    `work` is a zero-arg callable returning an awaitable that resolves to
+    (body, kb) where body is str and kb is InlineKeyboardMarkup | None.
+    """
+    if cb.message:
+        try:
+            await cb.message.edit_text(f"{head_text}\n\n⏳ Working…")
+        except TelegramBadRequest:
+            pass
+    try:
+        body, kb = await work()
+    except Exception as exc:
+        log.warning("callback %s failed: %s", cb.data, exc)
+        if cb.message:
+            try:
+                await cb.message.edit_text(f"❌ Failed: {exc}")
+            except TelegramBadRequest:
+                pass
+        return
+    if cb.message:
+        try:
+            await cb.message.edit_text(body[:4000], reply_markup=kb)
+        except TelegramBadRequest:
+            pass
 
 
 def build_router(rt: Runtime) -> Router:
@@ -237,7 +719,11 @@ def build_router(rt: Runtime) -> Router:
         if not await require_admin(msg, admin_ids):
             return
         chats = await duckhunt_enabled_chats(rt.db)
-        kb = _chat_picker(chats, "qchat")
+        kb = _chat_picker(
+            chats, "qchat",
+            paginate=True,
+            admin_user_id=msg.from_user.id if msg.from_user else None,
+        )
         if kb is None:
             await msg.reply(
                 "No chats have duckhunt enabled.", disable_notification=True,
@@ -253,11 +739,27 @@ def build_router(rt: Runtime) -> Router:
     async def on_quack_chat(cb: CallbackQuery) -> None:
         if not await _gate_callback(cb):
             return
-        try:
-            target = int(cb.data.split(":", 1)[1])
-        except (ValueError, IndexError):
-            await cb.answer("Bad selection.", show_alert=True)
+        parsed = _parse_picker_cb(cb.data)
+        if parsed is None:
+            await cb.answer(_expired("quack_chat"), show_alert=True)
             return
+        kind, n = parsed
+        if kind == "page":
+            chats = await duckhunt_enabled_chats(rt.db)
+            kb = _chat_picker(
+                chats, "qchat", paginate=True, page=n,
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_reply_markup(reply_markup=kb)
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        target = n
+        if cb.from_user is not None:
+            _LAST_PICKED_CHAT[cb.from_user.id] = (target, time.time())
         if await rt.duckhunt.active_duck(target):
             await cb.answer("That chat already has an active duck.", show_alert=True)
             return
@@ -290,7 +792,11 @@ def build_router(rt: Runtime) -> Router:
         if not await require_admin(msg, admin_ids):
             return
         chats = await rt.chats.list_known()
-        kb = _chat_picker(chats, "fchat")
+        kb = _chat_picker(
+            chats, "fchat",
+            paginate=True,
+            admin_user_id=msg.from_user.id if msg.from_user else None,
+        )
         if kb is None:
             await msg.reply("No known chats yet.", disable_notification=True)
             return
@@ -304,21 +810,28 @@ def build_router(rt: Runtime) -> Router:
     async def on_facts_chat(cb: CallbackQuery) -> None:
         if not await _gate_callback(cb):
             return
-        try:
-            target = int(cb.data.split(":", 1)[1])
-        except (ValueError, IndexError):
-            await cb.answer("Bad selection.", show_alert=True)
+        parsed = _parse_picker_cb(cb.data)
+        if parsed is None:
+            await cb.answer(_expired("facts_chat"), show_alert=True)
             return
-        facts = await rt.memory.list_facts(target, limit=50)
-        if not facts:
-            body = f"No facts stored for chat {target}."
-        else:
-            body = "\n".join(f"[{f.id}] {f.fact}" for f in facts)
-        if cb.message:
-            try:
-                await cb.message.edit_text(body[:4000])
-            except TelegramBadRequest:
-                pass
+        kind, n = parsed
+        if kind == "page":
+            chats = await rt.chats.list_known()
+            kb = _chat_picker(
+                chats, "fchat", paginate=True, page=n,
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_reply_markup(reply_markup=kb)
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        target = n
+        if cb.from_user is not None:
+            _LAST_PICKED_CHAT[cb.from_user.id] = (target, time.time())
+        await _send_facts_for(target, reply_to=None, edit_in=cb.message)
         await cb.answer()
 
     @r.message(Command("pick_chat"))
@@ -327,7 +840,11 @@ def build_router(rt: Runtime) -> Router:
         if not await require_admin(msg, admin_ids):
             return
         chats = await rt.chats.list_known()
-        kb = _chat_picker(chats, "pchat")
+        kb = _chat_picker(
+            chats, "pchat",
+            paginate=True,
+            admin_user_id=msg.from_user.id if msg.from_user else None,
+        )
         if kb is None:
             await msg.reply("No known chats yet.", disable_notification=True)
             return
@@ -341,11 +858,27 @@ def build_router(rt: Runtime) -> Router:
     async def on_pick_chat(cb: CallbackQuery) -> None:
         if not await _gate_callback(cb):
             return
-        try:
-            target = int(cb.data.split(":", 1)[1])
-        except (ValueError, IndexError):
-            await cb.answer("Bad selection.", show_alert=True)
+        parsed = _parse_picker_cb(cb.data)
+        if parsed is None:
+            await cb.answer(_expired("pick_chat"), show_alert=True)
             return
+        kind, n = parsed
+        if kind == "page":
+            chats = await rt.chats.list_known()
+            kb = _chat_picker(
+                chats, "pchat", paginate=True, page=n,
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_reply_markup(reply_markup=kb)
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        target = n
+        if cb.from_user is not None:
+            _LAST_PICKED_CHAT[cb.from_user.id] = (target, time.time())
         if cb.message:
             try:
                 await cb.message.edit_text(
@@ -369,6 +902,9 @@ def build_router(rt: Runtime) -> Router:
                 f"  claude model: {rt.openai.claude_model}\n"
                 f"  openai model: {rt.openai.text_model}\n"
                 "Switch with: /ai_provider claude  or  /ai_provider openai",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[_aip_action_row()],
+                ),
                 disable_notification=True,
             )
             return
@@ -613,7 +1149,7 @@ def build_router(rt: Runtime) -> Router:
         """Format and send the fact list for one chat.
 
         Either replies to `reply_to` (typed-arg path) or edits `edit_in`
-        in place (callback path).
+        in place (callback path). Appends a cross-link action row.
         """
         facts = await rt.memory.list_facts(target, limit=50)
         if not facts:
@@ -622,13 +1158,27 @@ def build_router(rt: Runtime) -> Router:
             head = f"Facts for chat {target} ({len(facts)}):\n"
             body = head + "\n".join(f"[{f.id}] {f.fact}" for f in facts)
         body = body[:4000]
+        kb = InlineKeyboardMarkup(inline_keyboard=[_mfx_action_row(target)])
         if reply_to:
-            await reply_to.reply(body, disable_notification=True)
+            await reply_to.reply(
+                body, reply_markup=kb, disable_notification=True,
+            )
         elif edit_in:
             try:
-                await edit_in.edit_text(body)
+                await edit_in.edit_text(body, reply_markup=kb)
             except TelegramBadRequest:
                 pass
+
+    async def _do_force_summarize_render(
+        target: int,
+    ) -> tuple[str, InlineKeyboardMarkup | None]:
+        """Run force_summarize and return (body, kb) for placeholder rendering."""
+        report = await force_summarize(
+            rt.memory, rt.openai, rt.settings, target,
+        )
+        body = _render_summary_report(report, target)
+        kb = InlineKeyboardMarkup(inline_keyboard=[_mfx_action_row(target)])
+        return body, kb
 
     @r.message(Command("memory_facts"))
     async def memory_facts(msg: Message) -> None:
@@ -646,7 +1196,11 @@ def build_router(rt: Runtime) -> Router:
             await _send_facts_for(target, reply_to=msg, edit_in=None)
             return
         chats = await rt.chats.list_known()
-        kb = _chat_picker(chats, "mfacts")
+        kb = _chat_picker(
+            chats, "mfacts",
+            paginate=True,
+            admin_user_id=msg.from_user.id if msg.from_user else None,
+        )
         if kb is None:
             await msg.reply("No known chats yet.", disable_notification=True)
             return
@@ -660,11 +1214,27 @@ def build_router(rt: Runtime) -> Router:
     async def on_memory_facts(cb: CallbackQuery) -> None:
         if not await _gate_callback(cb):
             return
-        try:
-            target = int(cb.data.split(":", 1)[1])
-        except (ValueError, IndexError):
-            await cb.answer("Bad selection.", show_alert=True)
+        parsed = _parse_picker_cb(cb.data)
+        if parsed is None:
+            await cb.answer(_expired("memory_facts"), show_alert=True)
             return
+        kind, n = parsed
+        if kind == "page":
+            chats = await rt.chats.list_known()
+            kb = _chat_picker(
+                chats, "mfacts", paginate=True, page=n,
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_reply_markup(reply_markup=kb)
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        target = n
+        if cb.from_user is not None:
+            _LAST_PICKED_CHAT[cb.from_user.id] = (target, time.time())
         await _send_facts_for(target, reply_to=None, edit_in=cb.message)
         await cb.answer()
 
@@ -726,7 +1296,11 @@ def build_router(rt: Runtime) -> Router:
         if not await require_admin(msg, admin_ids):
             return
         chats = await rt.chats.list_known()
-        kb = _chat_picker(chats, "mstats")
+        kb = _chat_picker(
+            chats, "mstats",
+            paginate=True,
+            admin_user_id=msg.from_user.id if msg.from_user else None,
+        )
         if kb is None:
             await msg.reply("No known chats yet.", disable_notification=True)
             return
@@ -736,15 +1310,14 @@ def build_router(rt: Runtime) -> Router:
             disable_notification=True,
         )
 
-    @r.callback_query(F.data.startswith("mstats:"))
-    async def on_memory_stats(cb: CallbackQuery) -> None:
-        if not await _gate_callback(cb):
-            return
-        try:
-            target = int(cb.data.split(":", 1)[1])
-        except (ValueError, IndexError):
-            await cb.answer("Bad selection.", show_alert=True)
-            return
+    async def _render_memory_stats_body(
+        target: int,
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        """Build the per-chat memory-stats body + cross-link keyboard.
+
+        Extracted from on_memory_stats so the mfx:stats callback can
+        reuse it.
+        """
         # Per-chat aggregates via direct SQL (admin-only diagnostic, not a
         # hot path; cheaper than adding a half-dozen one-off repo methods).
         msg_rows = await rt.db.fetch(
@@ -767,7 +1340,6 @@ def build_router(rt: Runtime) -> Router:
             target,
         )
         latest_summary = await rt.memory.latest_summary(target)
-        # Embedding coverage % for messages.
         msg_total = sum(r["n"] for r in msg_rows) or 0
         msg_embed_count = next(
             (r["n"] for r in emb_rows if r["ref_kind"] == "message"), 0,
@@ -786,7 +1358,6 @@ def build_router(rt: Runtime) -> Router:
             f"{r['ref_kind']}={r['n']}" for r in emb_rows
         ) or "(none)"
         next_summary_at = rt.settings.summary_trigger_messages
-        since_last_summary = 0
         if latest_summary:
             since_last_summary = await rt.memory.messages.count_since(
                 target, latest_summary.covers_until_id,
@@ -814,9 +1385,100 @@ def build_router(rt: Runtime) -> Router:
             f"(dim={rt.openai.embedding_dim})",
         ]
         body = "\n".join(lines)
+        markup = InlineKeyboardMarkup(inline_keyboard=[_mst_action_row(target)])
+        return body, markup
+
+    async def _show_duckstats_user_picker(
+        *,
+        reply_to: Message | None = None,
+        edit_in: Message | None = None,
+        chat_id: int,
+    ) -> None:
+        """Render the user-picker for the duckstats editor."""
+        rows = await _top_users_for_chat(rt.db, chat_id, limit=20)
+        if not rows:
+            body = f"No duck_stats rows for chat {chat_id}."
+            kb = None
+        else:
+            body = (
+                f"Top {len(rows)} duckhunters in chat {chat_id}. "
+                "Tap one to edit:"
+            )
+            kb = _user_picker(rows, action=f"dse:user:{chat_id}")
+        if reply_to:
+            await reply_to.reply(
+                body, reply_markup=kb, disable_notification=True,
+            )
+        elif edit_in:
+            try:
+                await edit_in.edit_text(body, reply_markup=kb)
+            except TelegramBadRequest:
+                pass
+
+    async def _render_duckstat_editor(
+        chat_id: int, user_id: int,
+    ) -> tuple[str, InlineKeyboardMarkup] | None:
+        row = await rt.db.fetchrow(
+            "SELECT display_name, points, killed, befriended, misses, streak, best_streak "
+            "  FROM duck_stats WHERE chat_id = $1 AND user_id = $2",
+            chat_id, user_id,
+        )
+        if row is None:
+            return None
+        head = (
+            f"📊 {row['display_name']} in chat {chat_id}\n\n"
+            f"  points: {row['points']}    streak: {row['streak']}\n"
+            f"  killed: {row['killed']}    befriended: {row['befriended']}\n"
+            f"  misses: {row['misses']}    best_streak: {row['best_streak']}\n\n"
+            "Tap a field to edit:"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="points",      callback_data=f"dse:field:{chat_id}:{user_id}:points"),
+                InlineKeyboardButton(text="streak",      callback_data=f"dse:field:{chat_id}:{user_id}:streak"),
+            ],
+            [
+                InlineKeyboardButton(text="killed",      callback_data=f"dse:field:{chat_id}:{user_id}:killed"),
+                InlineKeyboardButton(text="befriended",  callback_data=f"dse:field:{chat_id}:{user_id}:befriended"),
+            ],
+            [
+                InlineKeyboardButton(text="misses",      callback_data=f"dse:field:{chat_id}:{user_id}:misses"),
+                InlineKeyboardButton(text="best_streak", callback_data=f"dse:field:{chat_id}:{user_id}:best_streak"),
+            ],
+            [InlineKeyboardButton(text="⚠️ Reset entire row", callback_data=f"dse:reset:{chat_id}:{user_id}")],
+            [InlineKeyboardButton(text="← back to users",     callback_data=f"dse:userlist:{chat_id}")],
+        ])
+        return head, kb
+
+    @r.callback_query(F.data.startswith("mstats:"))
+    async def on_memory_stats(cb: CallbackQuery) -> None:
+        if not await _gate_callback(cb):
+            return
+        parsed = _parse_picker_cb(cb.data)
+        if parsed is None:
+            await cb.answer(_expired("memory_stats"), show_alert=True)
+            return
+        kind, n = parsed
+        if kind == "page":
+            chats = await rt.chats.list_known()
+            kb = _chat_picker(
+                chats, "mstats", paginate=True, page=n,
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_reply_markup(reply_markup=kb)
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        target = n
+        if cb.from_user is not None:
+            _LAST_PICKED_CHAT[cb.from_user.id] = (target, time.time())
+        body, markup = await _render_memory_stats_body(target)
         if cb.message:
             try:
-                await cb.message.edit_text(body[:4000])
+                await cb.message.edit_text(body[:4000], reply_markup=markup)
             except TelegramBadRequest:
                 pass
         await cb.answer()
@@ -827,7 +1489,11 @@ def build_router(rt: Runtime) -> Router:
         if not await require_admin(msg, admin_ids):
             return
         chats = await rt.chats.list_known()
-        kb = _chat_picker(chats, "msum")
+        kb = _chat_picker(
+            chats, "msum",
+            paginate=True,
+            admin_user_id=msg.from_user.id if msg.from_user else None,
+        )
         if kb is None:
             await msg.reply("No known chats yet.", disable_notification=True)
             return
@@ -841,11 +1507,27 @@ def build_router(rt: Runtime) -> Router:
     async def on_memory_summary(cb: CallbackQuery) -> None:
         if not await _gate_callback(cb):
             return
-        try:
-            target = int(cb.data.split(":", 1)[1])
-        except (ValueError, IndexError):
-            await cb.answer("Bad selection.", show_alert=True)
+        parsed = _parse_picker_cb(cb.data)
+        if parsed is None:
+            await cb.answer(_expired("memory_summary"), show_alert=True)
             return
+        kind, n = parsed
+        if kind == "page":
+            chats = await rt.chats.list_known()
+            kb = _chat_picker(
+                chats, "msum", paginate=True, page=n,
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_reply_markup(reply_markup=kb)
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        target = n
+        if cb.from_user is not None:
+            _LAST_PICKED_CHAT[cb.from_user.id] = (target, time.time())
         summary = await rt.memory.latest_summary(target)
         if summary is None:
             body = f"No summary stored for chat {target} yet."
@@ -870,7 +1552,11 @@ def build_router(rt: Runtime) -> Router:
         if not await require_admin(msg, admin_ids):
             return
         chats = await rt.chats.list_known()
-        kb = _chat_picker(chats, "mforce")
+        kb = _chat_picker(
+            chats, "mforce",
+            paginate=True,
+            admin_user_id=msg.from_user.id if msg.from_user else None,
+        )
         if kb is None:
             await msg.reply("No known chats yet.", disable_notification=True)
             return
@@ -884,48 +1570,33 @@ def build_router(rt: Runtime) -> Router:
     async def on_memory_summarize_now(cb: CallbackQuery) -> None:
         if not await _gate_callback(cb):
             return
-        try:
-            target = int(cb.data.split(":", 1)[1])
-        except (ValueError, IndexError):
-            await cb.answer("Bad selection.", show_alert=True)
+        parsed = _parse_picker_cb(cb.data)
+        if parsed is None:
+            await cb.answer(_expired("memory_summarize_now"), show_alert=True)
             return
-        await cb.answer("Running summarizer…")
-        try:
-            report = await force_summarize(
-                rt.memory, rt.openai, rt.settings, target,
+        kind, n = parsed
+        if kind == "page":
+            chats = await rt.chats.list_known()
+            kb = _chat_picker(
+                chats, "mforce", paginate=True, page=n,
+                admin_user_id=cb.from_user.id if cb.from_user else None,
             )
-        except Exception as exc:
-            log.warning("force_summarize failed for chat %s: %s", target, exc)
             if cb.message:
                 try:
-                    await cb.message.edit_text(
-                        f"Summarizer failed: {exc}",
-                    )
+                    await cb.message.edit_reply_markup(reply_markup=kb)
                 except TelegramBadRequest:
                     pass
+            await cb.answer()
             return
-        if not report.get("ok"):
-            body = (
-                f"Skipped chat {target}: {report.get('reason', 'unknown')}"
-            )
-        else:
-            facts_added = report.get("facts_added", [])
-            facts_block = (
-                "\n".join(f"  - {f}" for f in facts_added)
-                if facts_added else "  (none)"
-            )
-            body = (
-                f"Force-summarized chat {target}.\n"
-                f"  messages summarized: {report['messages_summarized']}\n"
-                f"  summary id: {report['summary_id']} "
-                f"({report['summary_chars']} chars)\n"
-                f"  facts added ({len(facts_added)}):\n{facts_block}"
-            )
-        if cb.message:
-            try:
-                await cb.message.edit_text(body[:4000])
-            except TelegramBadRequest:
-                pass
+        target = n
+        if cb.from_user is not None:
+            _LAST_PICKED_CHAT[cb.from_user.id] = (target, time.time())
+        await cb.answer("Running summarizer…")
+        await _with_working_placeholder(
+            cb,
+            f"Force-summarizing chat {target}…",
+            lambda: _do_force_summarize_render(target),
+        )
 
     @r.message(Command("memory_search"))
     async def memory_search(msg: Message) -> None:
@@ -968,7 +1639,11 @@ def build_router(rt: Runtime) -> Router:
             return
         _stash_search_query(msg.from_user.id, query)
         chats = await rt.chats.list_known()
-        kb = _chat_picker(chats, "msrch")
+        kb = _chat_picker(
+            chats, "msrch",
+            paginate=True,
+            admin_user_id=msg.from_user.id,
+        )
         if kb is None:
             await msg.reply("No known chats yet.", disable_notification=True)
             return
@@ -982,11 +1657,13 @@ def build_router(rt: Runtime) -> Router:
     async def _run_memory_search(target_msg: Message, chat_id: int,
                                  query: str) -> None:
         hits = await rt.memory.semantic_search(chat_id, query, k=10)
+        kb = InlineKeyboardMarkup(inline_keyboard=[_mst_action_row(chat_id)])
         if not hits:
             await target_msg.reply(
                 f"No semantic hits in chat {chat_id} for "
                 f"{query!r} (pgvector available: "
                 f"{rt.memory.pgvector_available}).",
+                reply_markup=kb,
                 disable_notification=True,
             )
             return
@@ -1006,6 +1683,7 @@ def build_router(rt: Runtime) -> Router:
             )
         await target_msg.reply(
             (head + "\n".join(body_lines))[:4000],
+            reply_markup=kb,
             disable_notification=True,
         )
 
@@ -1013,18 +1691,33 @@ def build_router(rt: Runtime) -> Router:
     async def on_memory_search(cb: CallbackQuery) -> None:
         if not await _gate_callback(cb):
             return
-        try:
-            target = int(cb.data.split(":", 1)[1])
-        except (ValueError, IndexError):
-            await cb.answer("Bad selection.", show_alert=True)
+        parsed = _parse_picker_cb(cb.data)
+        if parsed is None:
+            await cb.answer(_expired("memory_search"), show_alert=True)
             return
+        kind, n = parsed
+        if kind == "page":
+            chats = await rt.chats.list_known()
+            kb = _chat_picker(
+                chats, "msrch", paginate=True, page=n,
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_reply_markup(reply_markup=kb)
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        target = n
         if cb.from_user is None:
             await cb.answer("Can't identify caller.", show_alert=True)
             return
+        _LAST_PICKED_CHAT[cb.from_user.id] = (target, time.time())
         query = _pop_search_query(cb.from_user.id)
         if query is None:
             await cb.answer(
-                "Search query expired — re-run /memory_search.",
+                _expired("memory_search"),
                 show_alert=True,
             )
             return
@@ -1060,33 +1753,16 @@ def build_router(rt: Runtime) -> Router:
     async def _render_chat_user_resetter(target: int) -> tuple[str, InlineKeyboardMarkup | None]:
         """Build the leaderboard-style picker used to choose a user (or
         'all') to reset within one chat. Returns (text, keyboard)."""
-        rows = await rt.db.fetch(
-            "SELECT user_id, display_name, points, killed, befriended, misses "
-            "  FROM duck_stats "
-            " WHERE chat_id = $1 "
-            " ORDER BY points DESC, killed DESC "
-            " LIMIT 20",
-            target,
-        )
+        rows = await _top_users_for_chat(rt.db, target, limit=20)
         if not rows:
             return (
                 f"No duck stats stored for chat {target}.",
                 None,
             )
-        kb_rows: list[list[InlineKeyboardButton]] = []
-        for r in rows:
-            label = (
-                f"{(r['display_name'] or str(r['user_id']))[:30]} — "
-                f"{r['points']}pts ({r['killed']}🔫 {r['befriended']}🤝)"
-            )[:60]
-            kb_rows.append([InlineKeyboardButton(
-                text=label,
-                callback_data=f"dsru:{target}:{r['user_id']}",
-            )])
-        kb_rows.append([InlineKeyboardButton(
-            text=f"⚠️  Reset ALL {len(rows)} users in this chat",
-            callback_data=f"dsra:{target}",
-        )])
+        kb = _user_picker(
+            rows, action=f"dsru:{target}",
+            with_reset_all_for_chat_id=target,
+        )
         head = (
             f"Top {len(rows)} duckhunters in chat {target}.\n"
             "Tap one to reset their stats, or 'Reset ALL' to clear the whole "
@@ -1094,7 +1770,7 @@ def build_router(rt: Runtime) -> Router:
             "(Friendships and named ducks live in duck_events and are NOT "
             "touched by this — only the duck_stats counters are cleared.)"
         )
-        return head, InlineKeyboardMarkup(inline_keyboard=kb_rows)
+        return head, kb
 
     async def _do_reset_user_stats(target: int, user_id: int) -> int:
         """Delete the duck_stats row. Returns 1 on hit, 0 on miss."""
@@ -1141,12 +1817,12 @@ def build_router(rt: Runtime) -> Router:
                     disable_notification=True,
                 )
                 return
-            try:
-                user_id = int(parts[2])
-            except ValueError:
+            ref = parts[2]
+            user_id = await _resolve_user_id(rt, chat_id, ref)
+            if user_id is None:
                 await msg.reply(
-                    "Invalid user id (use a numeric Telegram user id, or "
-                    "'all' to wipe the whole chat).",
+                    f"User '{ref}' not found in chat {chat_id}. "
+                    "Use the numeric Telegram id, @username, or display name.",
                     disable_notification=True,
                 )
                 return
@@ -1170,7 +1846,11 @@ def build_router(rt: Runtime) -> Router:
             return
         # No args → chat picker first.
         chats = await rt.chats.list_known()
-        kb = _chat_picker(chats, "dsr")
+        kb = _chat_picker(
+            chats, "dsr",
+            paginate=True,
+            admin_user_id=msg.from_user.id if msg.from_user else None,
+        )
         if kb is None:
             await msg.reply("No known chats yet.", disable_notification=True)
             return
@@ -1184,11 +1864,27 @@ def build_router(rt: Runtime) -> Router:
     async def on_dsr_chat_picked(cb: CallbackQuery) -> None:
         if not await _gate_callback(cb):
             return
-        try:
-            target = int(cb.data.split(":", 1)[1])
-        except (ValueError, IndexError):
-            await cb.answer("Bad selection.", show_alert=True)
+        parsed = _parse_picker_cb(cb.data)
+        if parsed is None:
+            await cb.answer(_expired("duckstats_reset"), show_alert=True)
             return
+        kind, n = parsed
+        if kind == "page":
+            chats = await rt.chats.list_known()
+            kb = _chat_picker(
+                chats, "dsr", paginate=True, page=n,
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_reply_markup(reply_markup=kb)
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        target = n
+        if cb.from_user is not None:
+            _LAST_PICKED_CHAT[cb.from_user.id] = (target, time.time())
         text, kb = await _render_chat_user_resetter(target)
         if cb.message:
             try:
@@ -1206,7 +1902,7 @@ def build_router(rt: Runtime) -> Router:
             chat_id = int(chat_id_s)
             user_id = int(user_id_s)
         except (ValueError, IndexError):
-            await cb.answer("Bad selection.", show_alert=True)
+            await cb.answer(_expired("duckstats_reset"), show_alert=True)
             return
         n = await _do_reset_user_stats(chat_id, user_id)
         body = (
@@ -1224,20 +1920,1011 @@ def build_router(rt: Runtime) -> Router:
     async def on_dsr_reset_all(cb: CallbackQuery) -> None:
         if not await _gate_callback(cb):
             return
-        try:
-            target = int(cb.data.split(":", 1)[1])
-        except (ValueError, IndexError):
-            await cb.answer("Bad selection.", show_alert=True)
+        parts = cb.data.split(":")
+        # dsra:CHATID  → prompt confirmation
+        # dsra:CHATID:confirm | dsra:CHATID:cancel → execute / abort
+        if len(parts) < 2:
+            await cb.answer(_expired("duckstats_reset"), show_alert=True)
             return
+        try:
+            target = int(parts[1])
+        except ValueError:
+            await cb.answer(_expired("duckstats_reset"), show_alert=True)
+            return
+        if len(parts) == 2:
+            count = await rt.db.fetchval(
+                "SELECT COUNT(*) FROM duck_stats WHERE chat_id = $1", target,
+            )
+            body = (
+                f"Wipe duck_stats for ALL {count} user(s) in chat {target}? "
+                "This will reset everyone's points to 0."
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_text(
+                        body, reply_markup=_confirmation_keyboard(f"dsra:{target}"),
+                    )
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        suffix = parts[2]
+        if suffix == "cancel":
+            if cb.message:
+                try:
+                    await cb.message.edit_text("Cancelled. Nothing changed.")
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        # confirm
         n = await _do_reset_all_in_chat(target)
-        body = (
-            f"Wiped duck_stats for chat {target} ({n} row(s) deleted)."
-        )
         if cb.message:
             try:
-                await cb.message.edit_text(body)
+                await cb.message.edit_text(
+                    f"Wiped duck_stats for chat {target} ({n} row(s) deleted)."
+                )
             except TelegramBadRequest:
                 pass
         await cb.answer("Chat wiped.")
+
+    # ----------------------------------------------------- /duckstats_edit
+    @r.message(Command("duckstats_edit"))
+    async def duckstats_edit(msg: Message) -> None:
+        """Interactive editor for one user's duckhunt stats.
+
+        /duckstats_edit                       → chat picker → user picker → editor
+        /duckstats_edit <chat_id>             → skip chat picker
+        /duckstats_edit <chat_id> <user>      → direct editor (user = id, @username, or display name)
+        """
+        if not await require_admin(msg, admin_ids):
+            return
+        # Clear any stale parked custom-value entry for this admin.
+        if msg.from_user is not None:
+            _PENDING_CUSTOM_VALUES.pop(msg.from_user.id, None)
+        parts = (msg.text or "").split()
+        if len(parts) >= 3:
+            try:
+                chat_id = int(parts[1])
+            except ValueError:
+                await msg.reply("Invalid chat id.", disable_notification=True)
+                return
+            user_id = await _resolve_user_id(rt, chat_id, parts[2])
+            if user_id is None:
+                await msg.reply(
+                    f"User '{parts[2]}' not found in chat {chat_id}.",
+                    disable_notification=True,
+                )
+                return
+            res = await _render_duckstat_editor(chat_id, user_id)
+            if res is None:
+                await msg.reply(
+                    f"No duck_stats row for that user in chat {chat_id}.",
+                    disable_notification=True,
+                )
+                return
+            text, kb = res
+            await msg.reply(
+                text, reply_markup=kb, disable_notification=True,
+            )
+            return
+        if len(parts) == 2:
+            try:
+                chat_id = int(parts[1])
+            except ValueError:
+                await msg.reply("Invalid chat id.", disable_notification=True)
+                return
+            await _show_duckstats_user_picker(reply_to=msg, chat_id=chat_id)
+            return
+        # No args → chat picker.
+        chats = await rt.chats.list_known()
+        kb = _chat_picker(
+            chats, "dse:chatpick",
+            paginate=True,
+            admin_user_id=msg.from_user.id if msg.from_user else None,
+        )
+        if kb is None:
+            await msg.reply("No known chats yet.", disable_notification=True)
+            return
+        await msg.reply(
+            "Pick a chat for duckstats editing:",
+            reply_markup=kb, disable_notification=True,
+        )
+
+    @r.callback_query(F.data.startswith("dse:"))
+    async def on_dse(cb: CallbackQuery) -> None:
+        if not await _gate_callback(cb):
+            return
+        parts = cb.data.split(":")
+        verb = parts[1] if len(parts) >= 2 else ""
+
+        # dse:chatpick:CHATID  or  dse:chatpick:p:N
+        if verb == "chatpick":
+            if len(parts) >= 4 and parts[2] == "p":
+                try:
+                    page = int(parts[3])
+                except ValueError:
+                    await cb.answer(_expired("duckstats_edit"), show_alert=True)
+                    return
+                chats = await rt.chats.list_known()
+                kb = _chat_picker(
+                    chats, "dse:chatpick", paginate=True, page=page,
+                    admin_user_id=cb.from_user.id if cb.from_user else None,
+                )
+                if cb.message:
+                    try:
+                        await cb.message.edit_reply_markup(reply_markup=kb)
+                    except TelegramBadRequest:
+                        pass
+                await cb.answer()
+                return
+            try:
+                target = int(parts[2])
+            except (IndexError, ValueError):
+                await cb.answer(_expired("duckstats_edit"), show_alert=True)
+                return
+            if cb.from_user is not None:
+                _LAST_PICKED_CHAT[cb.from_user.id] = (target, time.time())
+            await _show_duckstats_user_picker(
+                edit_in=cb.message, chat_id=target,
+            )
+            await cb.answer()
+            return
+
+        # dse:userlist:CHATID
+        if verb == "userlist":
+            try:
+                target = int(parts[2])
+            except (IndexError, ValueError):
+                await cb.answer(_expired("duckstats_edit"), show_alert=True)
+                return
+            await _show_duckstats_user_picker(
+                edit_in=cb.message, chat_id=target,
+            )
+            await cb.answer()
+            return
+
+        # dse:user:CHATID:USERID — render editor for one user
+        if verb == "user":
+            try:
+                chat_id = int(parts[2])
+                user_id = int(parts[3])
+            except (IndexError, ValueError):
+                await cb.answer(_expired("duckstats_edit"), show_alert=True)
+                return
+            res = await _render_duckstat_editor(chat_id, user_id)
+            if res is None:
+                if cb.message:
+                    try:
+                        await cb.message.edit_text(
+                            f"User {user_id} no longer has a duck_stats row.",
+                        )
+                    except TelegramBadRequest:
+                        pass
+                await cb.answer()
+                return
+            text, kb = res
+            if cb.message:
+                try:
+                    await cb.message.edit_text(text, reply_markup=kb)
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+
+        # dse:field:CHATID:USERID:FIELD — open per-field delta picker
+        if verb == "field":
+            try:
+                chat_id = int(parts[2])
+                user_id = int(parts[3])
+                field = parts[4]
+            except (IndexError, ValueError):
+                await cb.answer(_expired("duckstats_edit"), show_alert=True)
+                return
+            if field not in _DUCKSTAT_EDITABLE_FIELDS:
+                await cb.answer("Bad field.", show_alert=True)
+                return
+            row = await rt.db.fetchrow(
+                f"SELECT {field} FROM duck_stats WHERE chat_id=$1 AND user_id=$2",
+                chat_id, user_id,
+            )
+            current = int(row[field]) if row else 0
+            text, kb = _render_duckstat_field_picker(
+                chat_id, user_id, field, current,
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_text(text, reply_markup=kb)
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+
+        # dse:delta:CHATID:USERID:FIELD:DELTA
+        if verb == "delta":
+            try:
+                chat_id = int(parts[2])
+                user_id = int(parts[3])
+                field = parts[4]
+                delta = int(parts[5])
+            except (IndexError, ValueError):
+                await cb.answer(_expired("duckstats_edit"), show_alert=True)
+                return
+            ok, new_val = await _apply_duckstat_delta(
+                rt.db, chat_id, user_id, field, delta,
+            )
+            if not ok:
+                await cb.answer("Row missing or bad field.", show_alert=True)
+                return
+            text, kb = _render_duckstat_field_picker(
+                chat_id, user_id, field, new_val,
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_text(text, reply_markup=kb)
+                    await cb.answer(f"{field} = {new_val}")
+                except TelegramBadRequest:
+                    # Likely a no-op edit (e.g. 0 → 0 clamp).
+                    await cb.answer(f"{field} already at {new_val}.")
+            else:
+                await cb.answer(f"{field} = {new_val}")
+            return
+
+        # dse:zero:CHATID:USERID:FIELD
+        if verb == "zero":
+            try:
+                chat_id = int(parts[2])
+                user_id = int(parts[3])
+                field = parts[4]
+            except (IndexError, ValueError):
+                await cb.answer(_expired("duckstats_edit"), show_alert=True)
+                return
+            ok, new_val = await _set_duckstat_field(
+                rt.db, chat_id, user_id, field, 0,
+            )
+            if not ok:
+                await cb.answer("Row missing or bad field.", show_alert=True)
+                return
+            text, kb = _render_duckstat_field_picker(
+                chat_id, user_id, field, new_val,
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_text(text, reply_markup=kb)
+                except TelegramBadRequest:
+                    pass
+            await cb.answer(f"{field} set to 0.")
+            return
+
+        # dse:custom:CHATID:USERID:FIELD — park a wait-for-DM state
+        if verb == "custom":
+            try:
+                chat_id = int(parts[2])
+                user_id = int(parts[3])
+                field = parts[4]
+            except (IndexError, ValueError):
+                await cb.answer(_expired("duckstats_edit"), show_alert=True)
+                return
+            if field not in _DUCKSTAT_EDITABLE_FIELDS:
+                await cb.answer("Bad field.", show_alert=True)
+                return
+            if cb.from_user is None:
+                await cb.answer("Can't identify caller.", show_alert=True)
+                return
+            _PENDING_CUSTOM_VALUES[cb.from_user.id] = (
+                chat_id, user_id, field, time.time(),
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_text(
+                        f"Send me the new value for `{field}` as your "
+                        "next message. I'll wait up to 60 seconds. "
+                        "(Send a non-number to cancel.)",
+                    )
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+
+        # dse:reset:CHATID:USERID — prompt confirmation
+        # dse:reset:CHATID:USERID:confirm | dse:reset:CHATID:USERID:cancel
+        if verb == "reset":
+            try:
+                chat_id = int(parts[2])
+                user_id = int(parts[3])
+            except (IndexError, ValueError):
+                await cb.answer(_expired("duckstats_edit"), show_alert=True)
+                return
+            if len(parts) == 4:
+                body = (
+                    f"Reset duck_stats row for user {user_id} in chat {chat_id}? "
+                    "This deletes points / streak / kills / etc."
+                )
+                if cb.message:
+                    try:
+                        await cb.message.edit_text(
+                            body,
+                            reply_markup=_confirmation_keyboard(
+                                f"dse:reset:{chat_id}:{user_id}",
+                            ),
+                        )
+                    except TelegramBadRequest:
+                        pass
+                await cb.answer()
+                return
+            suffix = parts[4]
+            if suffix == "cancel":
+                res = await _render_duckstat_editor(chat_id, user_id)
+                if cb.message:
+                    if res:
+                        try:
+                            await cb.message.edit_text(
+                                res[0], reply_markup=res[1],
+                            )
+                        except TelegramBadRequest:
+                            pass
+                    else:
+                        try:
+                            await cb.message.edit_text("Cancelled.")
+                        except TelegramBadRequest:
+                            pass
+                await cb.answer()
+                return
+            # confirm
+            n = await _do_reset_user_stats(chat_id, user_id)
+            await _show_duckstats_user_picker(
+                edit_in=cb.message, chat_id=chat_id,
+            )
+            await cb.answer(f"Reset ({n} row).")
+            return
+
+        await cb.answer(_expired("duckstats_edit"), show_alert=True)
+
+    # Custom-value DM handler. Triggered when the admin previously tapped
+    # "Set to custom…" on the editor. Uses an F.func predicate so only
+    # parked admins match it; other handlers are not blocked.
+    def _has_parked_value(msg: Message) -> bool:
+        if msg.from_user is None or msg.text is None:
+            return False
+        if msg.text.startswith("/"):
+            return False
+        return msg.from_user.id in _PENDING_CUSTOM_VALUES
+
+    @r.message(F.func(_has_parked_value))
+    async def on_admin_custom_value(msg: Message) -> None:
+        if msg.from_user is None or not is_admin_user(msg.from_user.id, admin_ids):
+            return
+        entry = _PENDING_CUSTOM_VALUES.pop(msg.from_user.id, None)
+        if entry is None:
+            return
+        chat_id, user_id, field, ts = entry
+        if time.time() - ts > _CUSTOM_VALUE_TTL:
+            await msg.reply(
+                _expired("duckstats_edit"), disable_notification=True,
+            )
+            return
+        try:
+            new_value = int((msg.text or "").strip())
+        except ValueError:
+            await msg.reply(
+                "That doesn't look like a number — cancelled.",
+                disable_notification=True,
+            )
+            return
+        ok, new_val = await _set_duckstat_field(
+            rt.db, chat_id, user_id, field, new_value,
+        )
+        if not ok:
+            await msg.reply(
+                "Couldn't apply: row missing or bad field.",
+                disable_notification=True,
+            )
+            return
+        text, kb = _render_duckstat_field_picker(
+            chat_id, user_id, field, new_val,
+        )
+        await msg.reply(text, reply_markup=kb, disable_notification=True)
+
+    # ---------------------------------------------------------------- /manage
+    @r.message(Command("manage"))
+    async def manage(msg: Message) -> None:
+        """One-screen admin hub. Pick a category to drill into."""
+        if not await require_admin(msg, admin_ids):
+            return
+        await msg.reply(
+            "⚙️ Admin hub. Pick a category:",
+            reply_markup=_mgm_top_keyboard(),
+            disable_notification=True,
+        )
+
+    async def _mgm_render_status(edit_in: Message) -> None:
+        """Render the Debug → Status panel."""
+        # Memory diagnostics via existing repo APIs.
+        chat_count = await rt.db.fetchval("SELECT COUNT(*) FROM chats")
+        msg_total = await rt.db.fetchval("SELECT COUNT(*) FROM messages")
+        fact_total = await rt.db.fetchval("SELECT COUNT(*) FROM facts")
+        summary_total = await rt.db.fetchval("SELECT COUNT(*) FROM summaries")
+        lines = [
+            "🛠 Status",
+            "",
+            f"text provider: {rt.openai.text_provider}",
+            f"  claude model: {rt.openai.claude_model}",
+            f"  openai model: {rt.openai.text_model}",
+            "",
+            f"chats known: {chat_count}",
+            f"messages: {msg_total}",
+            f"facts: {fact_total}",
+            f"summaries: {summary_total}",
+            f"pgvector available: {rt.pgvector_available}",
+        ]
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="← back", callback_data="mgm:debug")],
+        ])
+        try:
+            await edit_in.edit_text("\n".join(lines)[:4000], reply_markup=kb)
+        except TelegramBadRequest:
+            pass
+
+    async def _mgm_render_cost(edit_in: Message) -> None:
+        rows = await rt.db.fetch(
+            "SELECT kind, COUNT(*) AS calls, "
+            "       COALESCE(SUM(total_tokens), 0) AS tokens, "
+            "       COALESCE(SUM(cost_usd), 0) AS cost "
+            "  FROM openai_usage "
+            " WHERE created_at >= NOW() - INTERVAL '7 days' "
+            " GROUP BY kind ORDER BY cost DESC"
+        )
+        if not rows:
+            body = "No usage recorded in the last 7 days."
+        else:
+            lines = ["Last 7d (all chats):"]
+            total = 0.0
+            for r in rows:
+                c = float(r["cost"] or 0)
+                total += c
+                lines.append(
+                    f"  {r['kind']:<10}  {r['calls']:>5} calls  "
+                    f"{int(r['tokens']):>8} tokens  ${c:.4f}"
+                )
+            lines.append(f"  TOTAL: ${total:.4f}")
+            body = "\n".join(lines)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="← back", callback_data="mgm:debug")],
+        ])
+        try:
+            await edit_in.edit_text(body[:4000], reply_markup=kb)
+        except TelegramBadRequest:
+            pass
+
+    async def _mgm_render_cmdlog(edit_in: Message) -> None:
+        rows = await rt.command_log.tail(30)
+        if not rows:
+            body = "No command log entries yet."
+        else:
+            lines = [
+                f"{r['created_at']:%H:%M:%S} chat={r['chat_id']} "
+                f"user={r['user_id']} {r['command']} ok={r['success']}"
+                + (f" err={r['error']}" if r["error"] else "")
+                for r in rows
+            ]
+            body = "Recent commands:\n" + "\n".join(lines)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="← back", callback_data="mgm:debug")],
+        ])
+        try:
+            await edit_in.edit_text(body[:4000], reply_markup=kb)
+        except TelegramBadRequest:
+            pass
+
+    async def _mgm_render_logs(edit_in: Message) -> None:
+        lines = recent_log_lines(limit=50, contains=None)
+        if not lines:
+            body = "No log lines yet."
+        else:
+            body = "\n".join(lines)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="← back", callback_data="mgm:debug")],
+        ])
+        try:
+            await edit_in.edit_text(body[:4000], reply_markup=kb)
+        except TelegramBadRequest:
+            pass
+
+    async def _mgm_render_chat_list(edit_in: Message) -> None:
+        rows = await rt.chats.list_known()
+        if not rows:
+            body = "No known chats yet."
+        else:
+            lines = [
+                f"{r['chat_id']:>15} {r['type']:<10} {r['title'] or ''}"
+                for r in rows
+            ]
+            body = "Known chats:\n" + "\n".join(lines)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="← back", callback_data="mgm:chats")],
+        ])
+        try:
+            await edit_in.edit_text(body[:4000], reply_markup=kb)
+        except TelegramBadRequest:
+            pass
+
+    async def _mgm_render_ai_show(edit_in: Message) -> None:
+        body = (
+            f"Current text provider: {rt.openai.text_provider}\n"
+            f"  claude model: {rt.openai.claude_model}\n"
+            f"  openai model: {rt.openai.text_model}\n"
+            "Switch with the buttons below."
+        )
+        try:
+            await edit_in.edit_text(
+                body,
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[_aip_action_row()],
+                ),
+            )
+        except TelegramBadRequest:
+            pass
+
+    async def _mgm_spawn_all_now(edit_in: Message) -> None:
+        chat_ids = await duckhunt_enabled_chat_ids(rt.db)
+        if not chat_ids:
+            body = "No chats have duckhunt enabled."
+        else:
+            spawned, skipped, failed = 0, 0, 0
+            for chat_id in chat_ids:
+                if await rt.duckhunt.active_duck(chat_id):
+                    skipped += 1
+                    continue
+                try:
+                    duck = await rt.duckhunt.spawn_duck(
+                        chat_id, rt.settings.duckhunt_duck_lifetime_seconds,
+                    )
+                    text = await build_quack_message(rt.openai, duck.rarity)
+                    await rt.bot.send_message(
+                        chat_id, text, disable_notification=True,
+                    )
+                    spawned += 1
+                except Exception as exc:
+                    failed += 1
+                    log.warning(
+                        "mgm spawn_all failed for chat %s: %s", chat_id, exc,
+                    )
+            body = (
+                f"Quacked in {spawned} chat(s). "
+                f"Skipped {skipped} (duck already active). "
+                f"Failed {failed}."
+            )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="← back", callback_data="mgm:duck")],
+        ])
+        try:
+            await edit_in.edit_text(body[:4000], reply_markup=kb)
+        except TelegramBadRequest:
+            pass
+
+    @r.callback_query(F.data.startswith("mgm:"))
+    async def on_mgm(cb: CallbackQuery) -> None:
+        if not await _gate_callback(cb):
+            return
+        data = cb.data
+        msg = cb.message
+        # Top-level navigation.
+        if data == "mgm:top":
+            if msg:
+                try:
+                    await msg.edit_text(
+                        "⚙️ Admin hub. Pick a category:",
+                        reply_markup=_mgm_top_keyboard(),
+                    )
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        if data == "mgm:memory":
+            if msg:
+                try:
+                    await msg.edit_text(
+                        "💾 Memory:",
+                        reply_markup=_mgm_memory_submenu(),
+                    )
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        if data == "mgm:duck":
+            if msg:
+                try:
+                    await msg.edit_text(
+                        "🦆 Duckhunt:",
+                        reply_markup=_mgm_duck_submenu(),
+                    )
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        if data == "mgm:ai":
+            if msg:
+                try:
+                    await msg.edit_text(
+                        "🤖 AI providers:",
+                        reply_markup=_mgm_ai_submenu(),
+                    )
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        if data == "mgm:chats":
+            if msg:
+                try:
+                    await msg.edit_text(
+                        "💬 Chats:",
+                        reply_markup=_mgm_chats_submenu(),
+                    )
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        if data == "mgm:debug":
+            if msg:
+                try:
+                    await msg.edit_text(
+                        "🛠 Debug & status:",
+                        reply_markup=_mgm_debug_submenu(),
+                    )
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+
+        # Memory leaves — each opens a chat picker that fires the
+        # corresponding existing slash-command callback prefix.
+        if data == "mgm:memory:facts":
+            await _open_picker(
+                rt, edit_in=msg,
+                prompt="Pick a chat to show stored facts for:",
+                action="mfacts",
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+            )
+            await cb.answer()
+            return
+        if data == "mgm:memory:stats":
+            await _open_picker(
+                rt, edit_in=msg,
+                prompt="Pick a chat for memory stats:",
+                action="mstats",
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+            )
+            await cb.answer()
+            return
+        if data == "mgm:memory:summary":
+            await _open_picker(
+                rt, edit_in=msg,
+                prompt="Pick a chat to show its latest summary:",
+                action="msum",
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+            )
+            await cb.answer()
+            return
+        if data == "mgm:memory:force":
+            await _open_picker(
+                rt, edit_in=msg,
+                prompt="Pick a chat to force-summarize:",
+                action="mforce",
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+            )
+            await cb.answer()
+            return
+
+        # Duckhunt leaves.
+        if data == "mgm:duck:edit":
+            await _open_picker(
+                rt, edit_in=msg,
+                prompt="Pick a chat for duckstats editing:",
+                action="dse:chatpick",
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+            )
+            await cb.answer()
+            return
+        if data == "mgm:duck:reset":
+            await _open_picker(
+                rt, edit_in=msg,
+                prompt="Pick a chat to manage duckhunt stats for:",
+                action="dsr",
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+            )
+            await cb.answer()
+            return
+        if data == "mgm:duck:spawn":
+            await _open_picker(
+                rt, edit_in=msg,
+                prompt="Pick a chat to spawn a duck in:",
+                action="qchat",
+                fetcher=lambda: duckhunt_enabled_chats(rt.db),
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+                empty_message="No chats have duckhunt enabled.",
+            )
+            await cb.answer()
+            return
+        if data == "mgm:duck:spawnall":
+            await cb.answer("Spawning…")
+            if msg:
+                await _mgm_spawn_all_now(msg)
+            return
+
+        # AI leaves.
+        if data == "mgm:ai:show":
+            if msg:
+                await _mgm_render_ai_show(msg)
+            await cb.answer()
+            return
+
+        # Chats leaves.
+        if data == "mgm:chats:list":
+            if msg:
+                await _mgm_render_chat_list(msg)
+            await cb.answer()
+            return
+        if data == "mgm:chats:pick":
+            await _open_picker(
+                rt, edit_in=msg,
+                prompt="Pick a chat to copy its id:",
+                action="pchat",
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+            )
+            await cb.answer()
+            return
+
+        # Debug leaves.
+        if data == "mgm:debug:status":
+            if msg:
+                await _mgm_render_status(msg)
+            await cb.answer()
+            return
+        if data == "mgm:debug:logs":
+            if msg:
+                await _mgm_render_logs(msg)
+            await cb.answer()
+            return
+        if data == "mgm:debug:cost":
+            if msg:
+                await _mgm_render_cost(msg)
+            await cb.answer()
+            return
+        if data == "mgm:debug:cmdlog":
+            if msg:
+                await _mgm_render_cmdlog(msg)
+            await cb.answer()
+            return
+
+        await cb.answer("Unknown menu item.", show_alert=True)
+
+    @r.callback_query(F.data == "noop")
+    async def on_noop(cb: CallbackQuery) -> None:
+        """No-op for picker pagination filler buttons."""
+        await cb.answer()
+
+    # ------------------------------------------------ cross-link dispatchers
+    @r.callback_query(F.data.startswith("mst:"))
+    async def on_mst(cb: CallbackQuery) -> None:
+        if not await _gate_callback(cb):
+            return
+        parts = cb.data.split(":", 2)
+        # mst:back | mst:facts:CHATID | mst:force:CHATID | mst:edit:CHATID
+        if len(parts) >= 2 and parts[1] == "back":
+            chats = await rt.chats.list_known()
+            kb = _chat_picker(
+                chats, "mstats", paginate=True,
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_text(
+                        "Pick a chat for memory stats:", reply_markup=kb,
+                    )
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        if len(parts) < 3:
+            await cb.answer(_expired("memory_stats"), show_alert=True)
+            return
+        verb = parts[1]
+        try:
+            target = int(parts[2])
+        except ValueError:
+            await cb.answer(_expired("memory_stats"), show_alert=True)
+            return
+        if verb == "facts":
+            await _send_facts_for(target, reply_to=None, edit_in=cb.message)
+            await cb.answer()
+            return
+        if verb == "force":
+            await cb.answer("Running summarizer…")
+            await _with_working_placeholder(
+                cb,
+                f"Force-summarizing chat {target}…",
+                lambda: _do_force_summarize_render(target),
+            )
+            return
+        if verb == "edit":
+            await _show_duckstats_user_picker(
+                reply_to=None, edit_in=cb.message, chat_id=target,
+            )
+            await cb.answer()
+            return
+        await cb.answer(_expired("memory_stats"), show_alert=True)
+
+    @r.callback_query(F.data.startswith("mfx:"))
+    async def on_mfx(cb: CallbackQuery) -> None:
+        if not await _gate_callback(cb):
+            return
+        parts = cb.data.split(":", 2)
+        # mfx:back | mfx:reextract:CHATID | mfx:stats:CHATID
+        if len(parts) >= 2 and parts[1] == "back":
+            chats = await rt.chats.list_known()
+            kb = _chat_picker(
+                chats, "mfacts", paginate=True,
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_text(
+                        "Pick a chat to show stored facts for:",
+                        reply_markup=kb,
+                    )
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        if len(parts) < 3:
+            await cb.answer(_expired("memory_facts"), show_alert=True)
+            return
+        verb = parts[1]
+        try:
+            target = int(parts[2])
+        except ValueError:
+            await cb.answer(_expired("memory_facts"), show_alert=True)
+            return
+        if verb == "reextract":
+            await cb.answer("Re-extracting…")
+            await _with_working_placeholder(
+                cb,
+                f"Re-extracting facts for chat {target}…",
+                lambda: _do_force_summarize_render(target),
+            )
+            return
+        if verb == "stats":
+            body, markup = await _render_memory_stats_body(target)
+            if cb.message:
+                try:
+                    await cb.message.edit_text(
+                        body[:4000], reply_markup=markup,
+                    )
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        await cb.answer(_expired("memory_facts"), show_alert=True)
+
+    @r.callback_query(F.data.startswith("aip:"))
+    async def on_aip(cb: CallbackQuery) -> None:
+        if not await _gate_callback(cb):
+            return
+        parts = cb.data.split(":", 3)
+        # aip:switch:claude|openai
+        # aip:list:claude|openai
+        # aip:setmodel:claude|openai:<model>
+        # aip:back
+        if len(parts) < 2:
+            await cb.answer(_expired("ai_provider"), show_alert=True)
+            return
+        verb = parts[1]
+        if verb == "back":
+            body = (
+                f"Current text provider: {rt.openai.text_provider}\n"
+                f"  claude model: {rt.openai.claude_model}\n"
+                f"  openai model: {rt.openai.text_model}\n"
+                "Switch with: /ai_provider claude  or  /ai_provider openai"
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_text(
+                        body,
+                        reply_markup=InlineKeyboardMarkup(
+                            inline_keyboard=[_aip_action_row()],
+                        ),
+                    )
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        if len(parts) < 3:
+            await cb.answer(_expired("ai_provider"), show_alert=True)
+            return
+        arg = parts[2]
+        if verb == "switch":
+            if arg not in ("claude", "openai"):
+                await cb.answer("Bad provider.", show_alert=True)
+                return
+            try:
+                rt.openai.set_text_provider(arg)
+            except ValueError as exc:
+                await cb.answer(f"Can't switch: {exc}", show_alert=True)
+                return
+            await kv_set(rt.db, "text_provider", arg)
+            body = (
+                f"Current text provider: {rt.openai.text_provider}\n"
+                f"  claude model: {rt.openai.claude_model}\n"
+                f"  openai model: {rt.openai.text_model}"
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_text(
+                        body,
+                        reply_markup=InlineKeyboardMarkup(
+                            inline_keyboard=[_aip_action_row()],
+                        ),
+                    )
+                except TelegramBadRequest:
+                    pass
+            await cb.answer(f"Switched to {arg}.")
+            return
+        if verb == "list":
+            if arg == "claude":
+                models = _KNOWN_CLAUDE_TEXT_MODELS
+            elif arg == "openai":
+                models = _KNOWN_OPENAI_TEXT_MODELS
+            else:
+                await cb.answer("Bad provider.", show_alert=True)
+                return
+            kb_rows = [
+                [InlineKeyboardButton(
+                    text=m, callback_data=f"aip:setmodel:{arg}:{m}",
+                )]
+                for m in models
+            ]
+            kb_rows.append([InlineKeyboardButton(
+                text="← back", callback_data="aip:back",
+            )])
+            if cb.message:
+                try:
+                    await cb.message.edit_text(
+                        f"Pick a {arg} text model:",
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows),
+                    )
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        if verb == "setmodel":
+            if arg not in ("claude", "openai") or len(parts) < 4:
+                await cb.answer("Bad provider.", show_alert=True)
+                return
+            new_model = parts[3]
+            if arg == "claude":
+                rt.openai.set_claude_model(new_model)
+                await kv_set(rt.db, "claude_text_model", new_model)
+            else:
+                rt.openai.set_openai_text_model(new_model)
+                await kv_set(rt.db, "openai_text_model", new_model)
+            body = (
+                f"Current text provider: {rt.openai.text_provider}\n"
+                f"  claude model: {rt.openai.claude_model}\n"
+                f"  openai model: {rt.openai.text_model}\n\n"
+                f"Set {arg} model to {new_model}."
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_text(
+                        body,
+                        reply_markup=InlineKeyboardMarkup(
+                            inline_keyboard=[_aip_action_row()],
+                        ),
+                    )
+                except TelegramBadRequest:
+                    pass
+            await cb.answer(f"{arg} model set.")
+            return
+        await cb.answer(_expired("ai_provider"), show_alert=True)
 
     return r
