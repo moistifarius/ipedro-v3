@@ -22,6 +22,76 @@ log = logging.getLogger(__name__)
 
 _CHALLENGE_KINDS = ("captcha", "trivia", "recipe")
 
+# Follow-up celebration lines shown after a successful bef. Each list has
+# a few options that get picked at random so the bot doesn't sound like
+# a stuck record. Rarity flavor goes from "neat" → "holy shit".
+_BEF_RARITY_FLAIR: dict[str, tuple[str, ...]] = {
+    "common": (
+        "Just a regular duck. But yours.",
+        "Solid little quacker. Welcome aboard.",
+        "An ordinary duck for an ordinary day.",
+    ),
+    "uncommon": (
+        "An uncommon catch. Nice taste.",
+        "A cut above. The duck approves.",
+        "Decent feathers on this one.",
+    ),
+    "rare": (
+        "A rare duck. You'll cherish this.",
+        "Rare goose energy. Treat it well.",
+        "Not every day a rare one says yes.",
+    ),
+    "epic": (
+        "Epic friendship unlocked. Big deal.",
+        "An epic duck. People will talk.",
+        "That's an epic. Brag accordingly.",
+    ),
+    "legendary": (
+        "LEGENDARY. The hall of fame just got real.",
+        "A legendary duck befriended YOU. Soak it in.",
+        "Tell your grandkids about this one.",
+    ),
+    "shiny": (
+        "It glints when it flaps. Yours now.",
+        "A shiny one. Pure flex.",
+    ),
+    "holiday": (
+        "A seasonal duck. Festive friendship.",
+        "Holiday plumage, exclusive vibes.",
+    ),
+}
+
+
+def _bef_celebration_message(
+    duck_id: int, rarity: str, new_friend_total: int,
+) -> str:
+    """Compose the second message sent after a successful bef.
+
+    Includes a rarity-flavored line, a milestone shout for round-number
+    friend counts, and a pre-filled /duckname hint with the duck id.
+    """
+    flair_options = _BEF_RARITY_FLAIR.get(
+        rarity.lower(), ("A new friend, just like that.",),
+    )
+    flair = random.choice(flair_options)
+    milestone = ""
+    if new_friend_total == 1:
+        milestone = " First feathered friend — somebody mark the calendar."
+    elif new_friend_total in (5, 10, 25, 50):
+        milestone = (
+            f" That's your {new_friend_total}-duck club membership, official."
+        )
+    elif new_friend_total >= 100 and new_friend_total % 100 == 0:
+        milestone = (
+            f" {new_friend_total} ducks. You absolute duck whisperer."
+        )
+    elif new_friend_total % 10 == 0:
+        milestone = f" {new_friend_total} and counting."
+    return (
+        f"🤝 You made a friend! {flair}{milestone}\n"
+        f"Want to name them? Reply: /duckname {duck_id} <name>"
+    )
+
 
 async def _issue_bef_challenge(
     rt: Runtime, msg: Message, who: str, *, intro: str,
@@ -291,7 +361,7 @@ def build_router(rt: Runtime) -> Router:
             msg.chat.id, msg.from_user.id, duck.rarity, verdict,
         )
 
-        outcome, _ = await rt.duckhunt.handle_bef(
+        outcome, duck_after = await rt.duckhunt.handle_bef(
             chat_id=msg.chat.id, user_id=msg.from_user.id,
             display_name=who,
             ai_verdict=verdict,
@@ -301,6 +371,16 @@ def build_router(rt: Runtime) -> Router:
             return
 
         await msg.reply(outcome.message, disable_notification=True)
+
+        # On success: follow up with a celebration + /duckname hint.
+        if outcome.success and duck_after is not None:
+            follow_up = _bef_celebration_message(
+                duck_after.id, duck_after.rarity, friend_count + 1,
+            )
+            try:
+                await msg.answer(follow_up, disable_notification=True)
+            except Exception as exc:
+                log.debug("bef follow-up send failed: %s", exc)
 
         # On refusal: post a challenge the user must solve before retrying.
         if not outcome.success:
