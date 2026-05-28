@@ -7,8 +7,9 @@ import random
 
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import BufferedInputFile, Message
 
+from ipedro.duckhunt.captcha_gen import make_captcha
 from ipedro.duckhunt.verdicts import parse_verdict
 from ipedro.handlers.common import display_name, get_or_create_chat_config
 from ipedro.prompts import (
@@ -26,10 +27,31 @@ async def _issue_bef_challenge(
 ) -> bool:
     """Generate a captcha/trivia/recipe challenge and store it as pending.
 
-    Returns True if the challenge was issued, False if the AI was unavailable
-    (caller should fall back to a plain text reply).
+    Captcha is a real image captcha rendered server-side; the stored
+    `challenge` text IS the answer (judged by exact match later). Trivia
+    and recipe are AI-generated text challenges judged by an AI prompt.
+    Returns True if the challenge was issued; False otherwise.
     """
     kind = random.choice(_CHALLENGE_KINDS)
+    if kind == "captcha":
+        answer, png = make_captcha()
+        try:
+            prompt_msg = await msg.answer_photo(
+                BufferedInputFile(png, filename="captcha.png"),
+                caption=(
+                    f"{intro} Reply to THIS message with the text shown in "
+                    f"the image."
+                ),
+                disable_notification=True,
+            )
+        except Exception as exc:
+            log.warning("Failed to send captcha to %s: %s", msg.chat.id, exc)
+            return False
+        await rt.duckhunt.set_bef_challenge(
+            msg.chat.id, msg.from_user.id, answer, kind, prompt_msg.message_id,
+        )
+        return True
+
     challenge_text = await rt.openai.short_completion(
         DUCK_BEF_CHALLENGE_PROMPT.format(display_name=who, kind=kind),
         max_tokens=200,

@@ -10,6 +10,7 @@ from aiogram import F, Router
 from aiogram.types import Message
 
 from ipedro.chat_policy import IncomingMessage, should_respond
+from ipedro.duckhunt.captcha_gen import matches as captcha_matches
 from ipedro.duckhunt.verdicts import parse_verdict
 from ipedro.handlers.common import get_or_create_chat_config
 from ipedro.memory.context_builder import build_context
@@ -125,16 +126,22 @@ def build_router(rt: Runtime) -> Router:
             )
             if challenge and challenge.user_id == msg.from_user.id:
                 answer = (msg.text or msg.caption or "").strip()
-                ai_text = await rt.openai.chat(
-                    [{
-                        "role": "user",
-                        "content": DUCK_BEF_CHALLENGE_JUDGE_PROMPT.format(
-                            challenge=challenge.challenge, answer=answer,
-                        ),
-                    }],
-                    max_tokens=120, temperature=1.0,
-                )
-                verdict, line = parse_verdict(ai_text, "PASS", "FAIL")
+                verdict: bool | None
+                line: str | None
+                if challenge.kind == "captcha":
+                    verdict = captcha_matches(challenge.challenge, answer)
+                    line = None
+                else:
+                    ai_text = await rt.openai.chat(
+                        [{
+                            "role": "user",
+                            "content": DUCK_BEF_CHALLENGE_JUDGE_PROMPT.format(
+                                challenge=challenge.challenge, answer=answer,
+                            ),
+                        }],
+                        max_tokens=120, temperature=1.0,
+                    )
+                    verdict, line = parse_verdict(ai_text, "PASS", "FAIL")
                 log.info(
                     "bef challenge judge: chat=%s user=%s kind=%s verdict=%s",
                     msg.chat.id, msg.from_user.id, challenge.kind, verdict,
