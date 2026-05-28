@@ -152,6 +152,7 @@ def _chat_picker(
     paginate: bool = False,
     page: int = 0,
     admin_user_id: int | None = None,
+    home_to_manage: bool = False,
 ) -> InlineKeyboardMarkup | None:
     """Build a one-button-per-row picker. action is the callback prefix.
 
@@ -211,6 +212,11 @@ def _chat_picker(
             text=f"{page+1}/{total_pages}", callback_data="noop",
         )
         body_rows.append([prev_btn, mid, next_btn])
+    if home_to_manage:
+        # Picker was launched from /manage. Give the admin a one-tap
+        # escape back to the hub instead of stranding them on a chat
+        # picker with no back action.
+        body_rows.append([_home_button()])
     return InlineKeyboardMarkup(inline_keyboard=body_rows)
 
 
@@ -237,14 +243,33 @@ def _confirmation_keyboard(original_cb: str) -> InlineKeyboardMarkup:
 #   mst:* — after /memory_stats (or anywhere we render memory diagnostics)
 #   mfx:* — after /memory_facts (per-chat) or /memory_summarize_now
 #   aip:* — after /ai_provider show
+def _home_button() -> InlineKeyboardButton:
+    """One-tap escape back to the /manage top menu.
+
+    Appended to every cross-link result keyboard and to chat pickers
+    launched from /manage. Keeps the admin from getting stranded N
+    layers deep with no way out except retyping the slash command.
+    """
+    return InlineKeyboardButton(text="🏠 /manage", callback_data="mgm:top")
+
+
 def _mst_action_row(chat_id: int) -> list[InlineKeyboardButton]:
-    """Bottom row after /memory_stats."""
+    """Bottom row after /memory_stats. (One row only; pair with a
+    /manage row to build the full keyboard.)"""
     return [
         InlineKeyboardButton(text="Show facts",     callback_data=f"mst:facts:{chat_id}"),
         InlineKeyboardButton(text="Force summarize", callback_data=f"mst:force:{chat_id}"),
         InlineKeyboardButton(text="Edit duckstats", callback_data=f"mst:edit:{chat_id}"),
         InlineKeyboardButton(text="← chats",        callback_data="mst:back"),
     ]
+
+
+def _mst_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    """Full keyboard for /memory_stats results: action row + /manage row."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        _mst_action_row(chat_id),
+        [_home_button()],
+    ])
 
 
 def _mfx_action_row(chat_id: int) -> list[InlineKeyboardButton]:
@@ -256,6 +281,14 @@ def _mfx_action_row(chat_id: int) -> list[InlineKeyboardButton]:
     ]
 
 
+def _mfx_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    """Full keyboard for /memory_facts results: action row + /manage row."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        _mfx_action_row(chat_id),
+        [_home_button()],
+    ])
+
+
 def _aip_action_row() -> list[InlineKeyboardButton]:
     """Bottom row after /ai_provider show."""
     return [
@@ -264,6 +297,14 @@ def _aip_action_row() -> list[InlineKeyboardButton]:
         InlineKeyboardButton(text="Claude models",  callback_data="aip:list:claude"),
         InlineKeyboardButton(text="OpenAI models",  callback_data="aip:list:openai"),
     ]
+
+
+def _aip_keyboard() -> InlineKeyboardMarkup:
+    """Full keyboard for /ai_provider results: action row + /manage row."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        _aip_action_row(),
+        [_home_button()],
+    ])
 
 
 # ----- /manage hub keyboards -------------------------------------------------
@@ -485,12 +526,15 @@ async def _open_picker(
     paginate: bool = True,
     admin_user_id: int | None = None,
     empty_message: str = "No known chats yet.",
+    home_to_manage: bool = False,
 ) -> None:
     """One-stop helper to render a chat picker either as a fresh reply
     (when reply_to is given) or by editing an existing message (edit_in).
 
     Used by /manage's submenu buttons. Existing slash-command pickers
     don't route through this — they construct their keyboards inline.
+    When `home_to_manage` is True, the picker appends a 🏠 /manage row
+    so the admin can bail back to the hub instead of being stuck.
     """
     if fetcher is None:
         chats = await rt.chats.list_known()
@@ -500,9 +544,13 @@ async def _open_picker(
         chats, action,
         paginate=paginate, page=0,
         admin_user_id=admin_user_id,
+        home_to_manage=home_to_manage,
     )
     if kb is None:
         body = empty_message
+        # Empty-list case still needs a way back when launched from /manage.
+        if home_to_manage:
+            kb = InlineKeyboardMarkup(inline_keyboard=[[_home_button()]])
     else:
         body = prompt
     if reply_to:
@@ -948,9 +996,7 @@ def build_router(rt: Runtime) -> Router:
                 f"  claude model: {rt.openai.claude_model}\n"
                 f"  openai model: {rt.openai.text_model}\n"
                 "Switch with: /ai_provider claude  or  /ai_provider openai",
-                reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[_aip_action_row()],
-                ),
+                reply_markup=_aip_keyboard(),
                 disable_notification=True,
             )
             return
@@ -1204,7 +1250,7 @@ def build_router(rt: Runtime) -> Router:
             head = f"Facts for chat {target} ({len(facts)}):\n"
             body = head + "\n".join(f"[{f.id}] {f.fact}" for f in facts)
         body = body[:4000]
-        kb = InlineKeyboardMarkup(inline_keyboard=[_mfx_action_row(target)])
+        kb = _mfx_keyboard(target)
         if reply_to:
             await reply_to.reply(
                 body, reply_markup=kb, disable_notification=True,
@@ -1223,7 +1269,7 @@ def build_router(rt: Runtime) -> Router:
             rt.memory, rt.openai, rt.settings, target,
         )
         body = _render_summary_report(report, target)
-        kb = InlineKeyboardMarkup(inline_keyboard=[_mfx_action_row(target)])
+        kb = _mfx_keyboard(target)
         return body, kb
 
     @r.message(Command("memory_facts"))
@@ -1431,7 +1477,7 @@ def build_router(rt: Runtime) -> Router:
             f"(dim={rt.openai.embedding_dim})",
         ]
         body = "\n".join(lines)
-        markup = InlineKeyboardMarkup(inline_keyboard=[_mst_action_row(target)])
+        markup = _mst_keyboard(target)
         return body, markup
 
     async def _show_duckstats_user_picker(
@@ -1703,7 +1749,7 @@ def build_router(rt: Runtime) -> Router:
     async def _run_memory_search(target_msg: Message, chat_id: int,
                                  query: str) -> None:
         hits = await rt.memory.semantic_search(chat_id, query, k=10)
-        kb = InlineKeyboardMarkup(inline_keyboard=[_mst_action_row(chat_id)])
+        kb = _mst_keyboard(chat_id)
         if not hits:
             await target_msg.reply(
                 f"No semantic hits in chat {chat_id} for "
@@ -2446,9 +2492,10 @@ def build_router(rt: Runtime) -> Router:
             f"summaries: {summary_total}",
             f"pgvector available: {rt.pgvector_available}",
         ]
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="← back", callback_data="mgm:debug")],
-        ])
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="← back", callback_data="mgm:debug"),
+            _home_button(),
+        ]])
         try:
             await edit_in.edit_text("\n".join(lines)[:4000], reply_markup=kb)
         except TelegramBadRequest:
@@ -2477,9 +2524,10 @@ def build_router(rt: Runtime) -> Router:
                 )
             lines.append(f"  TOTAL: ${total:.4f}")
             body = "\n".join(lines)
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="← back", callback_data="mgm:debug")],
-        ])
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="← back", callback_data="mgm:debug"),
+            _home_button(),
+        ]])
         try:
             await edit_in.edit_text(body[:4000], reply_markup=kb)
         except TelegramBadRequest:
@@ -2497,9 +2545,10 @@ def build_router(rt: Runtime) -> Router:
                 for r in rows
             ]
             body = "Recent commands:\n" + "\n".join(lines)
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="← back", callback_data="mgm:debug")],
-        ])
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="← back", callback_data="mgm:debug"),
+            _home_button(),
+        ]])
         try:
             await edit_in.edit_text(body[:4000], reply_markup=kb)
         except TelegramBadRequest:
@@ -2511,9 +2560,10 @@ def build_router(rt: Runtime) -> Router:
             body = "No log lines yet."
         else:
             body = "\n".join(lines)
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="← back", callback_data="mgm:debug")],
-        ])
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="← back", callback_data="mgm:debug"),
+            _home_button(),
+        ]])
         try:
             await edit_in.edit_text(body[:4000], reply_markup=kb)
         except TelegramBadRequest:
@@ -2529,9 +2579,10 @@ def build_router(rt: Runtime) -> Router:
                 for r in rows
             ]
             body = "Known chats:\n" + "\n".join(lines)
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="← back", callback_data="mgm:chats")],
-        ])
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="← back", callback_data="mgm:chats"),
+            _home_button(),
+        ]])
         try:
             await edit_in.edit_text(body[:4000], reply_markup=kb)
         except TelegramBadRequest:
@@ -2547,9 +2598,7 @@ def build_router(rt: Runtime) -> Router:
         try:
             await edit_in.edit_text(
                 body,
-                reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[_aip_action_row()],
-                ),
+                reply_markup=_aip_keyboard(),
             )
         except TelegramBadRequest:
             pass
@@ -2673,6 +2722,7 @@ def build_router(rt: Runtime) -> Router:
                 prompt="Pick a chat to show stored facts for:",
                 action="mfacts",
                 admin_user_id=cb.from_user.id if cb.from_user else None,
+            home_to_manage=True,
             )
             await cb.answer()
             return
@@ -2682,6 +2732,7 @@ def build_router(rt: Runtime) -> Router:
                 prompt="Pick a chat for memory stats:",
                 action="mstats",
                 admin_user_id=cb.from_user.id if cb.from_user else None,
+            home_to_manage=True,
             )
             await cb.answer()
             return
@@ -2691,6 +2742,7 @@ def build_router(rt: Runtime) -> Router:
                 prompt="Pick a chat to show its latest summary:",
                 action="msum",
                 admin_user_id=cb.from_user.id if cb.from_user else None,
+            home_to_manage=True,
             )
             await cb.answer()
             return
@@ -2700,6 +2752,7 @@ def build_router(rt: Runtime) -> Router:
                 prompt="Pick a chat to force-summarize:",
                 action="mforce",
                 admin_user_id=cb.from_user.id if cb.from_user else None,
+            home_to_manage=True,
             )
             await cb.answer()
             return
@@ -2711,6 +2764,7 @@ def build_router(rt: Runtime) -> Router:
                 prompt="Pick a chat for duckstats editing:",
                 action="dse:chatpick",
                 admin_user_id=cb.from_user.id if cb.from_user else None,
+            home_to_manage=True,
             )
             await cb.answer()
             return
@@ -2720,6 +2774,7 @@ def build_router(rt: Runtime) -> Router:
                 prompt="Pick a chat to manage duckhunt stats for:",
                 action="dsr",
                 admin_user_id=cb.from_user.id if cb.from_user else None,
+            home_to_manage=True,
             )
             await cb.answer()
             return
@@ -2759,6 +2814,7 @@ def build_router(rt: Runtime) -> Router:
                 prompt="Pick a chat to copy its id:",
                 action="pchat",
                 admin_user_id=cb.from_user.id if cb.from_user else None,
+            home_to_manage=True,
             )
             await cb.answer()
             return
@@ -2919,9 +2975,7 @@ def build_router(rt: Runtime) -> Router:
                 try:
                     await cb.message.edit_text(
                         body,
-                        reply_markup=InlineKeyboardMarkup(
-                            inline_keyboard=[_aip_action_row()],
-                        ),
+                        reply_markup=_aip_keyboard(),
                     )
                 except TelegramBadRequest:
                     pass
@@ -2950,9 +3004,7 @@ def build_router(rt: Runtime) -> Router:
                 try:
                     await cb.message.edit_text(
                         body,
-                        reply_markup=InlineKeyboardMarkup(
-                            inline_keyboard=[_aip_action_row()],
-                        ),
+                        reply_markup=_aip_keyboard(),
                     )
                 except TelegramBadRequest:
                     pass
@@ -3006,9 +3058,7 @@ def build_router(rt: Runtime) -> Router:
                 try:
                     await cb.message.edit_text(
                         body,
-                        reply_markup=InlineKeyboardMarkup(
-                            inline_keyboard=[_aip_action_row()],
-                        ),
+                        reply_markup=_aip_keyboard(),
                     )
                 except TelegramBadRequest:
                     pass
