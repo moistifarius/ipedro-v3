@@ -72,6 +72,7 @@ async def maybe_summarize(
     facts_text = await openai.short_completion(
         FACT_EXTRACT_PROMPT.format(messages=msg_block), max_tokens=200,
     )
+    log.info("Fact extraction for chat %s returned: %r", chat_id, facts_text)
     if facts_text and facts_text.strip().upper() != "NONE":
         for line in facts_text.splitlines():
             fact = line.strip().lstrip("-•* ").strip()
@@ -134,6 +135,7 @@ async def force_summarize(
         facts_text = await openai.short_completion(
             FACT_EXTRACT_PROMPT.format(messages=msg_block), max_tokens=200,
         )
+        log.info("Fact extraction for chat %s returned: %r", chat_id, facts_text)
         if facts_text and facts_text.strip().upper() != "NONE":
             for line in facts_text.splitlines():
                 fact = line.strip().lstrip("-•* ").strip()
@@ -150,4 +152,5 @@ async def force_summarize(
             "summary_id": new_summary_id,
             "summary_chars": len(summary_text or ""),
             "facts_added": facts_added,
+            "raw_facts_response": facts_text,
         }

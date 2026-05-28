@@ -117,7 +117,11 @@ HELP_TEXT_ADMIN = (
     "Debug:\n"
     "/debug_help - debug-command index\n"
     "/debug_captcha, /debug_challenge, /debug_trivia, /debug_recipe, "
-    "/debug_duck, /debug_sharephoto"
+    "/debug_duck, /debug_sharephoto\n"
+    "/debug_toggle [name] [on|off] - admin-scoped duckhunt cheats "
+    "(always_hit, always_miss, always_pass_challenge, "
+    "always_fail_challenge, always_refuse_bef, bypass_cooldowns)\n"
+    "/debug_clear_duck - picker → force-resolve a chat's active duck"
 )
 
 

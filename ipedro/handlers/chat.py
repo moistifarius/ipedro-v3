@@ -12,6 +12,7 @@ from aiogram.types import Message, ReactionTypeEmoji
 
 from ipedro.chat_policy import IncomingMessage, should_respond
 from ipedro.duckhunt.captcha_gen import matches as captcha_matches
+from ipedro.duckhunt.debug_toggles import is_on as debug_is_on
 from ipedro.duckhunt.verdicts import parse_verdict
 from ipedro.handlers.common import catify, get_or_create_chat_config
 from ipedro.memory.context_builder import build_context
@@ -211,7 +212,16 @@ def build_router(rt: Runtime) -> Router:
                 answer = (msg.text or msg.caption or "").strip()
                 verdict: bool | None
                 line: str | None
-                if challenge.kind == "captcha":
+                # Debug toggles let an admin short-circuit the judge so they
+                # can rapidly walk both branches of the challenge flow.
+                admin_id = msg.from_user.id
+                if debug_is_on(admin_id, "always_pass_challenge"):
+                    verdict = True
+                    line = "Passed. [debug: always_pass_challenge]"
+                elif debug_is_on(admin_id, "always_fail_challenge"):
+                    verdict = False
+                    line = "Failed. [debug: always_fail_challenge]"
+                elif challenge.kind == "captcha":
                     verdict = captcha_matches(challenge.challenge, answer)
                     line = None
                 else:
