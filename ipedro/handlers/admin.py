@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import logging
 
 from aiogram import F, Router
@@ -18,10 +19,18 @@ from ipedro.duckhunt.spawner import (
 from ipedro.handlers.common import require_admin
 from ipedro.kv import kv_delete, kv_get, kv_set
 from ipedro.logging_setup import recent_log_lines
+from ipedro.memory.tokens import count_tokens
 from ipedro.personas import (
     DEFAULT_DUDE_PROMPT, current_master_prompt, set_master_prompt_override,
 )
 from ipedro.runtime import Runtime
+
+# Upper bound on the byte size of an uploaded /master_prompt file. Anything
+# bigger than this is almost certainly a mistake — the in-context budget
+# tops out at a few thousand tokens (settings.context_max_tokens), so 64 KB
+# of raw text already overshoots usable territory. We accept up to this and
+# then warn separately if the token count exceeds the runtime budget.
+_MASTER_PROMPT_FILE_MAX_BYTES = 64 * 1024
 
 log = logging.getLogger(__name__)
 
@@ -394,19 +403,53 @@ def build_router(rt: Runtime) -> Router:
             disable_notification=True,
         )
 
+    async def _store_master_prompt(msg: Message, new_text: str) -> None:
+        """Persist a new master prompt and surface a token-budget warning
+        if it's large enough that build_context() would refuse to include it."""
+        new_text = new_text.strip()
+        await kv_set(rt.db, "master_prompt", new_text)
+        set_master_prompt_override(new_text)
+        tokens = count_tokens(new_text)
+        budget = rt.settings.context_max_tokens
+        suffix = ""
+        if tokens >= budget:
+            suffix = (
+                f"\n\n⚠️ {tokens} tokens exceeds context_max_tokens ({budget}); "
+                "the persona will be dropped at runtime. Shorten the prompt "
+                "or raise CONTEXT_MAX_TOKENS."
+            )
+        elif tokens > budget * 0.75:
+            suffix = (
+                f"\n\n⚠️ {tokens} tokens uses >75% of the {budget}-token "
+                "context budget; little room left for memory/history."
+            )
+        await msg.reply(
+            f"Master prompt updated ({len(new_text)} chars, "
+            f"~{tokens} tokens).{suffix}",
+            disable_notification=True,
+        )
+
     @r.message(Command("master_prompt"))
     async def master_prompt(msg: Message) -> None:
         """View / set / reset the global master persona prompt."""
         if not await require_admin(msg, admin_ids):
             return
-        raw = (msg.text or "").split(None, 2)
+        # Command may arrive as msg.text or as msg.caption (when a document
+        # is uploaded with the command as its caption).
+        raw = (msg.text or msg.caption or "").split(None, 2)
         sub = raw[1].lower() if len(raw) >= 2 else "show"
         if sub == "show":
             current = current_master_prompt()
             is_default = current == DEFAULT_DUDE_PROMPT
             tag = "(default Dude)" if is_default else "(override active)"
+            tokens = count_tokens(current)
+            head = (
+                f"Master persona prompt {tag} "
+                f"({len(current)} chars, ~{tokens} tokens):\n\n"
+            )
+            # Keep the whole reply under Telegram's 4096-char outbound limit.
             await msg.reply(
-                f"Master persona prompt {tag}:\n\n{current[:3800]}",
+                head + current[: 4000 - len(head)],
                 disable_notification=True,
             )
             return
@@ -421,20 +464,74 @@ def build_router(rt: Runtime) -> Router:
         if sub == "set":
             if len(raw) < 3 or not raw[2].strip():
                 await msg.reply(
-                    "Usage: /master_prompt set <new full prompt text>",
+                    "Usage: /master_prompt set <new full prompt text>\n"
+                    "Or attach a .txt file and reply to it with "
+                    "/master_prompt setfile (for prompts longer than 4079 "
+                    "chars).",
                     disable_notification=True,
                 )
                 return
-            new_text = raw[2].strip()
-            await kv_set(rt.db, "master_prompt", new_text)
-            set_master_prompt_override(new_text)
-            await msg.reply(
-                f"Master prompt updated ({len(new_text)} chars).",
-                disable_notification=True,
+            await _store_master_prompt(msg, raw[2])
+            return
+        if sub == "setfile":
+            # Accept the document either attached to this message (as caption)
+            # or in a message we're replying to.
+            doc = msg.document or (
+                msg.reply_to_message.document if msg.reply_to_message else None
             )
+            if doc is None:
+                await msg.reply(
+                    "Send the new prompt as a .txt file and either caption "
+                    "it `/master_prompt setfile` or reply to the file with "
+                    "`/master_prompt setfile`.",
+                    disable_notification=True,
+                )
+                return
+            if doc.file_size and doc.file_size > _MASTER_PROMPT_FILE_MAX_BYTES:
+                await msg.reply(
+                    f"That file is {doc.file_size} bytes; cap is "
+                    f"{_MASTER_PROMPT_FILE_MAX_BYTES}. Shorten the prompt.",
+                    disable_notification=True,
+                )
+                return
+            try:
+                file = await msg.bot.get_file(doc.file_id)
+                buf = io.BytesIO()
+                await msg.bot.download_file(file.file_path, destination=buf)
+            except Exception as exc:
+                log.warning("master_prompt setfile download failed: %s", exc)
+                await msg.reply(
+                    f"Couldn't download that file: {exc}",
+                    disable_notification=True,
+                )
+                return
+            data = buf.getvalue()
+            if len(data) > _MASTER_PROMPT_FILE_MAX_BYTES:
+                await msg.reply(
+                    f"File is {len(data)} bytes; cap is "
+                    f"{_MASTER_PROMPT_FILE_MAX_BYTES}.",
+                    disable_notification=True,
+                )
+                return
+            try:
+                new_text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                await msg.reply(
+                    "File isn't valid UTF-8. Save it as plain UTF-8 text "
+                    "and try again.",
+                    disable_notification=True,
+                )
+                return
+            if not new_text.strip():
+                await msg.reply(
+                    "File is empty — refusing to clobber the prompt.",
+                    disable_notification=True,
+                )
+                return
+            await _store_master_prompt(msg, new_text)
             return
         await msg.reply(
-            "Usage: /master_prompt show | set <text> | reset",
+            "Usage: /master_prompt show | set <text> | setfile | reset",
             disable_notification=True,
         )
 

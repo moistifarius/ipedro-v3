@@ -103,9 +103,20 @@ List durable facts stored for that chat.
 ### `/memory_forget <fact_id>`
 Delete a specific durable fact.
 
-### `/master_prompt show | set <text> | reset`
+### `/master_prompt show | set <text> | setfile | reset`
 Show, override, or reset the master persona prompt. Overrides persist in
 `kv_store` across restarts.
+
+- `set <text>` accepts the prompt inline, up to Telegram's ~4079 char
+  inbound limit.
+- `setfile` accepts a UTF-8 `.txt` file (up to 64 KB) and bypasses the
+  inbound character limit. Either upload the file with caption
+  `/master_prompt setfile`, or reply to a previously-sent document with
+  `/master_prompt setfile`.
+
+Both `set` and `setfile` report the new character and token count and
+warn if the prompt is large enough to evict the persona from the runtime
+context budget.
 
 ### `/ai_provider show | claude | openai`
 Switch which provider answers text completions (chat, `/a`, summaries,
