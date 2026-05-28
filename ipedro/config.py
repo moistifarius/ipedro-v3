@@ -27,7 +27,7 @@ class Settings(BaseSettings):
         description="Comma-separated numeric Telegram user IDs allowed to use admin commands.",
     )
 
-    # OpenAI
+    # OpenAI (still used for embeddings, image gen, audio — Claude has no equivalents)
     openai_api_key: str
     openai_organization: str | None = None
     openai_text_model: str = "gpt-4o-mini"
@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     openai_transcription_model: str = "whisper-1"
     openai_embedding_model: str = "text-embedding-3-small"
     openai_embedding_dim: int = 1536
+
+    # Anthropic — used for text completions (chat, summaries, /a, /whatdid, etc.).
+    # `text_provider` runtime-selects which provider answers text calls; falls
+    # back to OpenAI when the Anthropic key is absent. Admins can flip it
+    # live via /ai_provider, persisted in kv_store.
+    anthropic_api_key: str | None = None
+    claude_text_model: str = "claude-sonnet-4-6"
+    text_provider: Literal["claude", "openai"] = "claude"
 
     # Database
     database_url: str

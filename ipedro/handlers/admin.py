@@ -324,6 +324,76 @@ def build_router(rt: Runtime) -> Router:
                 pass
         await cb.answer(str(target))
 
+    @r.message(Command("ai_provider"))
+    async def ai_provider(msg: Message) -> None:
+        """Switch the text-completion provider. /ai_provider show|claude|openai."""
+        if not await require_admin(msg, admin_ids):
+            return
+        parts = (msg.text or "").split()
+        if len(parts) < 2 or parts[1].lower() == "show":
+            await msg.reply(
+                f"Current text provider: {rt.openai.text_provider}\n"
+                f"  claude model: {rt.openai.claude_model}\n"
+                f"  openai model: {rt.openai.text_model}\n"
+                "Switch with: /ai_provider claude  or  /ai_provider openai",
+                disable_notification=True,
+            )
+            return
+        choice = parts[1].lower()
+        if choice not in ("claude", "openai"):
+            await msg.reply(
+                "Usage: /ai_provider show | claude | openai",
+                disable_notification=True,
+            )
+            return
+        try:
+            rt.openai.set_text_provider(choice)
+        except ValueError as exc:
+            await msg.reply(f"Can't switch: {exc}", disable_notification=True)
+            return
+        await kv_set(rt.db, "text_provider", choice)
+        await msg.reply(
+            f"Text provider is now {choice}.",
+            disable_notification=True,
+        )
+
+    @r.message(Command("ai_model"))
+    async def ai_model(msg: Message) -> None:
+        """Switch the text model used by the active provider.
+
+        /ai_model show
+        /ai_model <model_id>          # picks the right slot for the active provider
+        /ai_model claude <model_id>   # explicitly set the Claude model
+        /ai_model openai <model_id>   # explicitly set the OpenAI model
+        """
+        if not await require_admin(msg, admin_ids):
+            return
+        parts = (msg.text or "").split()
+        if len(parts) < 2 or parts[1].lower() == "show":
+            await msg.reply(
+                f"Provider: {rt.openai.text_provider}\n"
+                f"  claude model: {rt.openai.claude_model}\n"
+                f"  openai model: {rt.openai.text_model}",
+                disable_notification=True,
+            )
+            return
+        if len(parts) >= 3 and parts[1].lower() in ("claude", "openai"):
+            slot = parts[1].lower()
+            new_model = parts[2]
+        else:
+            slot = rt.openai.text_provider
+            new_model = parts[1]
+        if slot == "claude":
+            rt.openai.set_claude_model(new_model)
+            await kv_set(rt.db, "claude_text_model", new_model)
+        else:
+            rt.openai.set_openai_text_model(new_model)
+            await kv_set(rt.db, "openai_text_model", new_model)
+        await msg.reply(
+            f"{slot} text model is now {new_model}.",
+            disable_notification=True,
+        )
+
     @r.message(Command("master_prompt"))
     async def master_prompt(msg: Message) -> None:
         """View / set / reset the global master persona prompt."""

@@ -6,7 +6,10 @@
   installed (the Compose Manager plugin is the easiest way to drive
   docker-compose from the Unraid UI).
 - A Telegram bot token (`/newbot` from `@BotFather`).
-- An OpenAI API key.
+- An OpenAI API key (used for embeddings, image gen, audio).
+- An Anthropic API key (optional but recommended — used for text
+  completions via Claude). Omit it and the bot falls back to OpenAI for
+  text too.
 
 ## Layout
 

@@ -50,7 +50,7 @@ class _ExplodingChatNamespace:
 
 @pytest.mark.asyncio
 async def test_chat_returns_stripped_content(monkeypatch):
-    client = OpenAIClient(api_key="x")
+    client = OpenAIClient(api_key="x", text_provider="openai")
     client._client.chat = _FakeChatNamespace("  hello there  ")
     out = await client.chat([{"role": "user", "content": "hi"}])
     assert out == "hello there"
@@ -58,7 +58,7 @@ async def test_chat_returns_stripped_content(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_chat_returns_none_on_empty_content():
-    client = OpenAIClient(api_key="x")
+    client = OpenAIClient(api_key="x", text_provider="openai")
     client._client.chat = _FakeChatNamespace("   ")
     out = await client.chat([{"role": "user", "content": "hi"}])
     assert out is None
@@ -66,7 +66,7 @@ async def test_chat_returns_none_on_empty_content():
 
 @pytest.mark.asyncio
 async def test_chat_swallows_unexpected_errors():
-    client = OpenAIClient(api_key="x")
+    client = OpenAIClient(api_key="x", text_provider="openai")
     client._client.chat = _ExplodingChatNamespace()
     out = await client.chat([{"role": "user", "content": "hi"}])
     assert out is None  # never propagates
@@ -89,7 +89,7 @@ class _FakeEmbeddingsOk:
 
 @pytest.mark.asyncio
 async def test_embed_returns_vector():
-    client = OpenAIClient(api_key="x")
+    client = OpenAIClient(api_key="x", text_provider="openai")
     client._client.embeddings = _FakeEmbeddingsOk()
     out = await client.embed("hello")
     assert out == [0.1, 0.2, 0.3]
@@ -97,6 +97,6 @@ async def test_embed_returns_vector():
 
 @pytest.mark.asyncio
 async def test_embed_returns_none_for_empty_text():
-    client = OpenAIClient(api_key="x")
+    client = OpenAIClient(api_key="x", text_provider="openai")
     out = await client.embed("   ")
     assert out is None

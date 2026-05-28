@@ -66,6 +66,8 @@ HELP_TEXT = (
     "/flags - active flags in this chat\n"
     "\n"
     "(admin DM only) /master_prompt show|set|reset - my master persona prompt\n"
+    "(admin DM only) /ai_provider show|claude|openai - switch text-completion provider\n"
+    "(admin DM only) /ai_model [provider] <model_id> - switch text model\n"
     "(admin DM only) /logs [N] [filter] - real program logs from the ring buffer\n"
     "/get_chat_id - show this chat's id\n"
     "/chat_config - show or change response policy/persona\n"
