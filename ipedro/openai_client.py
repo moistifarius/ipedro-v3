@@ -322,6 +322,8 @@ class AIClient:
             )
             out = "\n".join(text_parts).strip()
             return out or None
+        except AnthropicAPIError:
+            raise
         except Exception as exc:
             log.error("Claude chat error: %s", exc)
             return None
