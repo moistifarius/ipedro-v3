@@ -43,6 +43,17 @@ async def duckhunt_enabled_chat_ids(db: Database) -> list[int]:
     return [r["chat_id"] for r in rows]
 
 
+async def duckhunt_enabled_chats(db: Database) -> list[dict]:
+    """Return enabled chats with chat_id, title, type so a UI can label them."""
+    rows = await db.fetch(
+        "SELECT c.chat_id, c.title, c.type FROM chats c "
+        "JOIN chat_config cfg ON cfg.chat_id = c.chat_id "
+        "WHERE cfg.duckhunt_enabled = TRUE "
+        "ORDER BY c.last_seen DESC"
+    )
+    return [dict(r) for r in rows]
+
+
 # Quirky, vibes-only hints. Each tier has a few options; one is picked per
 # spawn. The exact rarity is never named — the flavor lets observant
 # players guess without making it a plain announcement.
