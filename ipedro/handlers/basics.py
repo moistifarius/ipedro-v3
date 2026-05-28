@@ -65,7 +65,7 @@ HELP_TEXT = (
     "/unsnark @user, /ungrudge @user - release\n"
     "/flags - active flags in this chat\n"
     "\n"
-    "(admin DM only) /master_prompt show|set|reset - my master persona prompt\n"
+    "(admin DM only) /master_prompt show|set|setfile|reset - my master persona prompt\n"
     "(admin DM only) /ai_provider show|claude|openai - switch text-completion provider\n"
     "(admin DM only) /ai_model [provider] <model_id> - switch text model\n"
     "(admin DM only) /logs [N] [filter] - real program logs from the ring buffer\n"
