@@ -182,6 +182,21 @@ async def run_spawner(
             )
             if departed:
                 log.info("Probabilistic departure: %d duck(s) wandered off.", len(departed))
+                # Announce in each chat so users see the state change instead
+                # of silently discovering the duck is gone next time they type
+                # `bang` / `bef` / `ignore`.
+                for chat_id in departed:
+                    try:
+                        await bot.send_message(
+                            chat_id,
+                            "🦆 *the duck wanders off, never to be seen again.*",
+                            disable_notification=True,
+                        )
+                    except Exception as exc:  # pragma: no cover
+                        log.warning(
+                            "Wander-off announce failed for chat %s: %s",
+                            chat_id, exc,
+                        )
 
             for chat_id in await duckhunt_enabled_chat_ids(db):
                 await _maybe_spawn(

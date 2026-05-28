@@ -191,9 +191,24 @@ TLDR_PROMPT = (
 )
 
 FACT_EXTRACT_PROMPT = (
-    "Read the chat snippet. Extract at most 3 high-signal facts worth remembering "
-    "long-term about specific users or this chat (e.g. 'Alice is a vegetarian'). "
-    "Skip ephemeral chatter, jokes, and uncertain claims. Output one fact per "
-    "line, or output the single word NONE if nothing qualifies.\n\n"
+    "Read the chat snippet and extract durable facts worth remembering "
+    "long-term. Include:\n"
+    "- preferences (foods, drinks, music, hobbies, pets, sports teams)\n"
+    "- relationships (who knows whom, partners, friends, family, pets)\n"
+    "- recurring jokes or in-references that define this chat\n"
+    "- ongoing situations (jobs, projects, moves, health, travel)\n"
+    "- self-statements ('I work at X', 'I'm allergic to peanuts',\n"
+    "  'I live in Portland')\n"
+    "\n"
+    "Skip pure pleasantries ('hi', 'lol', 'thx'), one-off jokes that don't "
+    "recur, and clearly uncertain claims. Output one fact per line, in "
+    "'subject — fact' form when possible:\n"
+    "  Matt — drinks White Russians\n"
+    "  Pedro — afraid of nihilists\n"
+    "  this chat — Thursday trivia nights are a recurring tradition\n"
+    "\n"
+    "Lean toward extracting SOMETHING rather than nothing. Only output the "
+    "single word NONE if the snippet is genuinely all small talk.\n"
+    "\n"
     "Chat snippet:\n{messages}"
 )

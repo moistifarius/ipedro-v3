@@ -14,6 +14,7 @@ from ipedro.config import Settings, get_settings
 from ipedro.db.migrations import apply_schema, has_pgvector
 from ipedro.db.pool import Database, set_db
 from ipedro.db.repositories import ChatRepo, CommandLogRepo, UserRepo
+from ipedro.duckhunt.debug_toggles import load_all as load_debug_toggles
 from ipedro.duckhunt.service import DuckhuntService
 from ipedro.duckhunt.spawner import run_spawner
 from ipedro.ambient_loops import run_ambient_loops
@@ -86,6 +87,11 @@ async def build_runtime(settings: Settings) -> Runtime:
         or await kv_get(db, "pedro_master_prompt")
     )
     set_master_prompt_override(override)
+
+    # Prime the admin debug-toggle cache from kv_store so the bot honors
+    # any toggles the admin had set before the last restart.
+    await load_debug_toggles(db, settings.admin_ids)
+
     memory = MemoryStore(db=db, openai=openai, pgvector_available=pgvector_available)
     return Runtime(
         settings=settings,

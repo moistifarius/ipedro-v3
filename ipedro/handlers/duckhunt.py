@@ -10,6 +10,7 @@ from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, Message
 
 from ipedro.duckhunt.captcha_gen import make_captcha
+from ipedro.duckhunt.debug_toggles import is_on as debug_is_on
 from ipedro.duckhunt.spawner import build_quack_message_for
 from ipedro.duckhunt.verdicts import parse_verdict
 from ipedro.handlers.common import display_name, get_or_create_chat_config
@@ -21,6 +22,11 @@ from ipedro.runtime import Runtime
 log = logging.getLogger(__name__)
 
 _CHALLENGE_KINDS = ("captcha", "trivia", "recipe")
+
+# Subset eligible for *random* selection on a bef refusal. Recipe is
+# currently disabled here while we tune it; `/debug_recipe` still works
+# because force_kind paths validate against the full _CHALLENGE_KINDS.
+_RANDOM_CHALLENGE_KINDS: tuple[str, ...] = ("captcha", "trivia")
 
 # A small pool of neutral celebration lines for a successful bef; one is
 # picked at random so the bot doesn't sound like a stuck record. Rarity
@@ -72,7 +78,10 @@ async def _issue_bef_challenge(
     and recipe are AI-generated text challenges judged by an AI prompt.
     Returns True if the challenge was issued; False otherwise.
     """
-    kind = force_kind if force_kind in _CHALLENGE_KINDS else random.choice(_CHALLENGE_KINDS)
+    kind = (
+        force_kind if force_kind in _CHALLENGE_KINDS
+        else random.choice(_RANDOM_CHALLENGE_KINDS)
+    )
     if kind == "captcha":
         answer, png = make_captcha()
         try:
@@ -249,7 +258,11 @@ def build_router(rt: Runtime) -> Router:
         if not cfg.duckhunt_enabled or not msg.from_user:
             return
         action = msg.text.strip().lower()
-        if not await rt.duckhunt.cooldown_ok(
+        admin_id = msg.from_user.id
+        # bypass_cooldowns lets an admin re-bang/-bef rapidly while
+        # testing. Non-admins (or admins with the toggle off) get the
+        # normal 15s cooldown.
+        if not debug_is_on(admin_id, "bypass_cooldowns") and not await rt.duckhunt.cooldown_ok(
             msg.chat.id, msg.from_user.id,
             rt.settings.duckhunt_action_cooldown_seconds,
         ):
@@ -257,9 +270,17 @@ def build_router(rt: Runtime) -> Router:
             return
 
         if action == "bang":
+            # always_hit / always_miss short-circuit the dice roll inside
+            # handle_bang. They're mutually exclusive — always_hit wins.
+            forced: bool | None = None
+            if debug_is_on(admin_id, "always_hit"):
+                forced = True
+            elif debug_is_on(admin_id, "always_miss"):
+                forced = False
             outcome, _ = await rt.duckhunt.handle_bang(
                 chat_id=msg.chat.id, user_id=msg.from_user.id,
                 display_name=display_name(msg.from_user),
+                forced_success=forced,
             )
         else:
             outcome, _ = await rt.duckhunt.handle_ignore(
@@ -267,7 +288,13 @@ def build_router(rt: Runtime) -> Router:
                 display_name=display_name(msg.from_user),
             )
         if outcome is None:
-            return  # no active duck
+            # No active duck. Reply briefly instead of silent return so the
+            # user gets feedback when a stale /quackflag misled them.
+            await msg.reply(
+                "🦆 No duck here. Wait for one to spawn.",
+                disable_notification=True,
+            )
+            return
         await msg.reply(outcome.message, disable_notification=True)
 
     @r.message(F.text.lower() == "bef")
@@ -275,6 +302,7 @@ def build_router(rt: Runtime) -> Router:
         cfg = await get_or_create_chat_config(rt, msg)
         if not cfg.duckhunt_enabled or not msg.from_user:
             return
+        admin_id = msg.from_user.id
 
         # Block while a retry challenge is still outstanding.
         pending = await rt.duckhunt.get_bef_challenge(
@@ -288,7 +316,8 @@ def build_router(rt: Runtime) -> Router:
                 pass
             return
 
-        if not await rt.duckhunt.cooldown_ok(
+        # bypass_cooldowns lets an admin re-bef while debugging.
+        if not debug_is_on(admin_id, "bypass_cooldowns") and not await rt.duckhunt.cooldown_ok(
             msg.chat.id, msg.from_user.id,
             rt.settings.duckhunt_action_cooldown_seconds,
         ):
@@ -303,6 +332,10 @@ def build_router(rt: Runtime) -> Router:
 
         duck = await rt.duckhunt.active_duck(msg.chat.id)
         if not duck:
+            await msg.reply(
+                "🦆 No duck here. Wait for one to spawn.",
+                disable_notification=True,
+            )
             return
 
         # Step 2 of the flow only runs if dice pass; but to keep ai_line
@@ -313,21 +346,31 @@ def build_router(rt: Runtime) -> Router:
         friend_count = await rt.duckhunt.friend_count(
             msg.chat.id, msg.from_user.id,
         )
-        ai_text = await rt.openai.chat(
-            [
-                {"role": "system", "content": DUCK_BEF_DECIDE_PROMPT.format(
-                    display_name=who, friend_count=friend_count,
-                )},
-                {"role": "user", "content": "bef"},
-            ],
-            max_tokens=120,
-            temperature=1.0,
-        )
-        verdict, line = parse_verdict(ai_text, "ACCEPT", "REFUSE")
-        log.info(
-            "bef AI decision: chat=%s user=%s verdict=%s",
-            msg.chat.id, msg.from_user.id, verdict,
-        )
+        # always_refuse_bef short-circuits the AI call so the admin can
+        # force the refusal -> challenge path for debugging.
+        if debug_is_on(admin_id, "always_refuse_bef"):
+            verdict: bool | None = False
+            line = "The duck refuses. [debug: always_refuse_bef]"
+            log.info(
+                "bef debug-forced refusal: chat=%s user=%s",
+                msg.chat.id, msg.from_user.id,
+            )
+        else:
+            ai_text = await rt.openai.chat(
+                [
+                    {"role": "system", "content": DUCK_BEF_DECIDE_PROMPT.format(
+                        display_name=who, friend_count=friend_count,
+                    )},
+                    {"role": "user", "content": "bef"},
+                ],
+                max_tokens=120,
+                temperature=1.0,
+            )
+            verdict, line = parse_verdict(ai_text, "ACCEPT", "REFUSE")
+            log.info(
+                "bef AI decision: chat=%s user=%s verdict=%s",
+                msg.chat.id, msg.from_user.id, verdict,
+            )
 
         outcome, duck_after = await rt.duckhunt.handle_bef(
             chat_id=msg.chat.id, user_id=msg.from_user.id,

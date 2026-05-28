@@ -216,3 +216,32 @@ Switch the text model used by the active provider. With no provider word
 the new model is applied to whichever provider is currently active.
 Examples: `/ai_model claude-opus-4-7`, `/ai_model openai gpt-4.1-mini`.
 Persisted in `kv_store`.
+
+### `/debug_toggle [<name> on|off]`
+Admin-scoped duckhunt cheats for testing flows end-to-end without
+waiting on dice / AI. Toggles are keyed by the admin's user id so two
+admins testing in the same chat don't interfere, and are persisted in
+`kv_store` so they survive restarts.
+
+Without arguments (or with `show`) prints the current panel. With a
+name and `on`/`off` flips one toggle. Valid names:
+
+- `always_hit` — every `bang` is a guaranteed hit.
+- `always_miss` — every `bang` misses (resets streak).
+- `always_pass_challenge` — bef-challenge judge auto-passes.
+- `always_fail_challenge` — bef-challenge judge auto-fails.
+- `always_refuse_bef` — `bef` always rolls the REFUSE branch, so the
+  refusal challenge fires every time.
+- `bypass_cooldowns` — skip the 15-second per-user cooldown on
+  `bang`/`bef`/`ignore`.
+
+`always_hit` and `always_miss` are mutually exclusive — if both are on,
+`always_hit` wins. Same for `always_pass_challenge` /
+`always_fail_challenge`.
+
+### `/debug_clear_duck`
+Picker → force-resolve the active duck in the chosen chat by marking
+the row in `duck_events` with `resolved_action = 'admin_cleared'`.
+Useful when a stuck duck is blocking your `bef` flow testing or when
+you want to force the spawner to consider the chat as duck-less on the
+next tick.

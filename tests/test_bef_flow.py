@@ -165,3 +165,70 @@ async def test_no_duck_returns_none_pair():
         rng=AlwaysPassRng(),
     )
     assert outcome is None and duck is None
+
+
+# --- handler-level regression: typing `bang` with no active duck should
+# reply, not silently swallow the message. ------------------------------
+@pytest.mark.asyncio
+async def test_bang_without_duck_replies():
+    """Regression test for the silent-no-duck bug (Fix 2).
+
+    Before this fix the handler returned early without replying when
+    ``handle_bang`` returned ``(None, None)``. Users typing `bang` got
+    no feedback. The fix replies with a brief "🦆 No duck here." line.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from ipedro.handlers.duckhunt import build_router
+
+    cfg = SimpleNamespace(duckhunt_enabled=True)
+    chats = SimpleNamespace(
+        upsert_chat=AsyncMock(),
+        get_config=AsyncMock(return_value=cfg),
+        upsert_default_config=AsyncMock(return_value=cfg),
+    )
+    users = SimpleNamespace(upsert_user=AsyncMock())
+    duckhunt = SimpleNamespace(
+        active_duck=AsyncMock(return_value=None),
+        cooldown_ok=AsyncMock(return_value=True),
+        # No active duck → handle_bang returns the (None, None) sentinel.
+        handle_bang=AsyncMock(return_value=(None, None)),
+        handle_ignore=AsyncMock(return_value=(None, None)),
+    )
+    settings = SimpleNamespace(
+        admin_ids=frozenset(),
+        duckhunt_action_cooldown_seconds=15,
+        duckhunt_duck_lifetime_seconds=86400,
+    )
+    rt = SimpleNamespace(
+        settings=settings, db=SimpleNamespace(), chats=chats, users=users,
+        duckhunt=duckhunt, openai=SimpleNamespace(), bot=SimpleNamespace(),
+    )
+
+    router = build_router(rt)
+    # Pull the bang_or_ignore handler out of the router so we can call
+    # it directly.
+    handler = None
+    for h in router.observers["message"].handlers:
+        if h.callback.__name__ == "bang_or_ignore":
+            handler = h.callback
+            break
+    assert handler is not None
+
+    chat = SimpleNamespace(id=42, type="group", title="t")
+    from_user = SimpleNamespace(
+        id=7, is_bot=False, username="u",
+        first_name="U", last_name=None,
+    )
+    msg = SimpleNamespace(
+        chat=chat, from_user=from_user, text="bang", caption=None,
+        message_id=1, reply=AsyncMock(),
+    )
+    await handler(msg)
+
+    # handle_bang returned (None, None) → the no-duck reply branch fired.
+    duckhunt.handle_bang.assert_awaited_once()
+    msg.reply.assert_awaited()
+    body = msg.reply.await_args.args[0]
+    assert "no duck" in body.lower()

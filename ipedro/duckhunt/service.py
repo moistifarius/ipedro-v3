@@ -223,7 +223,16 @@ class DuckhuntService:
     async def handle_bang(
         self, *, chat_id: int, user_id: int, display_name: str,
         rng: random.Random | None = None,
+        forced_success: bool | None = None,
     ) -> tuple[ActionOutcome, ActiveDuck] | tuple[None, None]:
+        """Resolve a `bang` action against the current active duck.
+
+        ``forced_success`` is an admin debug-toggle escape hatch
+        (``always_hit`` / ``always_miss`` in :mod:`ipedro.duckhunt.debug_toggles`).
+        When True/False, the dice roll is skipped and a hit/miss outcome
+        is fabricated. None means "roll normally". Boss ducks ignore the
+        flag — they have their own attribution flow.
+        """
         duck = await self.active_duck(chat_id)
         if not duck:
             return None, None
@@ -234,7 +243,21 @@ class DuckhuntService:
             "WHERE chat_id = $1 AND user_id = $2",
             chat_id, user_id,
         ) or 0
-        outcome = bang_outcome(duck.rarity, int(stats), rng)
+        if forced_success is True:
+            outcome = ActionOutcome(
+                success=True, points_delta=1, streak_delta=1,
+                message="You shot the duck! +1 [debug: always_hit]",
+                resolves_duck=True,
+            )
+        elif forced_success is False:
+            outcome = ActionOutcome(
+                success=False, points_delta=0,
+                streak_delta=-int(stats),
+                message="You missed! [debug: always_miss]",
+                resolves_duck=False,
+            )
+        else:
+            outcome = bang_outcome(duck.rarity, int(stats), rng)
         await self._bump_stats(chat_id, user_id, display_name, "bang", outcome)
         if outcome.resolves_duck:
             await self._resolve(duck.id, user_id, "bang", outcome.points_delta)

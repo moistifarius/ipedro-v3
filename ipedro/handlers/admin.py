@@ -14,6 +14,9 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramBadRequest
 
 from ipedro.auth import is_admin_user
+from ipedro.duckhunt.debug_toggles import (
+    DEBUG_TOGGLE_NAMES, all_for as debug_toggles_all_for, set_toggle as set_debug_toggle,
+)
 from ipedro.duckhunt.spawner import (
     build_quack_message, duckhunt_enabled_chat_ids, duckhunt_enabled_chats,
 )
@@ -363,6 +366,8 @@ def _mgm_debug_submenu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="Recent logs",             callback_data="mgm:debug:logs")],
         [InlineKeyboardButton(text="Cost (7d)",               callback_data="mgm:debug:cost")],
         [InlineKeyboardButton(text="Command log",             callback_data="mgm:debug:cmdlog")],
+        [InlineKeyboardButton(text="Toggles (/debug_toggle)", callback_data="mgm:debug:toggles")],
+        [InlineKeyboardButton(text="Clear duck (/debug_clear_duck)", callback_data="mgm:debug:cleard")],
         [InlineKeyboardButton(text="← back",                  callback_data="mgm:top")],
     ])
 
@@ -379,6 +384,7 @@ _MGM_LEAVES: tuple[str, ...] = (
     "mgm:chats", "mgm:chats:list", "mgm:chats:pick",
     "mgm:debug", "mgm:debug:status", "mgm:debug:logs",
     "mgm:debug:cost", "mgm:debug:cmdlog",
+    "mgm:debug:toggles", "mgm:debug:cleard",
 )
 
 
@@ -617,13 +623,20 @@ def _render_summary_report(report: dict, chat_id: int) -> str:
         "\n".join(f"  - {f}" for f in facts_added)
         if facts_added else "  (none)"
     )
-    return (
+    body = (
         f"Force-summarized chat {chat_id}.\n"
         f"  messages summarized: {report['messages_summarized']}\n"
         f"  summary id: {report['summary_id']} "
         f"({report['summary_chars']} chars)\n"
         f"  facts added ({len(facts_added)}):\n{facts_block}"
     )
+    # When 0 facts were extracted, show what the LLM actually said so the
+    # admin can tell "LLM is being too conservative" apart from "LLM never
+    # ran" / "DB write failed".
+    raw = report.get("raw_facts_response")
+    if not facts_added and raw is not None:
+        body += f"\n\n  raw LLM facts response: {raw!r}"
+    return body
 
 
 async def _with_working_placeholder(
@@ -2840,6 +2853,35 @@ def build_router(rt: Runtime) -> Router:
                 await _mgm_render_cmdlog(msg)
             await cb.answer()
             return
+        if data == "mgm:debug:toggles":
+            if msg and cb.from_user is not None:
+                state = debug_toggles_all_for(cb.from_user.id)
+                lines = ["🎛 Debug toggles (yours, persisted across restarts):"]
+                for name, on in state.items():
+                    lines.append(f"  {name}: {'ON' if on else 'off'}")
+                lines.append(
+                    "\nFlip with: /debug_toggle <name> on|off"
+                )
+                kb = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="← back", callback_data="mgm:debug"),
+                    _home_button(),
+                ]])
+                try:
+                    await msg.edit_text("\n".join(lines)[:4000], reply_markup=kb)
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        if data == "mgm:debug:cleard":
+            await _open_picker(
+                rt, edit_in=msg,
+                prompt="Pick a chat to force-clear its active duck:",
+                action="dcd",
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+            home_to_manage=True,
+            )
+            await cb.answer()
+            return
 
         await cb.answer("Unknown menu item.", show_alert=True)
 
@@ -3065,5 +3107,121 @@ def build_router(rt: Runtime) -> Router:
             await cb.answer(f"{arg} model set.")
             return
         await cb.answer(_expired("ai_provider"), show_alert=True)
+
+    # ----------------------------------------------------- /debug_toggle
+    @r.message(Command("debug_toggle"))
+    async def debug_toggle(msg: Message) -> None:
+        """View or flip admin-scoped debug toggles.
+
+        Usage:
+            /debug_toggle                       — print current state
+            /debug_toggle show                  — same
+            /debug_toggle <name> on|off|1|0     — flip one toggle
+        """
+        if not await require_admin(msg, admin_ids):
+            return
+        if msg.from_user is None:
+            return
+        parts = (msg.text or "").split()
+        if len(parts) < 2 or parts[1].lower() == "show":
+            state = debug_toggles_all_for(msg.from_user.id)
+            lines = ["🎛 Debug toggles (yours, persisted across restarts):"]
+            for name, on in state.items():
+                lines.append(f"  {name}: {'ON' if on else 'off'}")
+            lines.append("\nUsage: /debug_toggle <name> on|off")
+            await msg.reply("\n".join(lines), disable_notification=True)
+            return
+        if len(parts) < 3:
+            await msg.reply(
+                "Usage: /debug_toggle <name> on|off",
+                disable_notification=True,
+            )
+            return
+        name = parts[1]
+        if name not in DEBUG_TOGGLE_NAMES:
+            await msg.reply(
+                f"Unknown toggle '{name}'. Valid: {', '.join(DEBUG_TOGGLE_NAMES)}",
+                disable_notification=True,
+            )
+            return
+        val = parts[2].lower()
+        on = val in ("on", "1", "true", "yes")
+        await set_debug_toggle(rt.db, msg.from_user.id, name, on)
+        await msg.reply(
+            f"{name}: {'ON' if on else 'off'}",
+            disable_notification=True,
+        )
+
+    # ----------------------------------------------------- /debug_clear_duck
+    @r.message(Command("debug_clear_duck"))
+    async def debug_clear_duck(msg: Message) -> None:
+        """Picker → force-resolve the active duck for a chat.
+
+        Useful when a stuck duck blocks `bef` flow testing or you want to
+        re-trigger the spawner.
+        """
+        if not await require_admin(msg, admin_ids):
+            return
+        chats = await rt.chats.list_known()
+        kb = _chat_picker(
+            chats, "dcd",
+            paginate=True,
+            admin_user_id=msg.from_user.id if msg.from_user else None,
+        )
+        if kb is None:
+            await msg.reply("No known chats yet.", disable_notification=True)
+            return
+        await msg.reply(
+            "Pick a chat to force-clear its active duck:",
+            reply_markup=kb,
+            disable_notification=True,
+        )
+
+    @r.callback_query(F.data.startswith("dcd:"))
+    async def on_debug_clear_duck(cb: CallbackQuery) -> None:
+        if not await _gate_callback(cb):
+            return
+        parsed = _parse_picker_cb(cb.data)
+        if parsed is None:
+            await cb.answer(_expired("debug_clear_duck"), show_alert=True)
+            return
+        kind, n = parsed
+        if kind == "page":
+            chats = await rt.chats.list_known()
+            kb = _chat_picker(
+                chats, "dcd", paginate=True, page=n,
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_reply_markup(reply_markup=kb)
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        target = n
+        if cb.from_user is not None:
+            _LAST_PICKED_CHAT[cb.from_user.id] = (target, time.time())
+        res = await rt.db.execute(
+            "UPDATE duck_events SET resolved = TRUE, "
+            "       resolved_action = 'admin_cleared', "
+            "       resolved_at = NOW() "
+            " WHERE chat_id = $1 AND resolved = FALSE",
+            target,
+        )
+        try:
+            cleared = int(res.split()[-1])
+        except (ValueError, IndexError):
+            cleared = 0
+        body = (
+            f"Force-cleared active duck for chat {target} "
+            f"({cleared} row(s) updated)."
+        )
+        if cb.message:
+            try:
+                await cb.message.edit_text(body)
+            except TelegramBadRequest:
+                pass
+        await cb.answer("Cleared.")
 
     return r
