@@ -95,8 +95,8 @@ class DuckhuntService:
         )
         assert row is not None
         log.info(
-            "Spawned %s%s duck in chat %s (event id=%s).",
-            "BOSS " if is_boss else "", rarity, chat_id, row["id"],
+            "Spawned %sduck in chat %s (event id=%s).",
+            "BOSS " if is_boss else "", chat_id, row["id"],
         )
         return _row_to_active_duck(row)
 
@@ -274,7 +274,7 @@ class DuckhuntService:
                 streak_delta=1,
                 message=(
                     f"BOOM. {display_name} lands the killing blow on the "
-                    f"{duck.rarity} BOSS duck! +{big_pts} bonus."
+                    f"BOSS duck! +{big_pts} bonus."
                 ),
                 resolves_duck=True,
             )
@@ -313,7 +313,7 @@ class DuckhuntService:
             points_delta=small_pts,
             streak_delta=0,
             message=(
-                f"💥 Hit on the {duck.rarity} BOSS duck "
+                f"💥 Hit on the BOSS duck "
                 f"({progress}). +{small_pts}"
             ),
             resolves_duck=False,

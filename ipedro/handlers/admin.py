@@ -218,8 +218,8 @@ def build_router(rt: Runtime) -> Router:
                 )
                 spawned += 1
                 log.info(
-                    "quack_all: spawned in chat=%s rarity=%s event_id=%s",
-                    chat_id, duck.rarity, duck.id,
+                    "quack_all: spawned in chat=%s event_id=%s",
+                    chat_id, duck.id,
                 )
             except Exception as exc:
                 failed += 1
@@ -272,13 +272,13 @@ def build_router(rt: Runtime) -> Router:
             await cb.answer(f"Failed: {exc}", show_alert=True)
             return
         log.info(
-            "quack_chat: spawned in chat=%s rarity=%s event_id=%s",
-            target, duck.rarity, duck.id,
+            "quack_chat: spawned in chat=%s event_id=%s",
+            target, duck.id,
         )
         if cb.message:
             try:
                 await cb.message.edit_text(
-                    f"🦆 Spawned in {target} (rarity: {duck.rarity}).",
+                    f"🦆 Spawned in {target} (duck id: {duck.id}).",
                 )
             except TelegramBadRequest:
                 pass

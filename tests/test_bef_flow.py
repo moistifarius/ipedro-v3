@@ -78,21 +78,26 @@ class AlwaysFailRng:
 
 
 @pytest.mark.asyncio
-async def test_dice_fail_short_circuits_ai_and_keeps_duck():
+async def test_ai_accept_resolves_regardless_of_rng():
+    # Rarity is currently neutralized → the pre-AI dice gate always
+    # passes, so an AI ACCEPT succeeds even with an rng that would have
+    # failed the old rarity-biased dice. Replaces the previous
+    # "dice_fail_short_circuits_ai" test (that gating no longer exists).
     db = FakeDB(_duck("legendary"))
     svc = DuckhuntService(db)  # type: ignore[arg-type]
 
     outcome, duck = await svc.handle_bef(
         chat_id=42, user_id=1, display_name="alice",
-        ai_verdict=True,  # AI says yes, but dice will fail
+        ai_verdict=True,
         ai_line="i love you",
         rng=AlwaysFailRng(),
     )
     assert outcome is not None
-    assert outcome.success is False
-    assert outcome.resolves_duck is False  # duck STAYS
-    assert db.calls.bumped == []  # no stat bump on refusal
-    assert db.calls.resolved == []
+    assert outcome.success is True
+    assert outcome.resolves_duck is True
+    assert "love you" in outcome.message
+    assert len(db.calls.bumped) == 1
+    assert len(db.calls.resolved) == 1
 
 
 @pytest.mark.asyncio

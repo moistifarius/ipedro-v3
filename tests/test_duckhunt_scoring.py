@@ -10,10 +10,12 @@ from ipedro.duckhunt.scoring import (
 )
 
 
-def test_roll_rarity_returns_known_tier():
+def test_roll_rarity_is_neutralized_to_common():
+    # Rarity is currently disabled in gameplay: every spawn is tagged
+    # 'common' regardless of seed or holiday flag.
     for seed in range(20):
-        name = roll_rarity(random.Random(seed))
-        assert name in {t[0] for t in RARITY_TIERS}
+        assert roll_rarity(random.Random(seed)) == "common"
+    assert roll_rarity(random.Random(0), on_holiday=True) == "common"
 
 
 def test_bang_hit_streak_bonus_makes_hits_more_likely():
@@ -40,24 +42,31 @@ def test_bang_miss_resets_streak_via_negative_delta():
     assert out.resolves_duck is False
 
 
-def test_legendary_hit_awards_more_points_than_common():
+def test_hit_awards_flat_points_regardless_of_rarity():
+    # Rarity neutralized: bang_outcome's points_delta is the same flat
+    # value no matter what rarity is passed in.
     class FixedLow:
         def random(self_inner):
             return 0.0  # always hits
 
     common = bang_outcome("common", 0, FixedLow())
     legendary = bang_outcome("legendary", 0, FixedLow())
-    assert legendary.points_delta > common.points_delta
+    assert legendary.points_delta == common.points_delta == 1
+    # Message no longer leaks rarity.
+    assert "common" not in common.message
+    assert "legendary" not in legendary.message
 
 
 # ----------------------------------------------------------------- bef
-def test_bef_dice_legendary_harder_than_common():
+def test_bef_dice_always_passes_while_rarity_neutralized():
+    # The pre-AI dice gate used to be rarity-biased. It now always passes,
+    # leaving the outcome to the AI verdict alone.
     class HighRoll:
         def random(self_inner):
-            return 0.8  # passes common (0.85), fails legendary (0.15)
+            return 0.999
 
     assert bef_dice_passes("common", HighRoll()) is True
-    assert bef_dice_passes("legendary", HighRoll()) is False
+    assert bef_dice_passes("legendary", HighRoll()) is True
 
 
 def test_bef_success_uses_ai_line_when_present():
@@ -72,7 +81,9 @@ def test_bef_success_uses_ai_line_when_present():
 def test_bef_success_falls_back_to_default_message():
     out = bef_success_outcome("rare", None)
     assert out.success is True
-    assert "rare" in out.message
+    # Message no longer mentions rarity tier (neutralized).
+    assert "rare" not in out.message.lower()
+    assert "befriended" in out.message.lower()
     assert out.resolves_duck is True
 
 
@@ -115,18 +126,17 @@ def test_ignore_usually_wanders_off_for_common_duck():
     assert out.resolves_duck is True
 
 
-def test_ignore_legendary_more_likely_to_notice():
-    # Pick an RNG value that's between legendary's 0.75 and rare's 0.40.
-    class FixedRng:
+def test_ignore_notice_chance_is_flat_across_rarities():
+    # Used to scale (common 0.15 → legendary 0.75). Now flat 0.20.
+    # An RNG returning 0.5 wanders off for every rarity.
+    class HighRoll:
         def random(self_inner):
-            return 0.60
+            return 0.50  # > 0.20 threshold for all rarities
         def choice(self_inner, seq):
             return seq[0]
 
-    legendary = ignore_outcome("legendary", FixedRng())  # 0.6 <= 0.75 -> noticed (stays)
-    rare = ignore_outcome("rare", FixedRng())            # 0.6 >  0.40 -> wanders (resolves)
-    assert legendary.resolves_duck is False
-    assert rare.resolves_duck is True
+    for r in ("common", "uncommon", "rare", "epic", "legendary"):
+        assert ignore_outcome(r, HighRoll()).resolves_duck is True
 
 
 # ----------------------------------------------------------------- berate is gone

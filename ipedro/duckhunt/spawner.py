@@ -55,9 +55,8 @@ async def duckhunt_enabled_chats(db: Database) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-# Quirky, vibes-only hints. Each tier has a few options; one is picked per
-# spawn. The exact rarity is never named — the flavor lets observant
-# players guess without making it a plain announcement.
+# Preserved for an easy revert. Rarity hints are currently disabled —
+# rarity_hint() returns "" so spawn messages don't leak tier flavor.
 _RARITY_HINTS: dict[str, tuple[str, ...]] = {
     "common": (
         "",
@@ -89,8 +88,9 @@ _RARITY_HINTS: dict[str, tuple[str, ...]] = {
 
 
 def rarity_hint(rarity: str) -> str:
-    """Pick a flavor-only hint for a given rarity. Empty string for some."""
-    return random.choice(_RARITY_HINTS.get(rarity, ("",)))
+    """Rarity is neutralized — return empty so spawn messages no longer
+    leak tier flavor. _RARITY_HINTS kept above for easy revert."""
+    return ""
 
 
 async def build_quack_message(
@@ -99,13 +99,12 @@ async def build_quack_message(
 ) -> str:
     msg = await openai.short_completion(DUCK_QUACK_PROMPT, max_tokens=120)
     body = (msg or "🦆 quack!").strip()
-    hint = rarity_hint(rarity)
     extra: list[str] = []
     if holiday:
         extra.append(f"\n[{holiday[0]} duck — {holiday[1]}]")
     if is_boss:
         extra.append("\n👹 *this one is BIG. one person can't take it alone.*")
-    return f"{body}{hint}{''.join(extra)}" if hint or extra else body
+    return f"{body}{''.join(extra)}" if extra else body
 
 
 async def build_quack_message_for(
@@ -152,8 +151,8 @@ async def _maybe_spawn(
     except Exception as exc:  # pragma: no cover
         log.warning("Failed to deliver quack to %s: %s", chat_id, exc)
     log.info(
-        "Spawn announced: chat=%s rarity=%s event_id=%s",
-        chat_id, duck.rarity, duck.id,
+        "Spawn announced: chat=%s event_id=%s",
+        chat_id, duck.id,
     )
 
 

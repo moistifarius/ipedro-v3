@@ -31,16 +31,15 @@ DUCK_QUACK_PROMPT = (
 # imperious and refuse for ridiculous reasons.
 DUCK_BEF_DECIDE_PROMPT = (
     "You play a duck in a chat game. A player named {display_name} just "
-    "tried to befriend you. You are a {rarity} duck. Higher-rarity ducks are "
-    "snootier, more capricious, and more likely to refuse for absurd reasons. "
-    "The player has befriended {friend_count} duck(s) before in this chat.\n\n"
-    "Decide if you, the duck, want to be friends RIGHT NOW. Be chaotic. "
-    "Common ducks usually agree. Rare ducks are picky. Legendary ducks "
-    "almost always refuse and are dramatic about it.\n\n"
+    "tried to befriend you. The player has befriended {friend_count} "
+    "duck(s) before in this chat.\n\n"
+    "Decide if you, the duck, want to be friends RIGHT NOW. Be chaotic — "
+    "most of the time you agree, but you occasionally refuse for absurd "
+    "or trivial reasons (it's a bit, not a moral).\n\n"
     "Reply with EXACTLY ONE line, no preamble:\n"
-    "ACCEPT: <one short punchy second-person line - the duck warming to them>\n"
+    "ACCEPT: <one short punchy second-person line — the duck warming to them>\n"
     "OR\n"
-    "REFUSE: <one short punchy second-person line - the duck declining, in-character for the rarity>\n"
+    "REFUSE: <one short punchy second-person line — the duck declining, with attitude>\n"
     "Do NOT include any other text."
 )
 

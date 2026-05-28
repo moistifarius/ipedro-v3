@@ -10,7 +10,7 @@ from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, Message
 
 from ipedro.duckhunt.captcha_gen import make_captcha
-from ipedro.duckhunt.spawner import build_quack_message_for, rarity_hint
+from ipedro.duckhunt.spawner import build_quack_message_for
 from ipedro.duckhunt.verdicts import parse_verdict
 from ipedro.handlers.common import display_name, get_or_create_chat_config
 from ipedro.prompts import (
@@ -22,58 +22,26 @@ log = logging.getLogger(__name__)
 
 _CHALLENGE_KINDS = ("captcha", "trivia", "recipe")
 
-# Follow-up celebration lines shown after a successful bef. Each list has
-# a few options that get picked at random so the bot doesn't sound like
-# a stuck record. Rarity flavor goes from "neat" → "holy shit".
-_BEF_RARITY_FLAIR: dict[str, tuple[str, ...]] = {
-    "common": (
-        "Just a regular duck. But yours.",
-        "Solid little quacker. Welcome aboard.",
-        "An ordinary duck for an ordinary day.",
-    ),
-    "uncommon": (
-        "An uncommon catch. Nice taste.",
-        "A cut above. The duck approves.",
-        "Decent feathers on this one.",
-    ),
-    "rare": (
-        "A rare duck. You'll cherish this.",
-        "Rare goose energy. Treat it well.",
-        "Not every day a rare one says yes.",
-    ),
-    "epic": (
-        "Epic friendship unlocked. Big deal.",
-        "An epic duck. People will talk.",
-        "That's an epic. Brag accordingly.",
-    ),
-    "legendary": (
-        "LEGENDARY. The hall of fame just got real.",
-        "A legendary duck befriended YOU. Soak it in.",
-        "Tell your grandkids about this one.",
-    ),
-    "shiny": (
-        "It glints when it flaps. Yours now.",
-        "A shiny one. Pure flex.",
-    ),
-    "holiday": (
-        "A seasonal duck. Festive friendship.",
-        "Holiday plumage, exclusive vibes.",
-    ),
-}
+# A small pool of neutral celebration lines for a successful bef; one is
+# picked at random so the bot doesn't sound like a stuck record. Rarity
+# is currently neutralized — every duck gets the same flavor.
+_BEF_FOLLOWUP_FLAIR: tuple[str, ...] = (
+    "Welcome to the roster.",
+    "Solid little quacker. Yours now.",
+    "Just a duck. But yours.",
+    "Friendship engaged.",
+    "Another one for the collection.",
+    "The duck nods. You nod. It's a moment.",
+)
 
 
-def _bef_celebration_message(
-    duck_id: int, rarity: str, new_friend_total: int,
-) -> str:
-    """Compose the second message sent after a successful bef.
+def _bef_celebration_message(duck_id: int, new_friend_total: int) -> str:
+    """Compose the follow-up message sent after a successful bef.
 
-    Includes a rarity-flavored line, a milestone shout for round-number
-    friend counts, and a pre-filled /duckname hint with the duck id.
+    Random neutral flair + a milestone shout for round-number friend
+    counts + a pre-filled /duckname hint with the duck id.
     """
-    flair_options = _BEF_RARITY_FLAIR.get(
-        rarity.lower(), ("A new friend, just like that.",),
-    )
-    flair = random.choice(flair_options)
+    flair = random.choice(_BEF_FOLLOWUP_FLAIR)
     milestone = ""
     if new_friend_total == 1:
         milestone = " First feathered friend — somebody mark the calendar."
@@ -169,8 +137,8 @@ def build_router(rt: Runtime) -> Router:
             msg.chat.id, rt.settings.duckhunt_duck_lifetime_seconds,
         )
         log.info(
-            "Manual spawn in chat %s by user %s -> rarity=%s",
-            msg.chat.id, msg.from_user.id if msg.from_user else None, duck.rarity,
+            "Manual spawn in chat %s by user %s -> duck_id=%s",
+            msg.chat.id, msg.from_user.id if msg.from_user else None, duck.id,
         )
         await msg.answer(
             await build_quack_message_for(rt.openai, duck),
@@ -237,7 +205,7 @@ def build_router(rt: Runtime) -> Router:
         for d in roster:
             name_part = f" \"{d['name']}\"" if d.get("name") else ""
             lines.append(
-                f"  duck #{d['id']}{name_part} [{d['rarity']}] "
+                f"  duck #{d['id']}{name_part} "
                 f"— {d['resolved_at']:%Y-%m-%d %H:%M}"
             )
         lines.append("\nTip: /duckname <id> <name> to name one.")
@@ -348,7 +316,7 @@ def build_router(rt: Runtime) -> Router:
         ai_text = await rt.openai.chat(
             [
                 {"role": "system", "content": DUCK_BEF_DECIDE_PROMPT.format(
-                    display_name=who, rarity=duck.rarity, friend_count=friend_count,
+                    display_name=who, friend_count=friend_count,
                 )},
                 {"role": "user", "content": "bef"},
             ],
@@ -357,8 +325,8 @@ def build_router(rt: Runtime) -> Router:
         )
         verdict, line = parse_verdict(ai_text, "ACCEPT", "REFUSE")
         log.info(
-            "bef AI decision: chat=%s user=%s rarity=%s verdict=%s",
-            msg.chat.id, msg.from_user.id, duck.rarity, verdict,
+            "bef AI decision: chat=%s user=%s verdict=%s",
+            msg.chat.id, msg.from_user.id, verdict,
         )
 
         outcome, duck_after = await rt.duckhunt.handle_bef(
@@ -375,7 +343,7 @@ def build_router(rt: Runtime) -> Router:
         # On success: follow up with a celebration + /duckname hint.
         if outcome.success and duck_after is not None:
             follow_up = _bef_celebration_message(
-                duck_after.id, duck_after.rarity, friend_count + 1,
+                duck_after.id, friend_count + 1,
             )
             try:
                 await msg.answer(follow_up, disable_notification=True)
