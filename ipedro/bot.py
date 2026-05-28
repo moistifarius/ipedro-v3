@@ -20,6 +20,7 @@ from ipedro.handlers import admin as admin_h
 from ipedro.handlers import ai as ai_h
 from ipedro.handlers import basics as basics_h
 from ipedro.handlers import chat as chat_h
+from ipedro.handlers import debug as debug_h
 from ipedro.handlers import duckhunt as duck_h
 from ipedro.logging_setup import configure_logging
 from ipedro.memory.store import MemoryStore
@@ -70,6 +71,7 @@ def build_dispatcher(rt: Runtime) -> Dispatcher:
     # then the catch-all chat handler.
     dp.include_router(basics_h.build_router(rt))
     dp.include_router(admin_h.build_router(rt))
+    dp.include_router(debug_h.build_router(rt))
     dp.include_router(ai_h.build_router(rt))
     dp.include_router(duck_h.build_router(rt))
     dp.include_router(chat_h.build_router(rt))

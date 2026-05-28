@@ -10,6 +10,7 @@ from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, Message
 
 from ipedro.duckhunt.captcha_gen import make_captcha
+from ipedro.duckhunt.spawner import rarity_hint
 from ipedro.duckhunt.verdicts import parse_verdict
 from ipedro.handlers.common import display_name, get_or_create_chat_config
 from ipedro.prompts import (
@@ -24,6 +25,7 @@ _CHALLENGE_KINDS = ("captcha", "trivia", "recipe")
 
 async def _issue_bef_challenge(
     rt: Runtime, msg: Message, who: str, *, intro: str,
+    force_kind: str | None = None,
 ) -> bool:
     """Generate a captcha/trivia/recipe challenge and store it as pending.
 
@@ -32,15 +34,15 @@ async def _issue_bef_challenge(
     and recipe are AI-generated text challenges judged by an AI prompt.
     Returns True if the challenge was issued; False otherwise.
     """
-    kind = random.choice(_CHALLENGE_KINDS)
+    kind = force_kind if force_kind in _CHALLENGE_KINDS else random.choice(_CHALLENGE_KINDS)
     if kind == "captcha":
         answer, png = make_captcha()
         try:
             prompt_msg = await msg.answer_photo(
                 BufferedInputFile(png, filename="captcha.png"),
                 caption=(
-                    f"{intro} Reply to THIS message with the text shown in "
-                    f"the image."
+                    f"{intro} Solve this captcha to try again — reply to "
+                    f"this message with the text in the image."
                 ),
                 disable_notification=True,
             )
@@ -63,7 +65,8 @@ async def _issue_bef_challenge(
         )
         return False
     prompt_msg = await msg.answer(
-        f"{intro} Reply to THIS message with your answer:\n\n{challenge_text}",
+        f"{intro} Reply to this message with the answer to try again:\n\n"
+        f"{challenge_text}",
         disable_notification=True,
     )
     await rt.duckhunt.set_bef_challenge(
@@ -95,12 +98,15 @@ def build_router(rt: Runtime) -> Router:
         duck = await rt.duckhunt.spawn_duck(
             msg.chat.id, rt.settings.duckhunt_duck_lifetime_seconds,
         )
-        # Rarity is hidden from chat - it's a discovery via interaction.
         log.info(
             "Manual spawn in chat %s by user %s -> rarity=%s",
             msg.chat.id, msg.from_user.id if msg.from_user else None, duck.rarity,
         )
-        await msg.answer("🦆 quack!", disable_notification=True)
+        hint = rarity_hint(duck.rarity)
+        await msg.answer(
+            f"🦆 quack!{hint}" if hint else "🦆 quack!",
+            disable_notification=True,
+        )
 
     @r.message(Command("quackflag"))
     async def quackflag(msg: Message) -> None:
@@ -202,7 +208,8 @@ def build_router(rt: Runtime) -> Router:
         ):
             who = display_name(msg.from_user)
             issued = await _issue_bef_challenge(
-                rt, msg, who, intro="🦆 Easy, friend. Earn another shot —",
+                rt, msg, who,
+                intro="Hang on — you just did something. Cool off a sec.",
             )
             if not issued:
                 await msg.reply("Cool it. Cooldown.", disable_notification=True)
@@ -249,6 +256,12 @@ def build_router(rt: Runtime) -> Router:
 
         # On refusal: post a challenge the user must solve before retrying.
         if not outcome.success:
-            await _issue_bef_challenge(rt, msg, who, intro="🦆 Try again?")
+            await _issue_bef_challenge(
+                rt, msg, who,
+                intro=(
+                    "Looks like the duck doesn't want to be friends right "
+                    "now. Try again later."
+                ),
+            )
 
     return r

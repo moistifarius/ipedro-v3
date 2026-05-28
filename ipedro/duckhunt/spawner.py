@@ -43,9 +43,49 @@ async def _duckhunt_enabled_chat_ids(db: Database) -> list[int]:
     return [r["chat_id"] for r in rows]
 
 
-async def _build_quack_message(openai: OpenAIClient) -> str:
+# Quirky, vibes-only hints. Each tier has a few options; one is picked per
+# spawn. The exact rarity is never named — the flavor lets observant
+# players guess without making it a plain announcement.
+_RARITY_HINTS: dict[str, tuple[str, ...]] = {
+    "common": (
+        "",
+        " (just a duck)",
+        " (perfectly average)",
+    ),
+    "uncommon": (
+        " (one feather looks oddly shiny)",
+        " (it carries itself with confidence)",
+        " ✨",
+    ),
+    "rare": (
+        " ✨ (something glints)",
+        " (the light bends a little around it)",
+        " (you swear it just winked)",
+    ),
+    "epic": (
+        " ✨✨ (it's GLOWING. that's not normal.)",
+        " (the colors on its feathers keep shifting)",
+        " 💫 (you feel briefly important)",
+    ),
+    "legendary": (
+        " 👑💎✨ (the air HUMS around it)",
+        " ✨💎 (you forget your name for a second)",
+        " 👑 (somehow it is wearing a crown)",
+        " (reality wobbles. there is a duck.)",
+    ),
+}
+
+
+def rarity_hint(rarity: str) -> str:
+    """Pick a flavor-only hint for a given rarity. Empty string for some."""
+    return random.choice(_RARITY_HINTS.get(rarity, ("",)))
+
+
+async def _build_quack_message(openai: OpenAIClient, rarity: str) -> str:
     msg = await openai.short_completion(DUCK_QUACK_PROMPT, max_tokens=120)
-    return (msg or "🦆 quack!").strip()
+    body = (msg or "🦆 quack!").strip()
+    hint = rarity_hint(rarity)
+    return f"{body}{hint}" if hint else body
 
 
 async def _maybe_spawn(
@@ -59,7 +99,7 @@ async def _maybe_spawn(
     duck = await service.spawn_duck(
         chat_id, settings.duckhunt_duck_lifetime_seconds,
     )
-    text = await _build_quack_message(openai)
+    text = await _build_quack_message(openai, duck.rarity)
     try:
         await bot.send_message(chat_id, text, disable_notification=True)
     except Exception as exc:  # pragma: no cover
