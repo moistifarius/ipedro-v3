@@ -19,7 +19,10 @@ from aiogram.types import (
 )
 
 from ipedro.handlers.common import display_name, get_or_create_chat_config
-from ipedro.prompts import TLDR_PROMPT
+from ipedro.prompts import (
+    COMPLIMENT_PROMPT, ECHO_PROMPT, HAIKU_PROMPT, ROAST_PROMPT,
+    THIS_OR_THAT_PROMPT, TLDR_PROMPT,
+)
 from ipedro.reminders import add_reminder, parse_duration
 from ipedro.runtime import Runtime
 
@@ -472,6 +475,133 @@ def build_router(rt: Runtime) -> Router:
             lines.append(f"  {h:02d}  {'█' * bar_len}{'·' * (24 - bar_len)}  {c}")
         await msg.reply("\n".join(lines), disable_notification=True)
 
+    @r.message(Command("haiku"))
+    async def haiku(msg: Message) -> None:
+        """/haiku — compose a haiku about the recent chat."""
+        await get_or_create_chat_config(rt, msg)
+        rows = await rt.db.fetch(
+            "SELECT role, content FROM messages "
+            " WHERE chat_id = $1 ORDER BY id DESC LIMIT 20",
+            msg.chat.id,
+        )
+        snippet = "\n".join(
+            f"{r['role']}: {r['content']}" for r in reversed(rows)
+        ) or "(silence)"
+        await rt.bot.send_chat_action(msg.chat.id, "typing")
+        out = await rt.openai.short_completion(
+            HAIKU_PROMPT.format(messages=snippet[:4000]),
+            max_tokens=120, chat_id=msg.chat.id,
+        )
+        await msg.reply(out or "🪷", disable_notification=True)
+
+    @r.message(Command("this_or_that"))
+    async def this_or_that(msg: Message) -> None:
+        """/this_or_that A | B — Pedro decides dramatically."""
+        await get_or_create_chat_config(rt, msg)
+        raw = (msg.text or "").split(None, 1)
+        if len(raw) < 2 or "|" not in raw[1]:
+            await msg.reply(
+                "Usage: /this_or_that option A | option B",
+                disable_notification=True,
+            )
+            return
+        a, b = (s.strip() for s in raw[1].split("|", 1))
+        if not a or not b:
+            await msg.reply(
+                "Both options need to be non-empty.",
+                disable_notification=True,
+            )
+            return
+        await rt.bot.send_chat_action(msg.chat.id, "typing")
+        out = await rt.openai.short_completion(
+            THIS_OR_THAT_PROMPT.format(a=a, b=b),
+            max_tokens=120, chat_id=msg.chat.id,
+        )
+        await msg.reply(out or "Both. No, neither.", disable_notification=True)
+
+    @r.message(Command("echo"))
+    async def echo(msg: Message) -> None:
+        """/echo @user [topic] — Pedro mimics that user's style."""
+        await get_or_create_chat_config(rt, msg)
+        user_id, name = await _resolve_target_user(rt, msg)
+        if user_id is None:
+            await msg.reply(
+                "Usage: /echo @username [topic]  (or reply to someone).",
+                disable_notification=True,
+            )
+            return
+        # Topic = everything after the @user token (or "anything" if reply-to).
+        parts = (msg.text or "").split(None, 2)
+        topic = parts[2] if len(parts) >= 3 else "literally anything they'd say"
+        rows = await rt.db.fetch(
+            "SELECT content FROM messages "
+            " WHERE chat_id = $1 AND user_id = $2 "
+            " ORDER BY id DESC LIMIT 40",
+            msg.chat.id, user_id,
+        )
+        if not rows:
+            await msg.reply(
+                f"No messages from {name} to mimic.",
+                disable_notification=True,
+            )
+            return
+        examples = "\n".join(f"- {r['content']}" for r in rows)
+        await rt.bot.send_chat_action(msg.chat.id, "typing")
+        out = await rt.openai.short_completion(
+            ECHO_PROMPT.format(name=name, topic=topic, messages=examples[:4000]),
+            max_tokens=200, chat_id=msg.chat.id,
+        )
+        if not out:
+            await msg.reply("(couldn't echo)", disable_notification=True)
+            return
+        await msg.reply(f"[{name} voice] {out}", disable_notification=True)
+
+    @r.message(Command("roast"))
+    async def roast(msg: Message) -> None:
+        await _do_burn(rt, msg, prompt=ROAST_PROMPT, fallback="(couldn't roast)")
+
+    @r.message(Command("compliment"))
+    async def compliment(msg: Message) -> None:
+        await _do_burn(rt, msg, prompt=COMPLIMENT_PROMPT, fallback="(couldn't compliment)")
+
+    @r.message(Command("confess"))
+    async def confess(msg: Message) -> None:
+        """Submit an anonymous confession (DM only)."""
+        if msg.chat and msg.chat.type != "private":
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+            try:
+                if msg.from_user:
+                    await rt.bot.send_message(
+                        msg.from_user.id,
+                        "Send /confess in this DM — never in a group, "
+                        "or you defeat the anonymous part.",
+                    )
+            except Exception:
+                pass
+            return
+        parts = (msg.text or "").split(None, 1)
+        if len(parts) < 2:
+            await msg.reply(
+                "Usage: /confess <your anonymous text>",
+                disable_notification=True,
+            )
+            return
+        body = parts[1].strip()[:1000]
+        if not body:
+            return
+        cid = await rt.db.fetchval(
+            "INSERT INTO confessions (submitted_by, text) "
+            "VALUES ($1, $2) RETURNING id",
+            msg.from_user.id if msg.from_user else None, body,
+        )
+        await msg.reply(
+            f"📩 Stored anonymously (#{cid}). I might surface it. Or might not.",
+            disable_notification=True,
+        )
+
     @r.message(Command("meme"))
     async def meme(msg: Message) -> None:
         """/meme top text | bottom text (or just a single line)."""
@@ -610,6 +740,33 @@ def _config_keyboard(cfg) -> InlineKeyboardMarkup:
         ],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _do_burn(
+    rt: Runtime, msg: Message, *, prompt: str, fallback: str,
+) -> None:
+    """Shared body for /roast and /compliment."""
+    await get_or_create_chat_config(rt, msg)
+    user_id, name = await _resolve_target_user(rt, msg)
+    if user_id is None:
+        await msg.reply(
+            "Usage: that command needs an @user (or reply to them).",
+            disable_notification=True,
+        )
+        return
+    rows = await rt.db.fetch(
+        "SELECT content FROM messages "
+        " WHERE chat_id = $1 AND user_id = $2 "
+        " ORDER BY id DESC LIMIT 30",
+        msg.chat.id, user_id,
+    )
+    examples = "\n".join(f"- {r['content']}" for r in rows) or "(no history)"
+    await rt.bot.send_chat_action(msg.chat.id, "typing")
+    out = await rt.openai.short_completion(
+        prompt.format(name=name, messages=examples[:4000]),
+        max_tokens=200, chat_id=msg.chat.id,
+    )
+    await msg.reply(out or fallback, disable_notification=True)
 
 
 async def _set_date(rt: Runtime, msg: Message, *, label: str) -> None:

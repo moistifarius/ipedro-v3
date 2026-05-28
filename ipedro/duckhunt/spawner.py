@@ -117,11 +117,29 @@ async def build_quack_message_for(
     )
 
 
+async def _recent_activity_factor(db: Database, chat_id: int) -> float:
+    """Scale spawn probability by chat activity in the last hour.
+
+    Quiet chats spawn at ~0.4x the base rate; busy chats at up to ~2x.
+    Uses a soft log-curve so a single very active chat doesn't dominate.
+    """
+    val = await db.fetchval(
+        "SELECT COUNT(*) FROM messages "
+        " WHERE chat_id = $1 AND created_at >= NOW() - INTERVAL '1 hour'",
+        chat_id,
+    )
+    n = int(val or 0)
+    # 0 msgs → 0.4, 10 msgs → 1.0, 40 msgs → ~1.5, 200 msgs → ~2.0
+    import math
+    return 0.4 + min(1.6, math.log1p(n) / math.log1p(40))
+
+
 async def _maybe_spawn(
     chat_id: int, p_spawn: float, bot: Bot, service: DuckhuntService,
-    openai: OpenAIClient, settings: Settings,
+    openai: OpenAIClient, settings: Settings, db: Database,
 ) -> None:
-    if random.random() >= p_spawn:
+    factor = await _recent_activity_factor(db, chat_id)
+    if random.random() >= min(1.0, p_spawn * factor):
         return
     if await service.active_duck(chat_id):
         return
@@ -167,7 +185,9 @@ async def run_spawner(
                 log.info("Probabilistic departure: %d duck(s) wandered off.", len(departed))
 
             for chat_id in await duckhunt_enabled_chat_ids(db):
-                await _maybe_spawn(chat_id, p_spawn, bot, service, openai, settings)
+                await _maybe_spawn(
+                    chat_id, p_spawn, bot, service, openai, settings, db,
+                )
 
             wait = tick
         except Exception as exc:

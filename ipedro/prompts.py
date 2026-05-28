@@ -125,6 +125,49 @@ COMIC_RENDER_TEMPLATE = (
     "Panel 4: {p4}"
 )
 
+HAIKU_PROMPT = (
+    "Compose a single haiku (5-7-5 syllables, three lines) inspired by the "
+    "chat snippet below. Be evocative, a little weird, in character as a "
+    "wry observer. Output ONLY the haiku — three lines, no preamble.\n\n"
+    "Chat:\n{messages}"
+)
+
+THIS_OR_THAT_PROMPT = (
+    "Decide between A and B. One short paragraph (under 60 words). Don't "
+    "hedge — name the winner first, then justify with absurd or surprisingly "
+    "specific reasoning. End with a flourish.\n\n"
+    "A: {a}\nB: {b}"
+)
+
+ECHO_PROMPT = (
+    "Below are recent messages from {name}. Mimic their style — their tone, "
+    "vocabulary, capitalization habits, punctuation, sentence length, "
+    "specific quirks. Write ONE short message they might plausibly send "
+    "about: {topic}. Output ONLY that message, no preamble, no quotes.\n\n"
+    "Examples from {name}:\n{messages}"
+)
+
+ROAST_PROMPT = (
+    "Roast {name} in 1-3 sentences. Punch up, be playful, never cruel or "
+    "personal. Base it on these recent messages. Output ONLY the roast.\n\n"
+    "Recent {name}:\n{messages}"
+)
+
+COMPLIMENT_PROMPT = (
+    "Compliment {name} in 1-3 sentences. Be sincere but specific — quote "
+    "back something good you noticed in their recent messages. Output "
+    "ONLY the compliment.\n\n"
+    "Recent {name}:\n{messages}"
+)
+
+YEAR_RETRO_PROMPT = (
+    "Below is a year of chat highlights (compressed). Write a fond, "
+    "slightly exaggerated 'Year in Review' for this group. 6-10 bullets. "
+    "Include running jokes, recurring characters, the most ridiculous "
+    "moments, in-jokes. Output the bullets only.\n\n"
+    "Year:\n{messages}"
+)
+
 TLDR_PROMPT = (
     "TL;DR of the recent chat below. 3-7 bullet points, in chronological "
     "order, third-person, no preamble, drop fluff, keep names. Output "

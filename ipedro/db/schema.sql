@@ -268,6 +268,39 @@ CREATE INDEX IF NOT EXISTS openai_usage_chat_recent_idx
 CREATE INDEX IF NOT EXISTS openai_usage_recent_idx
     ON openai_usage (created_at DESC);
 
+-- Karma --------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS karma (
+    chat_id      BIGINT NOT NULL REFERENCES chats(chat_id) ON DELETE CASCADE,
+    user_id      BIGINT NOT NULL,
+    display_name TEXT NOT NULL,
+    score        INTEGER NOT NULL DEFAULT 0,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (chat_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS karma_chat_score_idx
+    ON karma (chat_id, score DESC);
+
+-- Anonymous confessions ----------------------------------------------------
+-- chat_id is intentionally nullable — confessions live in a global pool
+-- and can surface in any chat. submitted_by is stored for audit but never
+-- displayed.
+CREATE TABLE IF NOT EXISTS confessions (
+    id           BIGSERIAL PRIMARY KEY,
+    submitted_by BIGINT,
+    text         TEXT NOT NULL,
+    surfaced_at  TIMESTAMPTZ,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS confessions_unsurfaced_idx
+    ON confessions (surfaced_at) WHERE surfaced_at IS NULL;
+
+-- Track the last year we posted a year-in-review per chat, so we don't
+-- double-fire on Dec 31.
+ALTER TABLE chat_state
+    ADD COLUMN IF NOT EXISTS last_retrospective_year INTEGER;
+
 -- One outstanding bef challenge per (chat, user). The user must reply to
 -- `prompt_message_id` with an answer that the AI judge accepts before they
 -- can attempt /bef again. There is no time-based cooldown on bef itself;

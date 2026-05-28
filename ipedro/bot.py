@@ -16,12 +16,14 @@ from ipedro.db.pool import Database, set_db
 from ipedro.db.repositories import ChatRepo, CommandLogRepo, UserRepo
 from ipedro.duckhunt.service import DuckhuntService
 from ipedro.duckhunt.spawner import run_spawner
+from ipedro.ambient_loops import run_ambient_loops
 from ipedro.handlers import admin as admin_h
 from ipedro.handlers import ai as ai_h
 from ipedro.handlers import basics as basics_h
 from ipedro.handlers import chat as chat_h
 from ipedro.handlers import debug as debug_h
 from ipedro.handlers import duckhunt as duck_h
+from ipedro.handlers import karma as karma_h
 from ipedro.handlers import utility as utility_h
 from ipedro.logging_setup import configure_logging
 from ipedro.celebrations import run_celebrations_loop
@@ -80,6 +82,7 @@ def build_dispatcher(rt: Runtime) -> Dispatcher:
     dp.include_router(admin_h.build_router(rt))
     dp.include_router(debug_h.build_router(rt))
     dp.include_router(utility_h.build_router(rt))
+    dp.include_router(karma_h.build_router(rt))
     dp.include_router(ai_h.build_router(rt))
     dp.include_router(duck_h.build_router(rt))
     dp.include_router(chat_h.build_router(rt))
@@ -121,9 +124,19 @@ async def run() -> None:
         run_comic_loop(rt.bot, rt.db, rt.openai, stop),
         name="comic",
     )
+    ambient_task = asyncio.create_task(
+        run_ambient_loops(rt.bot, rt.db, rt.openai, stop),
+        name="ambient-loops",
+    )
 
     try:
-        polling = asyncio.create_task(dp.start_polling(rt.bot), name="aiogram-polling")
+        polling = asyncio.create_task(
+            dp.start_polling(
+                rt.bot,
+                allowed_updates=dp.resolve_used_update_types(),
+            ),
+            name="aiogram-polling",
+        )
         # Wait until either polling exits or stop is signaled.
         done, _ = await asyncio.wait(
             {polling, asyncio.create_task(stop.wait(), name="stop-waiter")},
@@ -138,7 +151,7 @@ async def run() -> None:
         stop.set()
         for task in (
             spawner_task, share_photo_task, reminders_task,
-            celebrations_task, comic_task,
+            celebrations_task, comic_task, ambient_task,
         ):
             task.cancel()
             try:
