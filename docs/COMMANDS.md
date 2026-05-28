@@ -102,3 +102,19 @@ List durable facts stored for that chat.
 
 ### `/memory_forget <fact_id>`
 Delete a specific durable fact.
+
+### `/master_prompt show | set <text> | reset`
+Show, override, or reset the master persona prompt. Overrides persist in
+`kv_store` across restarts.
+
+### `/ai_provider show | claude | openai`
+Switch which provider answers text completions (chat, `/a`, summaries,
+duck personality, etc.). Embeddings, images, and audio are unaffected —
+they always go to OpenAI. The selection is persisted in `kv_store` and
+re-applied on the next startup.
+
+### `/ai_model show | <model_id> | claude <model_id> | openai <model_id>`
+Switch the text model used by the active provider. With no provider word
+the new model is applied to whichever provider is currently active.
+Examples: `/ai_model claude-opus-4-7`, `/ai_model openai gpt-4.1-mini`.
+Persisted in `kv_store`.

@@ -7,14 +7,20 @@ For Unraid-specific instructions see [`UNRAID.md`](UNRAID.md).
 | Variable | Required | Notes |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | yes | From `@BotFather` |
-| `OPENAI_API_KEY` | yes | Modern OpenAI Python SDK |
+| `OPENAI_API_KEY` | yes | Used for embeddings, image gen, and Whisper audio |
+| `ANTHROPIC_API_KEY` | recommended | Used for text completions (Claude). Absent → bot auto-falls back to OpenAI text. |
 | `DATABASE_URL` | yes | `postgresql://user:pass@host:port/db` |
 | `ADMIN_USER_IDS` | no | `315660812` is always implicitly included |
-| `OPENAI_*_MODEL` | no | Override default model names |
+| `TEXT_PROVIDER` | no | `claude` (default when Anthropic key present) or `openai`. Persisted at runtime via `/ai_provider`. |
+| `CLAUDE_TEXT_MODEL` | no | Default `claude-sonnet-4-6`. Runtime-tunable via `/ai_model`. |
+| `OPENAI_TEXT_MODEL` | no | Default `gpt-4o-mini`. Runtime-tunable via `/ai_model`. |
+| `OPENAI_*_MODEL` | no | Image / embedding / transcription model overrides |
 
 The full list of tunables (memory budgets, duckhunt parameters, etc.) is in
 `.env.example`. Anything missing falls back to the defaults declared in
-`ipedro/config.py`.
+`ipedro/config.py`. Provider and model selections made at runtime via
+`/ai_provider` and `/ai_model` are persisted in the `kv_store` table and
+override the env defaults on the next startup.
 
 ## Bare metal
 
@@ -69,5 +75,6 @@ Only paths that actually exist are imported; the migrator is idempotent.
    GROUP BY command ORDER BY 2 DESC;
   ```
 - Vacuum the `messages` table periodically if you have very chatty groups.
-- Rotate your `TELEGRAM_BOT_TOKEN` and `OPENAI_API_KEY` immediately if they
-  ever appear in a git history or log.
+- Rotate your `TELEGRAM_BOT_TOKEN`, `OPENAI_API_KEY`, and
+  `ANTHROPIC_API_KEY` immediately if they ever appear in a git history
+  or log.

@@ -2,14 +2,19 @@
 
 A configurable, memory-aware Telegram bot.
 
-iPedro V2 is a clean rewrite of the original iPedro: it talks via the OpenAI
-SDK, keeps durable per-chat conversation memory in Postgres (with pgvector
-for semantic recall), preserves every previous command, and ships in a
-Docker container that runs comfortably on Unraid.
+iPedro V2 is a clean rewrite of the original iPedro: it talks via Claude
+(Anthropic) for text completions and the OpenAI SDK for everything else
+(embeddings, images, audio), keeps durable per-chat conversation memory in
+Postgres (with pgvector for semantic recall), preserves every previous
+command, and ships in a Docker container that runs comfortably on Unraid.
 
 ## Highlights
 
-- **Modern OpenAI Python SDK** (text, embeddings, image, audio).
+- **Hybrid AI stack**: Claude Sonnet 4.6 for text completions (chat,
+  `/a`, summaries, the duck personality, etc.); OpenAI for embeddings,
+  image generation, and audio (Whisper). The text provider is
+  runtime-switchable via `/ai_provider` so you can flip back to OpenAI
+  GPT without a redeploy.
 - **Postgres + pgvector** memory: raw messages, rolling summaries, durable
   facts, embeddings — assembled on demand and token-budgeted.
 - **Per-chat config**: response policy, persona, ambient probability,
@@ -20,13 +25,15 @@ Docker container that runs comfortably on Unraid.
   retry-challenge mechanic. State is restart-safe.
 - **Admin gating** locked to Telegram user id `315660812` and **private DM
   only** — sensitive commands cannot be invoked from groups.
-- **Graceful degradation**: missing `pgvector`, transient OpenAI errors,
-  failed transcription, or unreachable Telegram do not crash the bot.
+- **Graceful degradation**: missing `pgvector`, transient OpenAI/Anthropic
+  errors, failed transcription, or unreachable Telegram do not crash the
+  bot. A missing `ANTHROPIC_API_KEY` auto-falls back to OpenAI text.
 
 ## Quick start (local)
 
 ```bash
-cp .env.example .env       # fill in TELEGRAM_BOT_TOKEN, OPENAI_API_KEY, DATABASE_URL
+cp .env.example .env       # fill in TELEGRAM_BOT_TOKEN, OPENAI_API_KEY,
+                           # ANTHROPIC_API_KEY (optional), DATABASE_URL
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python -m ipedro
@@ -68,10 +75,36 @@ Full reference in [`docs/COMMANDS.md`](docs/COMMANDS.md).
 | `/send_message` | Admin only |
 | `/logs` | Admin only |
 | `/memory_facts`, `/memory_forget` | Admin only |
+| `/master_prompt`, `/ai_provider`, `/ai_model` | Admin only — see below |
 
 Plus the ambient triggers from the original: `bang`, `bef`, `ignore`
 resolve an active duck (`bef` is AI-gated and may be refused — see below);
 `bad bot` / `bad pedro` as a reply to a bot message deletes that message.
+
+## AI providers
+
+Text completions default to Claude **Sonnet 4.6**; embeddings, images,
+and audio always go to OpenAI. Both keys live in `.env`:
+
+```
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...   # optional — without it, text falls back to OpenAI
+```
+
+Runtime knobs (admin DM only, persisted across restarts):
+
+```
+/ai_provider show              # which provider is active + both models
+/ai_provider claude            # use Claude for text
+/ai_provider openai            # use OpenAI GPT for text
+/ai_model claude-opus-4-7      # change the active provider's model
+/ai_model claude claude-haiku-4-5      # explicitly set Claude's model
+/ai_model openai gpt-4.1-mini  # explicitly set OpenAI's model
+```
+
+Cost (token counts and a rough USD estimate) is logged per call into the
+`openai_usage` table for either provider; `/cost` reports against the
+combined log.
 
 ## Memory model
 
