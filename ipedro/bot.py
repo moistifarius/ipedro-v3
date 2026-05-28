@@ -26,6 +26,7 @@ from ipedro.handlers import utility as utility_h
 from ipedro.logging_setup import configure_logging
 from ipedro.memory.store import MemoryStore
 from ipedro.openai_client import OpenAIClient
+from ipedro.persona_state import PersonaStateService
 from ipedro.reminders import run_reminders_loop
 from ipedro.runtime import Runtime
 from ipedro.sharephoto import run_share_photo_loop
@@ -63,6 +64,7 @@ async def build_runtime(settings: Settings) -> Runtime:
         chats=ChatRepo(db),
         users=UserRepo(db),
         command_log=CommandLogRepo(db),
+        persona_state=PersonaStateService(db),
         pgvector_available=pgvector_available,
     )
 

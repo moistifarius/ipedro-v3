@@ -322,6 +322,8 @@ def build_router(rt: Runtime) -> Router:
 
         await rt.bot.send_chat_action(msg.chat.id, "typing")
 
+        state = await rt.persona_state.current(msg.chat.id)
+        extra = rt.persona_state.to_system_prompt(state) or None
         ctx = await build_context(
             store=rt.memory,
             settings=rt.settings,
@@ -329,6 +331,7 @@ def build_router(rt: Runtime) -> Router:
             persona=cfg.persona,
             persona_custom=cfg.persona_custom,
             latest_user_text=text,
+            extra_system=extra,
         )
         reply = await rt.openai.chat(ctx.messages, max_tokens=500)
         if not reply:

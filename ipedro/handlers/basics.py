@@ -34,6 +34,8 @@ HELP_TEXT = (
     "/quackflag - is there an active duck?\n"
     "/remind <duration> <text> - schedule a future reminder (e.g. 1h30m)\n"
     "/poll Q | A | B | ... - create a poll\n"
+    "/whatdid <@user> - confidently summarize what someone's been up to\n"
+    "/mood - show my current mood + word of the day\n"
     "/get_chat_id - show this chat's id\n"
     "/chat_config - show or change response policy/persona\n"
     "\nReply to ducks with: bang, bef, ignore.\n"

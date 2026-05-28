@@ -178,6 +178,21 @@ CREATE TABLE IF NOT EXISTS reminders (
 CREATE INDEX IF NOT EXISTS reminders_due_idx
     ON reminders (fired, fire_at);
 
+-- Per-chat persona state ----------------------------------------------------
+-- Holds the chat's current mood, word-of-the-day, and any currently-stuck
+-- word that Pedro fixates on. All three are nullable and refreshed lazily
+-- when build_context runs.
+CREATE TABLE IF NOT EXISTS chat_state (
+    chat_id               BIGINT PRIMARY KEY REFERENCES chats(chat_id) ON DELETE CASCADE,
+    mood                  TEXT,
+    mood_set_at           TIMESTAMPTZ,
+    word_of_day           TEXT,
+    word_of_day_at        TIMESTAMPTZ,
+    stuck_word            TEXT,
+    stuck_word_expires_at TIMESTAMPTZ,
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- One outstanding bef challenge per (chat, user). The user must reply to
 -- `prompt_message_id` with an answer that the AI judge accepts before they
 -- can attempt /bef again. There is no time-based cooldown on bef itself;
