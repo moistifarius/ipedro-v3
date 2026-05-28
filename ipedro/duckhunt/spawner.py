@@ -27,7 +27,8 @@ from aiogram import Bot
 
 from ipedro.config import Settings
 from ipedro.db.pool import Database
-from ipedro.duckhunt.service import DuckhuntService
+from ipedro.duckhunt.scoring import current_holiday
+from ipedro.duckhunt.service import ActiveDuck, DuckhuntService
 from ipedro.openai_client import OpenAIClient
 from ipedro.prompts import DUCK_QUACK_PROMPT
 
@@ -92,11 +93,28 @@ def rarity_hint(rarity: str) -> str:
     return random.choice(_RARITY_HINTS.get(rarity, ("",)))
 
 
-async def build_quack_message(openai: OpenAIClient, rarity: str) -> str:
+async def build_quack_message(
+    openai: OpenAIClient, rarity: str, *,
+    is_boss: bool = False, holiday: tuple[str, str] | None = None,
+) -> str:
     msg = await openai.short_completion(DUCK_QUACK_PROMPT, max_tokens=120)
     body = (msg or "🦆 quack!").strip()
     hint = rarity_hint(rarity)
-    return f"{body}{hint}" if hint else body
+    extra: list[str] = []
+    if holiday:
+        extra.append(f"\n[{holiday[0]} duck — {holiday[1]}]")
+    if is_boss:
+        extra.append("\n👹 *this one is BIG. one person can't take it alone.*")
+    return f"{body}{hint}{''.join(extra)}" if hint or extra else body
+
+
+async def build_quack_message_for(
+    openai: OpenAIClient, duck: ActiveDuck,
+) -> str:
+    return await build_quack_message(
+        openai, duck.rarity,
+        is_boss=duck.is_boss, holiday=current_holiday(),
+    )
 
 
 async def _maybe_spawn(
@@ -110,7 +128,7 @@ async def _maybe_spawn(
     duck = await service.spawn_duck(
         chat_id, settings.duckhunt_duck_lifetime_seconds,
     )
-    text = await build_quack_message(openai, duck.rarity)
+    text = await build_quack_message_for(openai, duck)
     try:
         await bot.send_message(chat_id, text, disable_notification=True)
     except Exception as exc:  # pragma: no cover

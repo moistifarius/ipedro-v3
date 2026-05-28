@@ -106,6 +106,25 @@ PEDRO_PHOTO_CAPTION_PROMPT = (
     "no quotes."
 )
 
+COMIC_SCENES_PROMPT = (
+    "Below are messages from a group chat over the last day. Distill the day "
+    "into FOUR short scene descriptions for a 4-panel newspaper comic strip. "
+    "Each scene should be visually concrete: one moment, one or two characters, "
+    "an action. Keep names generic ('the bot', 'a user'). Output strictly four "
+    "lines, no numbering, one scene per line.\n\n"
+    "Messages:\n{messages}"
+)
+
+COMIC_RENDER_TEMPLATE = (
+    "A 2x2 grid four-panel comic strip in clean black-and-white newspaper "
+    "style. Distinct panels with thin borders. Simple line art, expressive "
+    "characters, minimal background. No speech bubble text required.\n"
+    "Panel 1: {p1}\n"
+    "Panel 2: {p2}\n"
+    "Panel 3: {p3}\n"
+    "Panel 4: {p4}"
+)
+
 TLDR_PROMPT = (
     "TL;DR of the recent chat below. 3-7 bullet points, in chronological "
     "order, third-person, no preamble, drop fluff, keep names. Output "

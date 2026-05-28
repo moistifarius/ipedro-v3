@@ -25,6 +25,7 @@ from ipedro.handlers import duckhunt as duck_h
 from ipedro.handlers import utility as utility_h
 from ipedro.logging_setup import configure_logging
 from ipedro.celebrations import run_celebrations_loop
+from ipedro.comic import run_comic_loop
 from ipedro.memory.store import MemoryStore
 from ipedro.openai_client import OpenAIClient
 from ipedro.persona_state import PersonaStateService
@@ -54,6 +55,7 @@ async def build_runtime(settings: Settings) -> Runtime:
         embedding_model=settings.openai_embedding_model,
         embedding_dim=settings.openai_embedding_dim,
     )
+    openai.attach_usage_db(db)
     memory = MemoryStore(db=db, openai=openai, pgvector_available=pgvector_available)
     return Runtime(
         settings=settings,
@@ -115,6 +117,10 @@ async def run() -> None:
         run_celebrations_loop(rt.bot, rt.db, stop),
         name="celebrations",
     )
+    comic_task = asyncio.create_task(
+        run_comic_loop(rt.bot, rt.db, rt.openai, stop),
+        name="comic",
+    )
 
     try:
         polling = asyncio.create_task(dp.start_polling(rt.bot), name="aiogram-polling")
@@ -130,7 +136,10 @@ async def run() -> None:
                 log.exception("Task exited with error: %s", t.exception())
     finally:
         stop.set()
-        for task in (spawner_task, share_photo_task, reminders_task, celebrations_task):
+        for task in (
+            spawner_task, share_photo_task, reminders_task,
+            celebrations_task, comic_task,
+        ):
             task.cancel()
             try:
                 await task

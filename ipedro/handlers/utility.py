@@ -11,9 +11,12 @@ import re
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import (
+    BufferedInputFile, CallbackQuery, InlineKeyboardButton,
+    InlineKeyboardMarkup, Message,
+)
 
 from ipedro.handlers.common import display_name, get_or_create_chat_config
 from ipedro.prompts import TLDR_PROMPT
@@ -469,7 +472,144 @@ def build_router(rt: Runtime) -> Router:
             lines.append(f"  {h:02d}  {'█' * bar_len}{'·' * (24 - bar_len)}  {c}")
         await msg.reply("\n".join(lines), disable_notification=True)
 
+    @r.message(Command("meme"))
+    async def meme(msg: Message) -> None:
+        """/meme top text | bottom text (or just a single line)."""
+        await get_or_create_chat_config(rt, msg)
+        raw = (msg.text or "").split(None, 1)
+        if len(raw) < 2:
+            await msg.reply(
+                "Usage: /meme top text | bottom text",
+                disable_notification=True,
+            )
+            return
+        body = raw[1].strip()
+        parts = [p.strip() for p in body.split("|", 1)]
+        top = parts[0]
+        bottom = parts[1] if len(parts) > 1 else ""
+        prompt = (
+            f"A classic impact-font meme image. Bold white text with black "
+            f"outline. TOP TEXT: \"{top}\". BOTTOM TEXT: \"{bottom}\". "
+            f"Choose a fitting absurd or iconic background image; keep the "
+            f"text large, centered, all caps, legible."
+            if bottom else
+            f"A classic impact-font meme image with bold white-on-black "
+            f"caption: \"{top}\". Bold absurd background that matches. "
+            f"All caps, centered, legible text."
+        )
+        await rt.bot.send_chat_action(msg.chat.id, "upload_photo")
+        data = await rt.openai.generate_image(prompt, chat_id=msg.chat.id)
+        if not data:
+            await msg.reply("Meme failed.", disable_notification=True)
+            return
+        await msg.reply_photo(
+            BufferedInputFile(data, filename="meme.png"),
+            caption=body[:200],
+            disable_notification=True,
+        )
+
+    @r.message(Command("config"))
+    async def config_wizard(msg: Message) -> None:
+        await get_or_create_chat_config(rt, msg)
+        await msg.reply(
+            "⚙️ Chat settings:",
+            reply_markup=_config_keyboard(
+                await rt.chats.get_config(msg.chat.id),
+            ),
+            disable_notification=True,
+        )
+
+    @r.callback_query(F.data.startswith("cfg:"))
+    async def on_cfg(cb: CallbackQuery) -> None:
+        if not cb.data or not cb.message:
+            return
+        field = cb.data.split(":", 1)[1]
+        chat_id = cb.message.chat.id
+        cfg = await rt.chats.get_config(chat_id)
+        if not cfg:
+            await cb.answer("Run /config first.", show_alert=True)
+            return
+        toggles = {
+            "duckhunt": ("duckhunt_enabled", not cfg.duckhunt_enabled),
+            "sharephoto": ("share_photo_enabled", not cfg.share_photo_enabled),
+            "comic": ("comic_enabled", not cfg.comic_enabled),
+            "voice": ("voice_transcribe", not cfg.voice_transcribe),
+            "memory": ("memory_enabled", not cfg.memory_enabled),
+        }
+        if field in toggles:
+            col, new_val = toggles[field]
+            await rt.chats.update_config(chat_id, **{col: new_val})
+        elif field.startswith("policy:"):
+            new_policy = field.split(":", 1)[1]
+            if new_policy in ("commands", "mention", "reply", "ambient", "always"):
+                await rt.chats.update_config(chat_id, response_policy=new_policy)
+        elif field.startswith("persona:"):
+            new_persona = field.split(":", 1)[1]
+            if new_persona in ("pedro", "neutral"):
+                await rt.chats.update_config(
+                    chat_id, persona=new_persona, persona_custom=None,
+                )
+        new_cfg = await rt.chats.get_config(chat_id)
+        try:
+            await cb.message.edit_text(
+                "⚙️ Chat settings:",
+                reply_markup=_config_keyboard(new_cfg),
+            )
+        except Exception:
+            pass
+        await cb.answer()
+
     return r
+
+
+def _config_keyboard(cfg) -> InlineKeyboardMarkup:
+    """Build the /config wizard keyboard. Mirrors fields editable via /chat_config."""
+
+    def b(label: str, data: str) -> InlineKeyboardButton:
+        return InlineKeyboardButton(text=label, callback_data=f"cfg:{data}")
+
+    on = "ON"
+    off = "off"
+
+    rows = [
+        [
+            b(f"Duckhunt: {on if cfg.duckhunt_enabled else off}", "duckhunt"),
+            b(f"Sharephoto: {on if cfg.share_photo_enabled else off}", "sharephoto"),
+        ],
+        [
+            b(f"Comic: {on if cfg.comic_enabled else off}", "comic"),
+            b(f"Voice: {on if cfg.voice_transcribe else off}", "voice"),
+        ],
+        [
+            b(f"Memory: {on if cfg.memory_enabled else off}", "memory"),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"Policy: {cfg.response_policy}",
+                callback_data="cfg:noop",
+            ),
+        ],
+        [
+            b("commands", "policy:commands"),
+            b("mention", "policy:mention"),
+            b("reply", "policy:reply"),
+        ],
+        [
+            b("ambient", "policy:ambient"),
+            b("always", "policy:always"),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"Persona: {cfg.persona}",
+                callback_data="cfg:noop",
+            ),
+        ],
+        [
+            b("pedro", "persona:pedro"),
+            b("neutral", "persona:neutral"),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _set_date(rt: Runtime, msg: Message, *, label: str) -> None:

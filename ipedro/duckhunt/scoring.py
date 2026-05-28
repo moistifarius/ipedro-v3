@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
+from datetime import date
 
 # Rarity tiers, in roll order. Probabilities are sampled by `roll_rarity`.
 RARITY_TIERS: tuple[tuple[str, float, int], ...] = (
@@ -22,6 +23,42 @@ RARITY_BY_NAME: dict[str, tuple[float, int]] = {
     name: (weight, base_points) for name, weight, base_points in RARITY_TIERS
 }
 
+# (month, day) -> (event name, hint flavor used in the quack line)
+HOLIDAYS: dict[tuple[int, int], tuple[str, str]] = {
+    (1, 1):   ("New Year",         "🎆 the duck wears tiny party glasses"),
+    (2, 14):  ("Valentine's",      "💌 the duck has a little rose"),
+    (3, 17):  ("St. Patrick's",    "🍀 the duck is suspiciously green"),
+    (4, 1):   ("April Fool's",     "🤡 is this even a real duck?"),
+    (10, 31): ("Halloween",        "🎃 the duck is wearing a tiny ghost sheet"),
+    (11, 11): ("Veterans' Day",    "the duck salutes"),
+    (12, 24): ("Christmas Eve",    "🎄 the duck has bells"),
+    (12, 25): ("Christmas",        "🎅 the duck wears a tiny santa hat"),
+    (12, 31): ("New Year's Eve",   "🥂 the duck is holding a tiny glass"),
+}
+
+# On holidays, biased rarity weights instead of the defaults: more epics and
+# legendaries, fewer commons. Re-normalised at use time.
+HOLIDAY_WEIGHTS: tuple[tuple[str, float, int], ...] = (
+    ("common",    0.40, 1),
+    ("uncommon",  0.25, 3),
+    ("rare",      0.20, 7),
+    ("epic",      0.10, 15),
+    ("legendary", 0.05, 40),
+)
+
+# Chance any given spawn is upgraded to a boss duck.
+BOSS_SPAWN_CHANCE = 0.03
+
+
+def current_holiday(today: date | None = None) -> tuple[str, str] | None:
+    d = today or date.today()
+    return HOLIDAYS.get((d.month, d.day))
+
+
+def boss_required_hits(rarity: str) -> int:
+    """Boss takes more hits the rarer it is. Clamped to a usable range."""
+    return max(3, min(15, base_points(rarity) // 2 + 3))
+
 
 @dataclass(frozen=True)
 class ActionOutcome:
@@ -32,15 +69,23 @@ class ActionOutcome:
     resolves_duck: bool  # True if the duck event should now be marked resolved
 
 
-def roll_rarity(rng: random.Random | None = None) -> str:
+def roll_rarity(
+    rng: random.Random | None = None, *, on_holiday: bool = False,
+) -> str:
     r = rng if rng is not None else random
+    tiers = HOLIDAY_WEIGHTS if on_holiday else RARITY_TIERS
     roll = r.random()
     cumulative = 0.0
-    for name, weight, _ in RARITY_TIERS:
+    for name, weight, _ in tiers:
         cumulative += weight
         if roll <= cumulative:
             return name
-    return RARITY_TIERS[-1][0]
+    return tiers[-1][0]
+
+
+def roll_is_boss(rng: random.Random | None = None) -> bool:
+    r = rng if rng is not None else random
+    return r.random() < BOSS_SPAWN_CHANCE
 
 
 def base_points(rarity: str) -> int:

@@ -228,6 +228,46 @@ CREATE TABLE IF NOT EXISTS chat_dates (
 CREATE INDEX IF NOT EXISTS chat_dates_today_idx
     ON chat_dates (month, day);
 
+-- Daily comic strip opt-in --------------------------------------------------
+ALTER TABLE chat_config
+    ADD COLUMN IF NOT EXISTS comic_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE chat_config
+    ADD COLUMN IF NOT EXISTS last_comic_at TIMESTAMPTZ;
+
+-- Boss-duck columns ---------------------------------------------------------
+-- A boss duck takes multiple hits across multiple users to defeat. If
+-- boss_required_hits is NULL the row is a normal duck.
+ALTER TABLE duck_events
+    ADD COLUMN IF NOT EXISTS boss_required_hits INTEGER;
+ALTER TABLE duck_events
+    ADD COLUMN IF NOT EXISTS boss_current_hits INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS duck_boss_hits (
+    duck_id   BIGINT NOT NULL REFERENCES duck_events(id) ON DELETE CASCADE,
+    user_id   BIGINT NOT NULL,
+    display_name TEXT NOT NULL,
+    hits      INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (duck_id, user_id)
+);
+
+-- OpenAI usage log (cost tracking) ------------------------------------------
+CREATE TABLE IF NOT EXISTS openai_usage (
+    id                BIGSERIAL PRIMARY KEY,
+    chat_id           BIGINT,
+    kind              TEXT NOT NULL,         -- chat | embed | image | transcribe | translate
+    model             TEXT,
+    prompt_tokens     INTEGER,
+    completion_tokens INTEGER,
+    total_tokens      INTEGER,
+    cost_usd          REAL,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS openai_usage_chat_recent_idx
+    ON openai_usage (chat_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS openai_usage_recent_idx
+    ON openai_usage (created_at DESC);
+
 -- One outstanding bef challenge per (chat, user). The user must reply to
 -- `prompt_message_id` with an answer that the AI judge accepts before they
 -- can attempt /bef again. There is no time-based cooldown on bef itself;

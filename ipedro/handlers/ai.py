@@ -126,6 +126,7 @@ def build_router(rt: Runtime) -> Router:
                 f"Persona: {cfg.persona}\n"
                 f"Duckhunt enabled: {cfg.duckhunt_enabled}\n"
                 f"Share-photo enabled: {cfg.share_photo_enabled}\n"
+                f"Comic enabled: {cfg.comic_enabled}\n"
                 f"Voice transcribe: {cfg.voice_transcribe}\n"
                 f"Memory enabled: {cfg.memory_enabled}\n\n"
                 "Set a field: /chat_config <field> <value>\n"
@@ -134,6 +135,7 @@ def build_router(rt: Runtime) -> Router:
                 "  persona    pedro|neutral|<free-form>\n"
                 "  duckhunt   on|off\n"
                 "  sharephoto on|off\n"
+                "  comic      on|off\n"
                 "  voice      on|off\n"
                 "  memory     on|off",
                 disable_notification=True,
@@ -179,6 +181,8 @@ def build_router(rt: Runtime) -> Router:
             updates["duckhunt_enabled"] = raw.lower() in ("on", "true", "1", "yes")
         elif field in ("sharephoto", "share_photo"):
             updates["share_photo_enabled"] = raw.lower() in ("on", "true", "1", "yes")
+        elif field == "comic":
+            updates["comic_enabled"] = raw.lower() in ("on", "true", "1", "yes")
         elif field == "voice":
             updates["voice_transcribe"] = raw.lower() in ("on", "true", "1", "yes")
         elif field == "memory":

@@ -333,7 +333,9 @@ def build_router(rt: Runtime) -> Router:
             latest_user_text=text,
             extra_system=extra,
         )
-        reply = await rt.openai.chat(ctx.messages, max_tokens=500)
+        reply = await rt.openai.chat(
+            ctx.messages, max_tokens=500, chat_id=msg.chat.id,
+        )
         if not reply:
             return
 

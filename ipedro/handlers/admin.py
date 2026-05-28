@@ -275,6 +275,55 @@ def build_router(rt: Runtime) -> Router:
                 pass
         await cb.answer(str(target))
 
+    @r.message(Command("cost"))
+    async def cost(msg: Message) -> None:
+        """Show OpenAI spend (last 7 days). /cost or /cost <chat_id>."""
+        if not await require_admin(msg, admin_ids):
+            return
+        parts = (msg.text or "").split()
+        chat_filter = None
+        if len(parts) >= 2:
+            try:
+                chat_filter = int(parts[1])
+            except ValueError:
+                await msg.reply("Bad chat id.", disable_notification=True)
+                return
+        if chat_filter is not None:
+            rows = await rt.db.fetch(
+                "SELECT kind, COUNT(*) AS calls, "
+                "       COALESCE(SUM(total_tokens), 0) AS tokens, "
+                "       COALESCE(SUM(cost_usd), 0) AS cost "
+                "  FROM openai_usage "
+                " WHERE chat_id = $1 AND created_at >= NOW() - INTERVAL '7 days' "
+                " GROUP BY kind ORDER BY cost DESC",
+                chat_filter,
+            )
+            header = f"Last 7d for chat {chat_filter}:"
+        else:
+            rows = await rt.db.fetch(
+                "SELECT kind, COUNT(*) AS calls, "
+                "       COALESCE(SUM(total_tokens), 0) AS tokens, "
+                "       COALESCE(SUM(cost_usd), 0) AS cost "
+                "  FROM openai_usage "
+                " WHERE created_at >= NOW() - INTERVAL '7 days' "
+                " GROUP BY kind ORDER BY cost DESC"
+            )
+            header = "Last 7d (all chats):"
+        if not rows:
+            await msg.reply("No usage recorded in that window.", disable_notification=True)
+            return
+        lines = [header]
+        total = 0.0
+        for r in rows:
+            c = float(r["cost"] or 0)
+            total += c
+            lines.append(
+                f"  {r['kind']:<10}  {r['calls']:>5} calls  "
+                f"{int(r['tokens']):>8} tokens  ${c:.4f}"
+            )
+        lines.append(f"  TOTAL: ${total:.4f}")
+        await msg.reply("\n".join(lines), disable_notification=True)
+
     @r.message(Command("memory_facts"))
     async def memory_facts(msg: Message) -> None:
         """Inspect durable facts for a chat. Admin-only."""

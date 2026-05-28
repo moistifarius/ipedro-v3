@@ -10,7 +10,7 @@ from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, Message
 
 from ipedro.duckhunt.captcha_gen import make_captcha
-from ipedro.duckhunt.spawner import rarity_hint
+from ipedro.duckhunt.spawner import build_quack_message_for, rarity_hint
 from ipedro.duckhunt.verdicts import parse_verdict
 from ipedro.handlers.common import display_name, get_or_create_chat_config
 from ipedro.prompts import (
@@ -102,9 +102,8 @@ def build_router(rt: Runtime) -> Router:
             "Manual spawn in chat %s by user %s -> rarity=%s",
             msg.chat.id, msg.from_user.id if msg.from_user else None, duck.rarity,
         )
-        hint = rarity_hint(duck.rarity)
         await msg.answer(
-            f"🦆 quack!{hint}" if hint else "🦆 quack!",
+            await build_quack_message_for(rt.openai, duck),
             disable_notification=True,
         )
 
@@ -130,6 +129,21 @@ def build_router(rt: Runtime) -> Router:
                 f"(🔫 {row['killed']} 🤝 {row['befriended']} "
                 f"⏭ {row['ignored']} ❌ {row['misses']}; "
                 f"streak {row['streak']}/{row['best_streak']})"
+            )
+        await msg.reply("\n".join(lines), disable_notification=True)
+
+    @r.message(Command("global_leaderboard"))
+    async def global_leaderboard(msg: Message) -> None:
+        rows = await rt.duckhunt.global_leaderboard(limit=15)
+        if not rows:
+            await msg.reply("No duckhunt activity yet anywhere.", disable_notification=True)
+            return
+        lines = ["🌐 Global Duck Leaderboard 🌐"]
+        for i, row in enumerate(rows, 1):
+            lines.append(
+                f"{i}. {row['display_name']} — {row['points']} pts "
+                f"(🔫 {row['killed']} 🤝 {row['befriended']}; "
+                f"across {row['chats']} chats)"
             )
         await msg.reply("\n".join(lines), disable_notification=True)
 
