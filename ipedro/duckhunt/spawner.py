@@ -34,7 +34,7 @@ from ipedro.prompts import DUCK_QUACK_PROMPT
 log = logging.getLogger(__name__)
 
 
-async def _duckhunt_enabled_chat_ids(db: Database) -> list[int]:
+async def duckhunt_enabled_chat_ids(db: Database) -> list[int]:
     rows = await db.fetch(
         "SELECT c.chat_id FROM chats c "
         "JOIN chat_config cfg ON cfg.chat_id = c.chat_id "
@@ -81,7 +81,7 @@ def rarity_hint(rarity: str) -> str:
     return random.choice(_RARITY_HINTS.get(rarity, ("",)))
 
 
-async def _build_quack_message(openai: OpenAIClient, rarity: str) -> str:
+async def build_quack_message(openai: OpenAIClient, rarity: str) -> str:
     msg = await openai.short_completion(DUCK_QUACK_PROMPT, max_tokens=120)
     body = (msg or "🦆 quack!").strip()
     hint = rarity_hint(rarity)
@@ -99,7 +99,7 @@ async def _maybe_spawn(
     duck = await service.spawn_duck(
         chat_id, settings.duckhunt_duck_lifetime_seconds,
     )
-    text = await _build_quack_message(openai, duck.rarity)
+    text = await build_quack_message(openai, duck.rarity)
     try:
         await bot.send_message(chat_id, text, disable_notification=True)
     except Exception as exc:  # pragma: no cover
@@ -137,7 +137,7 @@ async def run_spawner(
             if departed:
                 log.info("Probabilistic departure: %d duck(s) wandered off.", len(departed))
 
-            for chat_id in await _duckhunt_enabled_chat_ids(db):
+            for chat_id in await duckhunt_enabled_chat_ids(db):
                 await _maybe_spawn(chat_id, p_spawn, bot, service, openai, settings)
 
             wait = tick

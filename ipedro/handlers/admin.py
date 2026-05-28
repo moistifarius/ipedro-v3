@@ -9,6 +9,9 @@ from aiogram.filters import Command
 from aiogram.types import Message
 from aiogram.exceptions import TelegramBadRequest
 
+from ipedro.duckhunt.spawner import (
+    build_quack_message, duckhunt_enabled_chat_ids,
+)
 from ipedro.handlers.common import require_admin
 from ipedro.runtime import Runtime
 
@@ -73,6 +76,45 @@ def build_router(rt: Runtime) -> Router:
             for r in rows
         ]
         await msg.reply("Recent commands:\n" + "\n".join(lines), disable_notification=True)
+
+    @r.message(Command("quack_all"))
+    async def quack_all(msg: Message) -> None:
+        """Spawn a duck in every duckhunt-enabled chat that doesn't already have one."""
+        if not await require_admin(msg, admin_ids):
+            return
+        chat_ids = await duckhunt_enabled_chat_ids(rt.db)
+        if not chat_ids:
+            await msg.reply(
+                "No chats have duckhunt enabled.", disable_notification=True,
+            )
+            return
+        spawned, skipped, failed = 0, 0, 0
+        for chat_id in chat_ids:
+            if await rt.duckhunt.active_duck(chat_id):
+                skipped += 1
+                continue
+            try:
+                duck = await rt.duckhunt.spawn_duck(
+                    chat_id, rt.settings.duckhunt_duck_lifetime_seconds,
+                )
+                text = await build_quack_message(rt.openai, duck.rarity)
+                await rt.bot.send_message(
+                    chat_id, text, disable_notification=True,
+                )
+                spawned += 1
+                log.info(
+                    "quack_all: spawned in chat=%s rarity=%s event_id=%s",
+                    chat_id, duck.rarity, duck.id,
+                )
+            except Exception as exc:
+                failed += 1
+                log.warning("quack_all failed for chat %s: %s", chat_id, exc)
+        await msg.reply(
+            f"Quacked in {spawned} chat(s). "
+            f"Skipped {skipped} (duck already active). "
+            f"Failed {failed}.",
+            disable_notification=True,
+        )
 
     @r.message(Command("memory_facts"))
     async def memory_facts(msg: Message) -> None:
