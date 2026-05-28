@@ -39,8 +39,14 @@ CREATE TABLE IF NOT EXISTS chat_config (
     duckhunt_enabled     BOOLEAN NOT NULL DEFAULT FALSE,
     voice_transcribe     BOOLEAN NOT NULL DEFAULT TRUE,
     memory_enabled       BOOLEAN NOT NULL DEFAULT TRUE,
+    share_photo_enabled  BOOLEAN NOT NULL DEFAULT FALSE,
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Back-fill new columns on existing installs (CREATE TABLE IF NOT EXISTS
+-- won't add columns to an existing table).
+ALTER TABLE chat_config
+    ADD COLUMN IF NOT EXISTS share_photo_enabled BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- Messages -------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS messages (

@@ -57,8 +57,13 @@ class Settings(BaseSettings):
 
     # Duckhunt
     duckhunt_enabled_by_default: bool = False
-    duckhunt_min_spawn_seconds: int = 900
-    duckhunt_max_spawn_seconds: int = 5400
+    # Spawns are a Poisson process per chat: each tick, every enabled chat
+    # independently rolls P(spawn) = 1 - exp(-tick / mean). This produces
+    # naturally bursty behavior — sometimes ducks several times an hour,
+    # sometimes none for days. Tune `mean_spawn_interval_seconds` to set the
+    # average rate.
+    duckhunt_mean_spawn_interval_seconds: int = 14_400  # ~4h average
+    duckhunt_spawn_tick_seconds: int = 60
     # Hard cap on duck lifetime. Most ducks depart probabilistically well
     # before this via the spawner's leave-roll.
     duckhunt_duck_lifetime_seconds: int = 86_400  # 24h
@@ -67,6 +72,13 @@ class Settings(BaseSettings):
     # wandered off by the time they hit the cap.
     duckhunt_duck_half_life_seconds: int = 14_400
     duckhunt_action_cooldown_seconds: int = 15
+
+    # Share-photo idle behavior. Same Poisson shape as duckhunt: each enabled
+    # chat rolls per tick. Default mean is 1 day because image generation is
+    # not cheap; tune via env if you want more frequent (or fewer) snapshots.
+    share_photo_enabled_by_default: bool = False
+    share_photo_mean_interval_seconds: int = 86_400  # ~1 photo per chat per day
+    share_photo_tick_seconds: int = 300
 
     @field_validator("admin_user_ids")
     @classmethod

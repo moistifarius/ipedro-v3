@@ -21,6 +21,36 @@ log = logging.getLogger(__name__)
 _CHALLENGE_KINDS = ("captcha", "trivia", "recipe")
 
 
+async def _issue_bef_challenge(
+    rt: Runtime, msg: Message, who: str, *, intro: str,
+) -> bool:
+    """Generate a captcha/trivia/recipe challenge and store it as pending.
+
+    Returns True if the challenge was issued, False if the AI was unavailable
+    (caller should fall back to a plain text reply).
+    """
+    kind = random.choice(_CHALLENGE_KINDS)
+    challenge_text = await rt.openai.short_completion(
+        DUCK_BEF_CHALLENGE_PROMPT.format(display_name=who, kind=kind),
+        max_tokens=200,
+    )
+    if not challenge_text:
+        log.info(
+            "Skipping bef challenge for %s/%s - AI unavailable.",
+            msg.chat.id, msg.from_user.id if msg.from_user else None,
+        )
+        return False
+    prompt_msg = await msg.answer(
+        f"{intro} Reply to THIS message with your answer:\n\n{challenge_text}",
+        disable_notification=True,
+    )
+    await rt.duckhunt.set_bef_challenge(
+        msg.chat.id, msg.from_user.id, challenge_text, kind,
+        prompt_msg.message_id,
+    )
+    return True
+
+
 def build_router(rt: Runtime) -> Router:
     r = Router(name="duckhunt")
 
@@ -148,7 +178,12 @@ def build_router(rt: Runtime) -> Router:
             msg.chat.id, msg.from_user.id,
             rt.settings.duckhunt_action_cooldown_seconds,
         ):
-            await msg.reply("Cool it. Cooldown.", disable_notification=True)
+            who = display_name(msg.from_user)
+            issued = await _issue_bef_challenge(
+                rt, msg, who, intro="🦆 Easy, friend. Earn another shot —",
+            )
+            if not issued:
+                await msg.reply("Cool it. Cooldown.", disable_notification=True)
             return
 
         duck = await rt.duckhunt.active_duck(msg.chat.id)
@@ -192,25 +227,6 @@ def build_router(rt: Runtime) -> Router:
 
         # On refusal: post a challenge the user must solve before retrying.
         if not outcome.success:
-            kind = random.choice(_CHALLENGE_KINDS)
-            challenge_text = await rt.openai.short_completion(
-                DUCK_BEF_CHALLENGE_PROMPT.format(
-                    display_name=who, kind=kind,
-                ),
-                max_tokens=200,
-            )
-            if not challenge_text:
-                # AI unavailable: skip the challenge so the user isn't stuck.
-                log.info("Skipping bef challenge for %s/%s - AI unavailable.",
-                         msg.chat.id, msg.from_user.id)
-                return
-            prompt_msg = await msg.answer(
-                f"🦆 Try again? Reply to THIS message with your answer:\n\n{challenge_text}",
-                disable_notification=True,
-            )
-            await rt.duckhunt.set_bef_challenge(
-                msg.chat.id, msg.from_user.id, challenge_text, kind,
-                prompt_msg.message_id,
-            )
+            await _issue_bef_challenge(rt, msg, who, intro="🦆 Try again?")
 
     return r

@@ -1,17 +1,25 @@
 """Background duck spawner.
 
-A single asyncio task per running bot that periodically picks a chat with
-duckhunt enabled and spawns a duck there, then sleeps for a random interval.
-Each tick also rolls a probabilistic departure check for any currently
-active duck, so ducks may wander off at any time (more likely as time
-passes; ~98% gone by 24h with the default half-life).
-Restart-safe: state lives in Postgres, the in-memory task is just a tick.
+A single asyncio task per running bot. Each tick, for every duckhunt-enabled
+chat without an active duck, it independently rolls a per-tick spawn
+probability derived from the configured mean inter-arrival time:
+
+    P(spawn this tick) = 1 - exp(-tick / mean_interval)
+
+This is a Poisson process per chat — no fixed window, no guaranteed cadence.
+Natural consequences:
+  - Sometimes several ducks an hour (tight clusters).
+  - Sometimes nothing for days (long gaps).
+Each tick also rolls a probabilistic departure check for any currently active
+duck, so ducks may wander off at any time.
+Restart-safe: state lives in Postgres; the in-memory task is just a tick.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import random
 import time
 
@@ -40,13 +48,41 @@ async def _build_quack_message(openai: OpenAIClient) -> str:
     return (msg or "🦆 quack!").strip()
 
 
+async def _maybe_spawn(
+    chat_id: int, p_spawn: float, bot: Bot, service: DuckhuntService,
+    openai: OpenAIClient, settings: Settings,
+) -> None:
+    if random.random() >= p_spawn:
+        return
+    if await service.active_duck(chat_id):
+        return
+    duck = await service.spawn_duck(
+        chat_id, settings.duckhunt_duck_lifetime_seconds,
+    )
+    text = await _build_quack_message(openai)
+    try:
+        await bot.send_message(chat_id, text, disable_notification=True)
+    except Exception as exc:  # pragma: no cover
+        log.warning("Failed to deliver quack to %s: %s", chat_id, exc)
+    log.info(
+        "Spawn announced: chat=%s rarity=%s event_id=%s",
+        chat_id, duck.rarity, duck.id,
+    )
+
+
 async def run_spawner(
     bot: Bot, db: Database, openai: OpenAIClient, settings: Settings,
     stop: asyncio.Event,
 ) -> None:
     """Loop until `stop` is set."""
     service = DuckhuntService(db)
-    log.info("Duckhunt spawner running.")
+    tick = max(1, settings.duckhunt_spawn_tick_seconds)
+    mean = max(tick, settings.duckhunt_mean_spawn_interval_seconds)
+    p_spawn = 1.0 - math.exp(-tick / mean)
+    log.info(
+        "Duckhunt spawner running. tick=%ss mean_interval=%ss p_spawn_per_tick=%.4f",
+        tick, mean, p_spawn,
+    )
     last_tick = time.monotonic()
     while not stop.is_set():
         try:
@@ -61,30 +97,10 @@ async def run_spawner(
             if departed:
                 log.info("Probabilistic departure: %d duck(s) wandered off.", len(departed))
 
-            chat_ids = await _duckhunt_enabled_chat_ids(db)
-            if chat_ids:
-                target = random.choice(chat_ids)
-                if not await service.active_duck(target):
-                    duck = await service.spawn_duck(
-                        target, settings.duckhunt_duck_lifetime_seconds,
-                    )
-                    # Rarity is deliberately NOT broadcast on spawn (per UX).
-                    text = await _build_quack_message(openai)
-                    try:
-                        await bot.send_message(
-                            target, text, disable_notification=True,
-                        )
-                    except Exception as exc:  # pragma: no cover
-                        log.warning("Failed to deliver quack to %s: %s", target, exc)
-                    # Log the rarity at INFO so /logs can show it to admins.
-                    log.info(
-                        "Spawn announced: chat=%s rarity=%s event_id=%s",
-                        target, duck.rarity, duck.id,
-                    )
-            wait = random.randint(
-                settings.duckhunt_min_spawn_seconds,
-                settings.duckhunt_max_spawn_seconds,
-            )
+            for chat_id in await _duckhunt_enabled_chat_ids(db):
+                await _maybe_spawn(chat_id, p_spawn, bot, service, openai, settings)
+
+            wait = tick
         except Exception as exc:
             log.exception("Spawner iteration failed: %s", exc)
             wait = 60
