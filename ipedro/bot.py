@@ -51,16 +51,33 @@ async def build_runtime(settings: Settings) -> Runtime:
     await apply_schema(db, settings.openai_embedding_dim)
     pgvector_available = await has_pgvector(db)
 
+    # Apply persisted overrides for runtime-tunable knobs before constructing
+    # the client so the very first request honors them.
+    saved_provider = await kv_get(db, "text_provider")
+    saved_claude_model = await kv_get(db, "claude_text_model")
+    saved_openai_model = await kv_get(db, "openai_text_model")
+
+    text_provider = saved_provider if saved_provider in ("claude", "openai") else settings.text_provider
+    if text_provider == "claude" and not settings.anthropic_api_key:
+        text_provider = "openai"
+
     openai = OpenAIClient(
         api_key=settings.openai_api_key,
         organization=settings.openai_organization,
-        text_model=settings.openai_text_model,
+        anthropic_api_key=settings.anthropic_api_key,
+        text_provider=text_provider,
+        text_model=saved_openai_model or settings.openai_text_model,
+        claude_model=saved_claude_model or settings.claude_text_model,
         image_model=settings.openai_image_model,
         transcription_model=settings.openai_transcription_model,
         embedding_model=settings.openai_embedding_model,
         embedding_dim=settings.openai_embedding_dim,
     )
     openai.attach_usage_db(db)
+    log.info(
+        "AI text provider: %s (claude=%s, openai=%s)",
+        openai.text_provider, openai.claude_model, openai.text_model,
+    )
 
     # Pick up any persisted master-prompt override before serving requests.
     # Falls back to the legacy key set by earlier versions.
