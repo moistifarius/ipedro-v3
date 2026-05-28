@@ -358,6 +358,45 @@ _KNOWN_OPENAI_TEXT_MODELS: tuple[str, ...] = (
 _PENDING_CUSTOM_VALUES: dict[int, tuple[int, int, str, float]] = {}
 _CUSTOM_VALUE_TTL = 60.0  # seconds
 
+
+def _has_parked_value(msg: "Message") -> bool:
+    """Predicate for the custom-value DM handler.
+
+    True only when (a) the sender has a parked entry, (b) the entry is
+    fresh (within ``_CUSTOM_VALUE_TTL``), and (c) the message is plain
+    text (no leading slash). When the entry has aged past the TTL we
+    drop it here so the message keeps propagating to the regular chat
+    router instead of being captured by a stale 'custom value' reply.
+    """
+    if msg.from_user is None or msg.text is None:
+        return False
+    if msg.text.startswith("/"):
+        return False
+    uid = msg.from_user.id
+    entry = _PENDING_CUSTOM_VALUES.get(uid)
+    if entry is None:
+        return False
+    _, _, _, ts = entry
+    if time.time() - ts > _CUSTOM_VALUE_TTL:
+        _PENDING_CUSTOM_VALUES.pop(uid, None)
+        return False
+    return True
+
+
+def _pop_parked_on_navigation(verb: str, user_id: int | None) -> None:
+    """Drop the admin's parked custom-value entry on any dse: navigation
+    other than parking itself (``verb == "custom"``).
+
+    Rationale: if the admin previously tapped "Set to custom…" for one
+    field and then taps anything else in the dse: flow, they've moved
+    on. A later typed number must NOT silently overwrite the originally
+    parked field.
+    """
+    if verb == "custom" or user_id is None:
+        return
+    _PENDING_CUSTOM_VALUES.pop(user_id, None)
+
+
 # Whitelist of duck_stats columns the editor is allowed to touch. The
 # field-name interpolation in _apply_duckstat_delta / _set_duckstat_field
 # is SQL-injection-safe because field is membership-checked here first.
@@ -372,11 +411,16 @@ async def _apply_duckstat_delta(
 ) -> tuple[bool, int | None]:
     """Apply a +/-delta to one duckstat field, clamping at 0. Returns
     (ok, new_value). Returns (False, None) when the row doesn't exist
-    or the field is not whitelisted."""
+    or the field is not whitelisted.
+
+    The result is clamped to [0, 2_147_483_647] (Postgres INTEGER range)
+    so that a large delta on an already-large field can't overflow the
+    column and surface as an asyncpg DataError."""
     if field not in _DUCKSTAT_EDITABLE_FIELDS:
         return False, None
     row = await db.fetchrow(
-        f"UPDATE duck_stats SET {field} = GREATEST(0, {field} + $3) "
+        f"UPDATE duck_stats "
+        f"   SET {field} = LEAST(2147483647, GREATEST(0, {field} + $3)) "
         " WHERE chat_id = $1 AND user_id = $2 "
         f"RETURNING {field}",
         chat_id, user_id, delta,
@@ -389,11 +433,13 @@ async def _apply_duckstat_delta(
 async def _set_duckstat_field(
     db, chat_id: int, user_id: int, field: str, value: int,
 ) -> tuple[bool, int | None]:
-    """Absolute SET (not delta). Clamps at 0. Used by 'Set to 0' and
-    custom-value entry."""
+    """Absolute SET (not delta). Clamps to [0, 2_147_483_647] (Postgres
+    INTEGER range) so admin-supplied numbers from the 'Set to custom…'
+    flow can't overflow the column. Used by 'Set to 0' and custom-value
+    entry."""
     if field not in _DUCKSTAT_EDITABLE_FIELDS:
         return False, None
-    clamped = max(0, value)
+    clamped = max(0, min(2_147_483_647, value))
     row = await db.fetchrow(
         f"UPDATE duck_stats SET {field} = $3 "
         " WHERE chat_id = $1 AND user_id = $2 "
@@ -2038,6 +2084,14 @@ def build_router(rt: Runtime) -> Router:
         parts = cb.data.split(":")
         verb = parts[1] if len(parts) >= 2 else ""
 
+        # Any dse navigation other than parking itself ("custom") means
+        # the admin has moved on from whatever they previously parked, so
+        # drop the entry now to prevent a later typed number from silently
+        # writing to a field they've navigated away from.
+        _pop_parked_on_navigation(
+            verb, cb.from_user.id if cb.from_user is not None else None,
+        )
+
         # dse:chatpick:CHATID  or  dse:chatpick:p:N
         if verb == "chatpick":
             if len(parts) >= 4 and parts[2] == "p":
@@ -2150,11 +2204,26 @@ def build_router(rt: Runtime) -> Router:
             except (IndexError, ValueError):
                 await cb.answer(_expired("duckstats_edit"), show_alert=True)
                 return
-            ok, new_val = await _apply_duckstat_delta(
-                rt.db, chat_id, user_id, field, delta,
-            )
+            try:
+                ok, new_val = await _apply_duckstat_delta(
+                    rt.db, chat_id, user_id, field, delta,
+                )
+            except Exception as exc:
+                # Wrap transient pool failures so the editor doesn't dead-end
+                # on a silent traceback. The admin gets a real error toast.
+                log.warning("dse:delta DB write failed: %s", exc)
+                await cb.answer(f"DB error: {exc}", show_alert=True)
+                return
             if not ok:
-                await cb.answer("Row missing or bad field.", show_alert=True)
+                # Row disappeared (concurrent reset, etc.). Bounce back to
+                # the user picker so the admin isn't stuck on a stale view.
+                await cb.answer(
+                    "Row missing — bounced back to user list.",
+                    show_alert=False,
+                )
+                await _show_duckstats_user_picker(
+                    edit_in=cb.message, chat_id=chat_id,
+                )
                 return
             text, kb = _render_duckstat_field_picker(
                 chat_id, user_id, field, new_val,
@@ -2179,11 +2248,22 @@ def build_router(rt: Runtime) -> Router:
             except (IndexError, ValueError):
                 await cb.answer(_expired("duckstats_edit"), show_alert=True)
                 return
-            ok, new_val = await _set_duckstat_field(
-                rt.db, chat_id, user_id, field, 0,
-            )
+            try:
+                ok, new_val = await _set_duckstat_field(
+                    rt.db, chat_id, user_id, field, 0,
+                )
+            except Exception as exc:
+                log.warning("dse:zero DB write failed: %s", exc)
+                await cb.answer(f"DB error: {exc}", show_alert=True)
+                return
             if not ok:
-                await cb.answer("Row missing or bad field.", show_alert=True)
+                await cb.answer(
+                    "Row missing — bounced back to user list.",
+                    show_alert=False,
+                )
+                await _show_duckstats_user_picker(
+                    edit_in=cb.message, chat_id=chat_id,
+                )
                 return
             text, kb = _render_duckstat_field_picker(
                 chat_id, user_id, field, new_val,
@@ -2282,14 +2362,9 @@ def build_router(rt: Runtime) -> Router:
 
     # Custom-value DM handler. Triggered when the admin previously tapped
     # "Set to custom…" on the editor. Uses an F.func predicate so only
-    # parked admins match it; other handlers are not blocked.
-    def _has_parked_value(msg: Message) -> bool:
-        if msg.from_user is None or msg.text is None:
-            return False
-        if msg.text.startswith("/"):
-            return False
-        return msg.from_user.id in _PENDING_CUSTOM_VALUES
-
+    # parked admins match it; other handlers are not blocked. The predicate
+    # itself lives at module scope (see _has_parked_value) so unit tests can
+    # exercise the TTL behaviour without building a Router.
     @r.message(F.func(_has_parked_value))
     async def on_admin_custom_value(msg: Message) -> None:
         if msg.from_user is None or not is_admin_user(msg.from_user.id, admin_ids):
@@ -2311,12 +2386,26 @@ def build_router(rt: Runtime) -> Router:
                 disable_notification=True,
             )
             return
-        ok, new_val = await _set_duckstat_field(
-            rt.db, chat_id, user_id, field, new_value,
-        )
-        if not ok:
+        # Clamp to Postgres INTEGER range here so we surface a friendly
+        # message instead of letting an asyncpg DataError bubble up. The
+        # helper does the same clamp as defense in depth.
+        new_value = max(0, min(2_147_483_647, new_value))
+        try:
+            ok, new_val = await _set_duckstat_field(
+                rt.db, chat_id, user_id, field, new_value,
+            )
+        except Exception as exc:
+            log.warning("on_admin_custom_value DB write failed: %s", exc)
             await msg.reply(
-                "Couldn't apply: row missing or bad field.",
+                f"DB error while applying value: {exc}",
+                disable_notification=True,
+            )
+            return
+        if not ok:
+            # No cb.message to re-render here (this is a fresh DM), so a
+            # plain reply is the most we can do.
+            await msg.reply(
+                f"That user no longer has a duck_stats row in chat {chat_id}.",
                 disable_notification=True,
             )
             return

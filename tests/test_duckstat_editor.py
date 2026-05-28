@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from ipedro.handlers import admin
 from ipedro.handlers.admin import (
+    _CUSTOM_VALUE_TTL,
     _DUCKSTAT_EDITABLE_FIELDS,
     _PENDING_CUSTOM_VALUES,
     _apply_duckstat_delta,
+    _has_parked_value,
+    _pop_parked_on_navigation,
     _render_duckstat_field_picker,
     _set_duckstat_field,
 )
@@ -175,3 +180,134 @@ async def test_custom_value_non_decimal_rejected_gracefully():
     ValueError for 'abc'. We just verify the exception is what we expect."""
     with pytest.raises(ValueError):
         int("abc".strip())
+
+
+# --- Fix #3 / #4 — Postgres INTEGER overflow guards ----------------------
+
+@pytest.mark.asyncio
+async def test_apply_duckstat_delta_caps_at_int_max():
+    """Delta SQL must clamp with LEAST(2147483647, …) so a positive delta
+    on an already-large field can't overflow the INTEGER column."""
+    db = FakeDB(fetchrow_results=[{"points": 2_147_483_647}])
+    ok, val = await _apply_duckstat_delta(
+        db, chat_id=1, user_id=2, field="points", delta=100,
+    )
+    assert ok is True and val == 2_147_483_647
+    sql, _args = db.fetchrow_calls[0]
+    # The cap is what guards against asyncpg DataError on overflow.
+    assert "LEAST(2147483647" in sql
+    # And we kept the floor as well.
+    assert "GREATEST(0" in sql
+
+
+@pytest.mark.asyncio
+async def test_apply_duckstat_delta_returns_int_max_when_clamped():
+    """Alternative behavioural assertion: when Postgres returns the cap,
+    the helper surfaces it unchanged as the new value."""
+    db = FakeDB(fetchrow_results=[{"points": 2_147_483_647}])
+    ok, val = await _apply_duckstat_delta(
+        db, chat_id=1, user_id=2, field="points", delta=10_000,
+    )
+    assert (ok, val) == (True, 2_147_483_647)
+
+
+@pytest.mark.asyncio
+async def test_custom_value_caps_at_int_max():
+    """An admin-typed value above INT_MAX must be clamped before the SET
+    so asyncpg never sees an out-of-range value."""
+    db = FakeDB(fetchrow_results=[{"points": 2_147_483_647}])
+    huge = 99_999_999_999_999_999_999
+    ok, val = await _set_duckstat_field(
+        db, 1, 2, "points", huge,
+    )
+    assert ok is True
+    _sql, args = db.fetchrow_calls[0]
+    # $3 (the value parameter) must be the clamp, not the raw input.
+    assert args == (1, 2, 2_147_483_647)
+    assert val == 2_147_483_647
+
+
+# --- Fix #1 — _has_parked_value enforces the 60s TTL ---------------------
+
+def _msg_stub(user_id: int, text: str):
+    """Tiny stand-in for aiogram Message that satisfies _has_parked_value."""
+    return SimpleNamespace(
+        from_user=SimpleNamespace(id=user_id),
+        text=text,
+    )
+
+
+def test_has_parked_value_returns_false_when_entry_expired():
+    """Stale (past-TTL) entry must (a) cause the predicate to return False
+    so the message keeps propagating and (b) be popped from the dict."""
+    _PENDING_CUSTOM_VALUES.clear()
+    _PENDING_CUSTOM_VALUES[123] = (1, 2, "points", time.time() - 999.0)
+    msg = _msg_stub(123, "1234")
+    assert _has_parked_value(msg) is False
+    assert 123 not in _PENDING_CUSTOM_VALUES
+    _PENDING_CUSTOM_VALUES.clear()
+
+
+def test_has_parked_value_returns_true_when_entry_fresh():
+    """Within-TTL entry must return True and stay in the dict (the handler
+    pops it later — the predicate must not consume it)."""
+    _PENDING_CUSTOM_VALUES.clear()
+    _PENDING_CUSTOM_VALUES[123] = (1, 2, "points", time.time() - 5.0)
+    msg = _msg_stub(123, "1234")
+    assert _has_parked_value(msg) is True
+    assert 123 in _PENDING_CUSTOM_VALUES
+    _PENDING_CUSTOM_VALUES.clear()
+
+
+def test_has_parked_value_ignores_slash_commands():
+    """Even with a fresh entry, a /command must NOT be captured — the
+    admin's slash commands have to keep flowing to their own handlers."""
+    _PENDING_CUSTOM_VALUES.clear()
+    _PENDING_CUSTOM_VALUES[123] = (1, 2, "points", time.time())
+    assert _has_parked_value(_msg_stub(123, "/help")) is False
+    # Slash check must not pop the entry — the admin might still
+    # complete the custom-value flow with a real number.
+    assert 123 in _PENDING_CUSTOM_VALUES
+    _PENDING_CUSTOM_VALUES.clear()
+
+
+# --- Fix #2 — dse navigation clears the parked entry ---------------------
+
+def test_dse_navigation_clears_parked_custom_value():
+    """Any dse: verb other than 'custom' must drop the parked entry so a
+    later typed number can't silently write to a field the admin has
+    already navigated away from. Regression test for Fix #2."""
+    _PENDING_CUSTOM_VALUES.clear()
+    _PENDING_CUSTOM_VALUES[42] = (1, 2, "points", time.time())
+    # 'field' is the navigation that happens when the admin re-opens a
+    # different field's picker.
+    _pop_parked_on_navigation("field", 42)
+    assert 42 not in _PENDING_CUSTOM_VALUES
+    _PENDING_CUSTOM_VALUES.clear()
+
+
+def test_dse_custom_does_not_clear_parked_entry():
+    """The 'custom' verb is the one that ARMS the parked entry — popping
+    here would defeat the feature."""
+    _PENDING_CUSTOM_VALUES.clear()
+    _PENDING_CUSTOM_VALUES[42] = (1, 2, "points", time.time())
+    _pop_parked_on_navigation("custom", 42)
+    assert 42 in _PENDING_CUSTOM_VALUES
+    _PENDING_CUSTOM_VALUES.clear()
+
+
+# --- Fix #6 (test #11) — handler ignores unparked admin DMs --------------
+
+@pytest.mark.asyncio
+async def test_custom_value_handler_ignores_unparked_admin_dm():
+    """No parked entry → the predicate short-circuits, the handler never
+    runs, and the DB is left alone. This is what lets unrelated admin
+    chitchat flow through to the chat router untouched."""
+    _PENDING_CUSTOM_VALUES.clear()
+    db = FakeDB()
+    msg = _msg_stub(123, "hi")
+    # Predicate gate first: must return False so aiogram never invokes
+    # the handler.
+    assert _has_parked_value(msg) is False
+    # DB must not have been touched as a side effect of the predicate.
+    assert db.fetchrow_calls == []
