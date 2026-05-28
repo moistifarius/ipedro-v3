@@ -1,6 +1,24 @@
-"""Duckhunt scoring and rarity tables.
+"""Duckhunt scoring.
 
-Pure functions only - kept dependency-free so they are trivial to unit test.
+The codebase used to scale dice rolls, hit chances, point payouts and AI
+personality by per-duck rarity tiers (common / uncommon / rare / epic /
+legendary). Rarity has been **neutralized for now** — every duck behaves
+identically. We still:
+
+  * keep the RARITY_TIERS / RARITY_BY_NAME / BEF_BASE_CHANCE tables in
+    place so existing imports and historical data (the duck_events.rarity
+    column) keep working;
+  * keep the function signatures `bang_outcome(rarity, …)`,
+    `bef_dice_passes(rarity, …)`, etc. — callers still pass rarity, the
+    helpers just ignore it;
+  * always insert `"common"` into duck_events for new spawns.
+
+To bring rarity back, restore the per-tier lookups in
+`bang_outcome` / `bef_dice_passes` / `ignore_outcome` / `base_points`,
+restore `roll_rarity`'s weighted draw, and re-add the rarity placeholder
+to DUCK_BEF_DECIDE_PROMPT.
+
+Pure functions only — kept dependency-free so they are trivial to unit test.
 """
 
 from __future__ import annotations
@@ -9,7 +27,8 @@ import random
 from dataclasses import dataclass
 from datetime import date
 
-# Rarity tiers, in roll order. Probabilities are sampled by `roll_rarity`.
+# Tiers preserved for historical compatibility. Not consulted by gameplay
+# anymore; new spawns always tag as "common" via roll_rarity().
 RARITY_TIERS: tuple[tuple[str, float, int], ...] = (
     # (name, weight, base_points)
     ("common",    0.65, 1),
@@ -22,6 +41,11 @@ RARITY_TIERS: tuple[tuple[str, float, int], ...] = (
 RARITY_BY_NAME: dict[str, tuple[float, int]] = {
     name: (weight, base_points) for name, weight, base_points in RARITY_TIERS
 }
+
+# Flat per-duck payout while rarity is neutralized. One point per successful
+# resolve regardless of action; matches the bang_outcome / bef_success_outcome
+# defaults below. Boss bonus is computed off this too.
+FLAT_DUCK_POINTS = 1
 
 # (month, day) -> (event name, hint flavor used in the quack line)
 HOLIDAYS: dict[tuple[int, int], tuple[str, str]] = {
@@ -36,8 +60,7 @@ HOLIDAYS: dict[tuple[int, int], tuple[str, str]] = {
     (12, 31): ("New Year's Eve",   "🥂 the duck is holding a tiny glass"),
 }
 
-# On holidays, biased rarity weights instead of the defaults: more epics and
-# legendaries, fewer commons. Re-normalised at use time.
+# Preserved for backwards compatibility; not consulted while rarity is off.
 HOLIDAY_WEIGHTS: tuple[tuple[str, float, int], ...] = (
     ("common",    0.40, 1),
     ("uncommon",  0.25, 3),
@@ -56,8 +79,8 @@ def current_holiday(today: date | None = None) -> tuple[str, str] | None:
 
 
 def boss_required_hits(rarity: str) -> int:
-    """Boss takes more hits the rarer it is. Clamped to a usable range."""
-    return max(3, min(15, base_points(rarity) // 2 + 3))
+    """Boss takes a fixed number of hits while rarity is neutralized."""
+    return 3
 
 
 @dataclass(frozen=True)
@@ -72,15 +95,9 @@ class ActionOutcome:
 def roll_rarity(
     rng: random.Random | None = None, *, on_holiday: bool = False,
 ) -> str:
-    r = rng if rng is not None else random
-    tiers = HOLIDAY_WEIGHTS if on_holiday else RARITY_TIERS
-    roll = r.random()
-    cumulative = 0.0
-    for name, weight, _ in tiers:
-        cumulative += weight
-        if roll <= cumulative:
-            return name
-    return tiers[-1][0]
+    """Rarity neutralized — every spawn is tagged 'common' regardless of
+    weights or holiday status. Signature preserved for callers."""
+    return "common"
 
 
 def roll_is_boss(rng: random.Random | None = None) -> bool:
@@ -89,28 +106,22 @@ def roll_is_boss(rng: random.Random | None = None) -> bool:
 
 
 def base_points(rarity: str) -> int:
-    return RARITY_BY_NAME.get(rarity, (0.0, 1))[1]
+    """Flat one point per duck while rarity is neutralized."""
+    return FLAT_DUCK_POINTS
 
 
 def bang_outcome(rarity: str, current_streak: int, rng: random.Random | None = None) -> ActionOutcome:
-    """Trying to shoot the duck. Streak gives a small accuracy bonus."""
+    """Trying to shoot the duck. Streak gives a small accuracy bonus.
+    Rarity is accepted but ignored — flat 0.80 base hit chance."""
     r = rng if rng is not None else random
-    # Higher rarity is harder to hit. Streak gives a tiny bonus, capped.
-    hit_chance = {
-        "common":    0.80,
-        "uncommon":  0.70,
-        "rare":      0.55,
-        "epic":      0.40,
-        "legendary": 0.25,
-    }.get(rarity, 0.70)
-    hit_chance = min(0.95, hit_chance + min(current_streak, 5) * 0.02)
+    hit_chance = min(0.95, 0.80 + min(current_streak, 5) * 0.02)
     if r.random() <= hit_chance:
-        pts = base_points(rarity)
+        pts = FLAT_DUCK_POINTS
         return ActionOutcome(
             success=True,
             points_delta=pts,
             streak_delta=1,
-            message=f"You shot the {rarity} duck! +{pts}",
+            message=f"You shot the duck! +{pts}",
             resolves_duck=True,
         )
     return ActionOutcome(
@@ -120,12 +131,13 @@ def bang_outcome(rarity: str, current_streak: int, rng: random.Random | None = N
 
 
 # --------------------------------------------------------------------- bef
-# bef is now a two-stage decision:
-#   1) Dice pre-roll (rarity-biased)
-#   2) AI verdict (gates the roll - can override accept to refuse)
+# bef is a two-stage decision:
+#   1) Dice pre-roll (currently always passes — rarity neutralized)
+#   2) AI verdict (gates the roll — can override accept to refuse)
 # The pure scoring helpers here only know about the dice and verdict; the
 # AI call and the per-user retry challenge live in the service layer.
 
+# Preserved for historical compatibility. Not consulted by bef_dice_passes.
 BEF_BASE_CHANCE: dict[str, float] = {
     "common":    0.85,
     "uncommon":  0.75,
@@ -136,19 +148,19 @@ BEF_BASE_CHANCE: dict[str, float] = {
 
 
 def bef_dice_passes(rarity: str, rng: random.Random | None = None) -> bool:
-    """Step 1 of the bef flow. True means the AI gets to weigh in."""
-    r = rng if rng is not None else random
-    return r.random() <= BEF_BASE_CHANCE.get(rarity, 0.7)
+    """Step 1 of the bef flow. With rarity neutralized, the dice always
+    passes and the outcome is decided entirely by the AI verdict."""
+    return True
 
 
 def bef_success_outcome(rarity: str, ai_line: str | None) -> ActionOutcome:
-    """The duck agreed to be friends."""
-    pts = max(1, base_points(rarity) // 2 + 1)
+    """The duck agreed to be friends. Flat one-point payout."""
+    pts = FLAT_DUCK_POINTS
     return ActionOutcome(
         success=True,
         points_delta=pts,
         streak_delta=1,
-        message=ai_line or f"You befriended the {rarity} duck! +{pts}",
+        message=ai_line or f"You befriended the duck! +{pts}",
         resolves_duck=True,
     )
 
@@ -182,16 +194,10 @@ _IGNORE_WANDER_FLAVOR: tuple[str, ...] = (
 
 
 def ignore_outcome(rarity: str, rng: random.Random | None = None) -> ActionOutcome:
-    """Sometimes the duck notices and stays; otherwise it wanders off."""
+    """Sometimes the duck notices and stays; otherwise it wanders off.
+    Rarity is accepted but ignored — flat 0.20 notice chance."""
     r = rng if rng is not None else random
-    # Rarer ducks are more likely to take offence at being ignored.
-    noticed_chance = {
-        "common":    0.15,
-        "uncommon":  0.25,
-        "rare":      0.40,
-        "epic":      0.55,
-        "legendary": 0.75,
-    }.get(rarity, 0.20)
+    noticed_chance = 0.20
     if r.random() <= noticed_chance:
         return ActionOutcome(
             success=True,

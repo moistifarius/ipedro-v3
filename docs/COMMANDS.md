@@ -54,27 +54,30 @@ bot's admin user. Fields:
 - `/duckhunt` — force-spawn a duck (requires duckhunt enabled for this chat).
 - `/duckstats` — leaderboard for this chat.
 - `/duckfriends` — your roster of ducks you've befriended in this chat.
-- `/quackflag` — is there an active duck right now? (Rarity is hidden;
-  discover it through interaction.)
+- `/quackflag` — is there an active duck right now?
 
 Reply tokens (case-insensitive): `bang`, `bef`, `ignore`.
 
 #### How `bef` works
 
-`bef` is a two-stage decision:
+The AI plays the duck and decides whether it actually wants to be
+friends. It's chaotic — usually agrees, occasionally refuses for absurd
+or trivial reasons.
 
-1. A rarity-biased dice roll. If the roll fails, the duck refuses.
-2. If the roll passes, the AI plays the duck and decides whether it
-   actually wants to be friends. Rare and legendary ducks are snootier and
-   more likely to refuse for absurd reasons.
+(Rarity tiers used to bias this decision toward refusal for rarer
+ducks, plus an extra pre-AI dice gate. That whole layer is currently
+disabled — every duck behaves identically. The column is preserved so
+the tiering can be re-enabled later by flipping the helpers in
+`ipedro/duckhunt/scoring.py` back to their lookup forms.)
 
-A successful `bef` resolves the duck, awards a befriended point, and adds
-the duck to your friendship roster (`/duckfriends`). A refusal does NOT
-hurt your stats, but the duck stays — and you can't simply try `bef`
-again. The bot will post a retry **challenge** (a captcha, a weird trivia
-question, or "write me a recipe"). Reply directly to that challenge
-message with your attempt; if the AI judges it as good-faith, the
-challenge clears and you can try `bef` again.
+A successful `bef` resolves the duck, awards a befriended point, and
+adds the duck to your friendship roster (`/duckfriends`); the bot
+follows up with a `/duckname <id> <name>` hint so you can label it.
+A refusal does NOT hurt your stats, but the duck stays — and you can't
+simply try `bef` again. The bot will post a retry **challenge** (a
+captcha, a weird trivia question, or "write me a recipe"). Reply
+directly to that challenge message with your attempt; if the AI judges
+it as good-faith, the challenge clears and you can try `bef` again.
 
 Ducks may also wander off on their own at any time — more likely as they
 hang around longer, and almost certainly gone after a day.

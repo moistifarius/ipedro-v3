@@ -13,7 +13,6 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from ipedro.duckhunt.spawner import rarity_hint
 from ipedro.handlers.common import display_name, require_admin
 from ipedro.handlers.duckhunt import _issue_bef_challenge
 from ipedro.runtime import Runtime
@@ -95,9 +94,8 @@ def build_router(rt: Runtime) -> Router:
         duck = await rt.duckhunt.spawn_duck(
             msg.chat.id, rt.settings.duckhunt_duck_lifetime_seconds,
         )
-        hint = rarity_hint(duck.rarity)
         await msg.reply(
-            f"🦆 quack!{hint}\n[debug] actual rarity: {duck.rarity}",
+            f"🦆 quack!\n[debug] duck id: {duck.id}",
             disable_notification=True,
         )
 

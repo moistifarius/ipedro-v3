@@ -19,7 +19,7 @@ command, and ships in a Docker container that runs comfortably on Unraid.
   facts, embeddings — assembled on demand and token-budgeted.
 - **Per-chat config**: response policy, persona, ambient probability,
   duckhunt toggle, voice transcription toggle, memory toggle.
-- **Improved Duckhunt** with rarity tiers (common → legendary), points,
+- **Duckhunt** with flat per-duck points (rarity tiers temporarily disabled — every duck behaves identically; column preserved for future revival),
   streaks, miss tracking, leaderboards, per-user cooldowns, AI-gated
   `bef` (the duck personality decides whether to be your friend), and a
   retry-challenge mechanic. State is restart-safe.
