@@ -53,24 +53,41 @@ _SUBS = {
 }
 
 
-def garble_pager(text: str, *, rng: random.Random | None = None) -> str:
+def garble_pager(
+    text: str,
+    *,
+    intensity: float = 0.5,
+    rng: random.Random | None = None,
+) -> str:
     """Pure-python pager-style garble. Deterministic when ``rng`` is seeded.
 
-    Char-level: low-rate drops and leet substitutions. Word-level: caps
-    and blackouts. Whole-string: possible trailing truncation. Always
-    returns at least ``***`` so callers don't have to handle empty.
+    ``intensity`` ∈ [0, 1] scales every probability. At 0 the output is
+    still pager-flavored (some caps, the occasional sub) — the signal
+    is *always* a little degraded, that's the conceit. At 1 it's
+    barely-readable static. Defaults to 0.5 (moderate corruption).
+
+    Char-level: drops and leet substitutions. Word-level: ALL CAPS and
+    full-word blackouts. Whole-string: possible trailing truncation.
+    Always returns at least ``***`` so callers don't have to handle empty.
     """
     r = rng if rng is not None else random
     text = (text or "").strip()[:_MAX_MESSAGE_LEN]
     if not text:
         return "***"
 
+    i = max(0.0, min(1.0, intensity))
+    drop_p     = 0.02 + 0.18 * i      # 0.02 → 0.20
+    sub_p      = 0.05 + 0.30 * i      # 0.05 → 0.35  (rolled after drop)
+    blackout_p = 0.02 + 0.20 * i      # 0.02 → 0.22
+    caps_p     = 0.20 + 0.40 * i      # 0.20 → 0.60
+    trunc_p    = 0.10 + 0.50 * i      # 0.10 → 0.60
+
     out_chars: list[str] = []
     for c in text:
         roll = r.random()
-        if roll < 0.04:                 # drop
+        if roll < drop_p:
             continue
-        if roll < 0.14 and c.isalpha():
+        if roll < drop_p + sub_p and c.isalpha():
             sub = _SUBS.get(c.lower())
             if sub is not None:
                 out_chars.append(sub)
@@ -82,17 +99,29 @@ def garble_pager(text: str, *, rng: random.Random | None = None) -> str:
     transformed: list[str] = []
     for w in words:
         roll = r.random()
-        if roll < 0.05:
+        if roll < blackout_p:
             transformed.append("***")
-        elif roll < 0.40:
+        elif roll < blackout_p + caps_p:
             transformed.append(w.upper())
         else:
             transformed.append(w)
     s = " ".join(transformed)
 
-    if r.random() < 0.25 and len(s) > 30:
-        s = s[: r.randint(20, len(s) - 5)] + "…"
+    if r.random() < trunc_p and len(s) > 30:
+        # More intense = cut earlier on average.
+        lo = 20
+        hi = max(lo + 5, int(len(s) * (1.0 - 0.6 * i)))
+        cut = r.randint(lo, hi)
+        s = s[:cut] + "…"
     return s.strip() or "***"
+
+
+def _roll_intensity(rng: random.Random | None = None) -> float:
+    """Per-broadcast intensity. Triangular(0.15, 0.95, mode=0.5) so most
+    transmissions are mid-corrupted with occasional pristine-ish and
+    occasional total static. Pure python — random.triangular is stdlib."""
+    r = rng if rng is not None else random
+    return r.triangular(0.15, 0.95, 0.5)
 
 
 def _wrap(body: str, *, rng: random.Random | None = None) -> str:
@@ -170,8 +199,10 @@ async def _maybe_broadcast(bot: Bot, db: Database) -> None:
     dest_id = await _pick_destination(db, opted_in, exclude=source_id)
     if dest_id is None:
         return
-    body = garble_pager(raw)
+    intensity = _roll_intensity()
+    body = garble_pager(raw, intensity=intensity)
     text = _wrap(body)
+    log.debug("Ether intensity=%.2f for %s → %s", intensity, source_id, dest_id)
     try:
         sent = await bot.send_message(
             dest_id, text,
