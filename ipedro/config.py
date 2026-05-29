@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     openai_transcription_model: str = "whisper-1"
     openai_embedding_model: str = "text-embedding-3-small"
     openai_embedding_dim: int = 1536
+    # Text-to-speech for the /ether radio-voice broadcast. The synthesized
+    # speech is intelligible; the radio FX layer adds the degradation.
+    openai_tts_model: str = "gpt-4o-mini-tts"
+    openai_tts_voice: str = "onyx"
 
     # Anthropic — used for text completions (chat, summaries, /a, /whatdid, etc.).
     # `text_provider` runtime-selects which provider answers text calls; falls

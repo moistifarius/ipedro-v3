@@ -22,12 +22,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot
+from aiogram.types import BufferedInputFile
 
 from ipedro.bot_messages import track
 from ipedro.db.pool import Database
+from ipedro.radio_fx import apply_radio_effect
 from ipedro.silenced_chats import is_silenced
 
 log = logging.getLogger(__name__)
@@ -45,6 +48,16 @@ _WRAPPERS = (
     "📟 ▓▓▓ signal acquired ▓▓▓\n\n{body}",
     "📟 ...catching a stray page...\n\n{body}",
     "📟 MSG-{code}\n{body}",
+)
+
+# Captions used on the voice-note variant (no body text — the audio IS
+# the message).
+_VOICE_CAPTIONS = (
+    "📻 ...incoming transmission...",
+    "📻 [stray signal in the static]",
+    "📻 ▓▓▓ ...do you copy... ▓▓▓",
+    "📻 something on the airwaves",
+    "📻 *crackle* ...is anyone receiving...",
 )
 
 _SUBS = {
@@ -183,6 +196,115 @@ async def _pick_destination(
     if not eligible:
         return None
     return random.choice(eligible)
+
+
+def _pick_destination_any(all_opted_in: list[int], exclude: int) -> int | None:
+    """Pick any opted-in chat other than ``exclude``, ignoring cooldown.
+
+    Used by the manual /ether command: a deliberate transmission isn't
+    rate-limited by the receiver's auto-loop cooldown. We still only land
+    in chats that have opted into the ether network.
+    """
+    candidates = [c for c in all_opted_in if c != exclude]
+    return random.choice(candidates) if candidates else None
+
+
+async def _stamp_receiver(db: Database, dest_id: int) -> None:
+    """Record that ``dest_id`` just received a transmission so the auto
+    loop respects the 4h cooldown afterwards."""
+    await db.execute(
+        "INSERT INTO chat_state (chat_id, last_ether_at) "
+        "VALUES ($1, NOW()) "
+        "ON CONFLICT (chat_id) DO UPDATE "
+        "SET last_ether_at = EXCLUDED.last_ether_at",
+        dest_id,
+    )
+
+
+@dataclass
+class ManualEtherResult:
+    """Outcome of a manual /ether transmission.
+
+    ``mode`` is one of:
+      * ``"voice"``   — radio-treated audio was sent to ``dest_id``
+      * ``"text"``    — audio path unavailable; garbled text sent instead
+      * ``"no_dest"`` — no other ether-enabled chat to send to
+      * ``"no_audio"``— a voice note was given but ffmpeg couldn't process
+                        it (and there's no text to fall back to)
+    """
+    mode: str
+    dest_id: int | None = None
+
+
+async def manual_broadcast(
+    bot: Bot,
+    db: Database,
+    openai,
+    source_chat_id: int,
+    *,
+    text: str | None = None,
+    voice_bytes: bytes | None = None,
+) -> ManualEtherResult:
+    """Transmit a user-supplied message into the ether as a radio voice.
+
+    Resolution order for the audio:
+      1. ``voice_bytes`` (a real voice note) → radio FX.
+      2. ``text`` → TTS → radio FX.
+    If the audio path fails and we have ``text``, fall back to a garbled
+    text broadcast. Destination is a random *other* ether-enabled chat.
+    """
+    opted_in = await _opted_in_chats(db)
+    dest_id = _pick_destination_any(opted_in, exclude=source_chat_id)
+    if dest_id is None:
+        return ManualEtherResult(mode="no_dest")
+
+    intensity = _roll_intensity()
+
+    # 1) Obtain the source audio (real recording, or TTS of the text).
+    src_audio = voice_bytes
+    if src_audio is None and text:
+        src_audio = await openai.text_to_speech(text, chat_id=source_chat_id)
+
+    # 2) Apply the radio effect and send as a voice note.
+    if src_audio:
+        treated = await apply_radio_effect(src_audio, intensity=intensity)
+        if treated:
+            caption = random.choice(_VOICE_CAPTIONS)
+            try:
+                sent = await bot.send_voice(
+                    dest_id,
+                    BufferedInputFile(treated, filename="ether.ogg"),
+                    caption=caption,
+                    disable_notification=is_silenced(dest_id),
+                )
+                track(dest_id, sent.message_id, caption)
+                await _stamp_receiver(db, dest_id)
+                log.info(
+                    "Ether voice: %s → %s (intensity=%.2f).",
+                    source_chat_id, dest_id, intensity,
+                )
+                return ManualEtherResult(mode="voice", dest_id=dest_id)
+            except Exception as exc:  # pragma: no cover - telegram hiccup
+                log.warning("Ether voice send failed → %s: %s", dest_id, exc)
+
+    # 3) Fallbacks: text → garbled text broadcast; voice-only → give up.
+    if text:
+        body = garble_pager(text, intensity=intensity)
+        msg_text = _wrap(body)
+        try:
+            sent = await bot.send_message(
+                dest_id, msg_text,
+                disable_notification=is_silenced(dest_id),
+            )
+            track(dest_id, sent.message_id, msg_text)
+            await _stamp_receiver(db, dest_id)
+            log.info("Ether text fallback: %s → %s.", source_chat_id, dest_id)
+            return ManualEtherResult(mode="text", dest_id=dest_id)
+        except Exception as exc:  # pragma: no cover
+            log.warning("Ether text send failed → %s: %s", dest_id, exc)
+            return ManualEtherResult(mode="no_audio", dest_id=dest_id)
+
+    return ManualEtherResult(mode="no_audio", dest_id=dest_id)
 
 
 async def broadcast_now(bot: Bot, db: Database) -> tuple[int, int] | None:

@@ -20,6 +20,7 @@ openai_usage with token counts and a rough USD cost estimate.
 from __future__ import annotations
 
 import base64
+import inspect
 import logging
 from typing import Any, BinaryIO, Literal, Sequence
 
@@ -72,6 +73,9 @@ _IMAGE_PRICE = {
     "dall-e-2": 0.02,
 }
 _AUDIO_PER_MINUTE = 0.006
+# Rough TTS cost estimate for the usage log, charged per 1k input chars.
+# Good enough for the /cost rollup; exact pricing varies by model.
+_TTS_PER_1K_CHARS = 0.015
 
 TextProvider = Literal["claude", "openai"]
 
@@ -139,6 +143,8 @@ class AIClient:
         transcription_model: str = "whisper-1",
         embedding_model: str = "text-embedding-3-small",
         embedding_dim: int = 1536,
+        tts_model: str = "gpt-4o-mini-tts",
+        tts_voice: str = "onyx",
     ) -> None:
         self._openai = (
             AsyncOpenAI(api_key=api_key, organization=organization or None)
@@ -165,6 +171,8 @@ class AIClient:
         self.transcription_model = transcription_model
         self.embedding_model = embedding_model
         self.embedding_dim = embedding_dim
+        self.tts_model = tts_model
+        self.tts_voice = tts_voice
         self._usage_db: Database | None = None
 
     # back-compat property alias so callers can still poke _client.* in tests
@@ -452,6 +460,65 @@ class AIClient:
         except Exception as exc:
             log.error("OpenAI translate error: %s", exc)
             return None
+
+    async def text_to_speech(
+        self, text: str, *, voice: str | None = None, fmt: str = "mp3",
+        chat_id: int | None = None,
+    ) -> bytes | None:
+        """Synthesize speech and return the raw audio bytes (default mp3).
+
+        Returns None if the OpenAI key is absent, the text is empty, or
+        the call errors — callers fall back to a text broadcast.
+        """
+        if self._openai is None:
+            log.error("TTS requested but no openai_api_key.")
+            return None
+        text = (text or "").strip()
+        if not text:
+            return None
+        text = text[:4000]  # API input cap; keep transmissions short anyway
+        try:
+            resp = await self._openai.audio.speech.create(
+                model=self.tts_model,
+                voice=voice or self.tts_voice,
+                input=text,
+                response_format=fmt,
+            )
+            data = await _read_binary_response(resp)
+            if not data:
+                return None
+            await self._log_usage(
+                kind="tts", model=self.tts_model, chat_id=chat_id,
+                cost_usd=(len(text) / 1000.0) * _TTS_PER_1K_CHARS,
+            )
+            return data
+        except Exception as exc:
+            log.error("OpenAI TTS error: %s", exc)
+            return None
+
+
+async def _read_binary_response(resp: Any) -> bytes | None:
+    """Pull bytes out of the OpenAI speech response across SDK versions.
+
+    Newer SDKs return an object exposing ``.content`` (already-read bytes);
+    some expose ``.read()``/``.aread()``. Try them in order.
+    """
+    content = getattr(resp, "content", None)
+    if isinstance(content, (bytes, bytearray)):
+        return bytes(content)
+    for attr in ("aread", "read"):
+        fn = getattr(resp, attr, None)
+        if fn is None:
+            continue
+        try:
+            out = fn()
+            if inspect.isawaitable(out):
+                out = await out
+            if isinstance(out, (bytes, bytearray)):
+                return bytes(out)
+        except Exception:  # pragma: no cover - defensive
+            continue
+    return None
 
 
 # Back-compat alias — historical name used everywhere in the codebase.

@@ -24,6 +24,7 @@ from ipedro.handlers import basics as basics_h
 from ipedro.handlers import chat as chat_h
 from ipedro.handlers import debug as debug_h
 from ipedro.handlers import duckhunt as duck_h
+from ipedro.handlers import ether as ether_h
 from ipedro.handlers import karma as karma_h
 from ipedro.handlers import mod as mod_h
 from ipedro.handlers import utility as utility_h
@@ -75,6 +76,8 @@ async def build_runtime(settings: Settings) -> Runtime:
         transcription_model=settings.openai_transcription_model,
         embedding_model=settings.openai_embedding_model,
         embedding_dim=settings.openai_embedding_dim,
+        tts_model=settings.openai_tts_model,
+        tts_voice=settings.openai_tts_voice,
     )
     openai.attach_usage_db(db)
     log.info(
@@ -126,6 +129,7 @@ def build_dispatcher(rt: Runtime) -> Dispatcher:
     dp.include_router(karma_h.build_router(rt))
     dp.include_router(ai_h.build_router(rt))
     dp.include_router(duck_h.build_router(rt))
+    dp.include_router(ether_h.build_router(rt))
     dp.include_router(chat_h.build_router(rt))
     return dp
 

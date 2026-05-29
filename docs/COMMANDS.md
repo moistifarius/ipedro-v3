@@ -50,6 +50,25 @@ bot's admin user. Fields:
 | `memory` | `on` / `off` — store messages and build context from history |
 | `ether` | `on` / `off` — opt this chat into cross-chat pager garbling (📟). Every ~hour, a recent message from any other ether-opted chat may be picked, garbled (dropped chars, leet subs, blackouts, truncation), and broadcast here with a spooky wrapper. Receiver cooldown: 4h. Needs ≥ 2 chats opted in. |
 
+### `/ether <text>` (and on voice notes)
+
+Manually transmit into the ether, as a **far-away radio voice** rather
+than the ambient loop's garbled text:
+
+- `/ether <text>` — your text is spoken aloud (OpenAI TTS) then drenched
+  in static, bandpass, and tremolo so it sounds like a distant radio
+  signal, and broadcast as a voice note.
+- `/ether` as the **caption of a voice note**, or as a **reply to a voice
+  note** — your actual recording gets the radio treatment instead.
+- `/ether` replying to a **text** message — transmits that message's text.
+
+The destination is a random *other* ether-enabled chat, chosen
+anonymously (the manual command ignores the 4h receiver cooldown but
+still only lands in opted-in chats). Each transmission rolls a random
+intensity, so some come through clearer than others. If TTS or the audio
+toolchain (ffmpeg) is unavailable, a text `/ether` falls back to a
+garbled text broadcast. Requires another chat to have `ether` enabled.
+
 ### Duckhunt
 
 - `/duckhunt` — force-spawn a duck (requires duckhunt enabled for this chat).

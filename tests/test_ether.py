@@ -3,8 +3,16 @@
 from __future__ import annotations
 
 import random
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
-from ipedro.ether import _roll_intensity, _wrap, garble_pager
+import pytest
+
+from ipedro import ether
+from ipedro.ether import (
+    _pick_destination_any, _roll_intensity, _wrap, garble_pager,
+    manual_broadcast,
+)
 
 
 def test_garble_is_deterministic_with_seeded_rng() -> None:
@@ -108,3 +116,104 @@ def test_wrap_msg_code_template_has_zero_padded_code() -> None:
             return
     # If we never hit it in 50 seeds something's structurally wrong.
     raise AssertionError("MSG- template never selected in 50 seeds")
+
+
+# --------------------------------------------------------------- manual /ether
+def _fake_db(opted_in):
+    """Minimal Database stub: fetch() returns the opted-in chat rows."""
+    return SimpleNamespace(
+        fetch=AsyncMock(return_value=[{"chat_id": c} for c in opted_in]),
+        execute=AsyncMock(return_value="INSERT 0 1"),
+    )
+
+
+def _fake_bot():
+    return SimpleNamespace(
+        send_voice=AsyncMock(return_value=SimpleNamespace(message_id=111)),
+        send_message=AsyncMock(return_value=SimpleNamespace(message_id=222)),
+    )
+
+
+def test_pick_destination_any_excludes_source():
+    assert _pick_destination_any([5], exclude=5) is None
+    assert _pick_destination_any([5, 9], exclude=5) == 9
+    assert _pick_destination_any([], exclude=5) is None
+
+
+@pytest.mark.asyncio
+async def test_manual_broadcast_voice_path(monkeypatch):
+    """A real voice note → radio FX → send_voice, cooldown stamped."""
+    monkeypatch.setattr(ether, "apply_radio_effect",
+                        AsyncMock(return_value=b"OGGTREATED"))
+    db = _fake_db([100, 200])
+    bot = _fake_bot()
+    openai = SimpleNamespace(text_to_speech=AsyncMock())
+    res = await manual_broadcast(
+        bot, db, openai, source_chat_id=100, voice_bytes=b"rawvoice",
+    )
+    assert res.mode == "voice"
+    assert res.dest_id == 200
+    bot.send_voice.assert_awaited_once()
+    openai.text_to_speech.assert_not_called()   # had real audio, no TTS
+    db.execute.assert_awaited()                 # last_ether_at stamped
+
+
+@pytest.mark.asyncio
+async def test_manual_broadcast_text_uses_tts_then_fx(monkeypatch):
+    monkeypatch.setattr(ether, "apply_radio_effect",
+                        AsyncMock(return_value=b"OGGTREATED"))
+    db = _fake_db([100, 200])
+    bot = _fake_bot()
+    openai = SimpleNamespace(text_to_speech=AsyncMock(return_value=b"mp3"))
+    res = await manual_broadcast(
+        bot, db, openai, source_chat_id=100, text="hello out there",
+    )
+    assert res.mode == "voice"
+    openai.text_to_speech.assert_awaited_once()
+    bot.send_voice.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_manual_broadcast_falls_back_to_text(monkeypatch):
+    """FX unavailable + we have text → garbled text broadcast."""
+    monkeypatch.setattr(ether, "apply_radio_effect",
+                        AsyncMock(return_value=None))
+    db = _fake_db([100, 200])
+    bot = _fake_bot()
+    openai = SimpleNamespace(text_to_speech=AsyncMock(return_value=b"mp3"))
+    res = await manual_broadcast(
+        bot, db, openai, source_chat_id=100, text="hello out there",
+    )
+    assert res.mode == "text"
+    bot.send_message.assert_awaited_once()
+    bot.send_voice.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_manual_broadcast_no_destination(monkeypatch):
+    monkeypatch.setattr(ether, "apply_radio_effect", AsyncMock())
+    db = _fake_db([100])   # only the source is opted in
+    bot = _fake_bot()
+    openai = SimpleNamespace(text_to_speech=AsyncMock())
+    res = await manual_broadcast(
+        bot, db, openai, source_chat_id=100, text="anybody?",
+    )
+    assert res.mode == "no_dest"
+    bot.send_voice.assert_not_called()
+    bot.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_manual_broadcast_voice_only_fx_fail_is_no_audio(monkeypatch):
+    """Voice given, FX fails, no text to fall back on → no_audio."""
+    monkeypatch.setattr(ether, "apply_radio_effect",
+                        AsyncMock(return_value=None))
+    db = _fake_db([100, 200])
+    bot = _fake_bot()
+    openai = SimpleNamespace(text_to_speech=AsyncMock())
+    res = await manual_broadcast(
+        bot, db, openai, source_chat_id=100, voice_bytes=b"rawvoice",
+    )
+    assert res.mode == "no_audio"
+    bot.send_voice.assert_not_called()
+    bot.send_message.assert_not_called()

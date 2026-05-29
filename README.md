@@ -20,9 +20,10 @@ command, and ships in a Docker container that runs comfortably on Unraid.
 - **Per-chat config**: response policy, persona, ambient probability,
   duckhunt toggle, voice transcription toggle, memory toggle, comic /
   fortune / share-photo opt-ins, and **ether** — opt in to cross-chat
-  pager-style garbling, where a recent message from another opted-in
-  chat may show up in yours, corrupted with dropped chars, leet subs,
-  blackouts, and pager truncation.
+  transmissions, where a recent message from another opted-in chat may
+  show up in yours: either as pager-style garbled text (the ambient
+  loop) or, via `/ether`, as a far-away **radio voice** (TTS or a real
+  voice note, run through an ffmpeg static/bandpass/tremolo effect).
 - **Duckhunt** with flat per-duck points (rarity tiers temporarily disabled — every duck behaves identically; column preserved for future revival),
   streaks, miss tracking, leaderboards, per-user cooldowns, AI-gated
   `bef` (the duck personality decides whether to be your friend), and a
@@ -46,6 +47,12 @@ python -m ipedro
 A running Postgres with the `vector` extension is required for full memory.
 Without it, the bot still works — semantic retrieval is disabled and a
 warning is logged.
+
+`ffmpeg` must be on `PATH` for the `/ether` radio-voice effect (the Docker
+image installs it; for local runs use your package manager, e.g.
+`apt install ffmpeg` or `brew install ffmpeg`). Without it, `/ether <text>`
+degrades to a garbled text broadcast and voice-note transmission is
+skipped.
 
 ## Docker / Unraid
 
@@ -84,6 +91,7 @@ a second message.
 | `/roast @user`, `/compliment @user` | What it says on the tin |
 | `/lyric <line>` | Bot misheard it |
 | `/meme top \| bottom` | Generate a meme image |
+| `/ether <text>` (or on/replying to a voice note) | Transmit a message into another ether-enabled chat as a staticky far-away **radio voice** — text is TTS'd, a real voice note is used as-is, then both get a bandpass + static + tremolo ffmpeg treatment |
 | `/duckhunt`, `/quackflag` | Spawn / check current duck |
 | `/duckstats`, `/duckfriends`, `/duckname <id> <name>`, `/global_leaderboard` | Duckhunt stats and management |
 | `/quote`, `/quotes`, `/unquote <id>` | Save / list / delete quotes |

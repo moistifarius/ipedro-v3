@@ -100,3 +100,58 @@ async def test_embed_returns_none_for_empty_text():
     client = OpenAIClient(api_key="x", text_provider="openai")
     out = await client.embed("   ")
     assert out is None
+
+
+# ----------------------------------------------------------------- TTS / speech
+class _FakeSpeechContent:
+    """Mimics the binary speech response that exposes ``.content``."""
+    def __init__(self, data: bytes):
+        self.content = data
+
+
+class _FakeSpeechReadable:
+    """Mimics an SDK variant exposing async ``.aread()`` instead."""
+    def __init__(self, data: bytes):
+        self._data = data
+
+    async def aread(self) -> bytes:
+        return self._data
+
+
+def _install_speech(client, resp):
+    class _Speech:
+        async def create(self, **kwargs):
+            return resp
+
+    class _Audio:
+        speech = _Speech()
+
+    client._client.audio = _Audio()
+
+
+@pytest.mark.asyncio
+async def test_text_to_speech_returns_bytes_via_content():
+    client = OpenAIClient(api_key="x", text_provider="openai")
+    _install_speech(client, _FakeSpeechContent(b"OGGDATA"))
+    out = await client.text_to_speech("hello world")
+    assert out == b"OGGDATA"
+
+
+@pytest.mark.asyncio
+async def test_text_to_speech_returns_bytes_via_aread():
+    client = OpenAIClient(api_key="x", text_provider="openai")
+    _install_speech(client, _FakeSpeechReadable(b"OPUSDATA"))
+    out = await client.text_to_speech("hello world")
+    assert out == b"OPUSDATA"
+
+
+@pytest.mark.asyncio
+async def test_text_to_speech_none_for_empty_text():
+    client = OpenAIClient(api_key="x", text_provider="openai")
+    assert await client.text_to_speech("   ") is None
+
+
+@pytest.mark.asyncio
+async def test_text_to_speech_none_without_api_key():
+    client = OpenAIClient(api_key=None, text_provider="openai")
+    assert await client.text_to_speech("hello") is None
