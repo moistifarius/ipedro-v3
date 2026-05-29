@@ -13,6 +13,7 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from ipedro.ether import broadcast_now as ether_broadcast_now
 from ipedro.handlers.common import display_name, require_admin
 from ipedro.handlers.duckhunt import _issue_bef_challenge
 from ipedro.runtime import Runtime
@@ -24,6 +25,7 @@ _HELP = (
     "Debug commands (admin only):\n"
     "  /debug_help — this list\n"
     "  /debug_sharephoto — force the Dude to generate + post a photo now\n"
+    "  /debug_ether — force one ether broadcast right now (needs ≥ 2 ether-enabled chats)\n"
     "  /debug_challenge — issue a random bef challenge (captcha|trivia|recipe)\n"
     "  /debug_captcha — issue a captcha challenge\n"
     "  /debug_trivia — issue a trivia challenge\n"
@@ -51,6 +53,25 @@ def build_router(rt: Runtime) -> Router:
             return
         await msg.reply("Generating photo…", disable_notification=True)
         await _take_and_post_photo(msg.chat.id, rt.bot, rt.openai)
+
+    @r.message(Command("debug_ether"))
+    async def debug_ether(msg: Message) -> None:
+        if not await require_admin(msg, rt.settings.admin_ids):
+            return
+        result = await ether_broadcast_now(rt.bot, rt.db)
+        if result is None:
+            await msg.reply(
+                "Ether broadcast couldn't fire — need ≥ 2 ether-enabled "
+                "chats with a recent eligible message in one and an "
+                "idle (no 4h cooldown) destination in another.",
+                disable_notification=True,
+            )
+            return
+        source_id, dest_id = result
+        await msg.reply(
+            f"📟 Ether: {source_id} → {dest_id}.",
+            disable_notification=True,
+        )
 
     async def _force_challenge(msg: Message, kind: str | None) -> None:
         if not await require_admin(msg, rt.settings.admin_ids):

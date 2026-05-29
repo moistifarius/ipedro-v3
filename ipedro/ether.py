@@ -185,24 +185,27 @@ async def _pick_destination(
     return random.choice(eligible)
 
 
-async def _maybe_broadcast(bot: Bot, db: Database) -> None:
-    if random.random() >= _DROP_CHANCE:
-        return
+async def broadcast_now(bot: Bot, db: Database) -> tuple[int, int] | None:
+    """Force one ether broadcast, bypassing the per-tick dice roll.
+
+    Returns ``(source_chat_id, dest_chat_id)`` on success or ``None`` if
+    there's no eligible source message, no idle destination, or fewer
+    than two opted-in chats. Used by ``_maybe_broadcast`` after rolling
+    dice, and by ``/debug_ether`` to verify the path end-to-end.
+    """
     opted_in = await _opted_in_chats(db)
     if len(opted_in) < 2:
-        # Need at least two opted-in chats for a cross-broadcast.
-        return
+        return None
     picked = await _pick_source_message(db, opted_in)
     if picked is None:
-        return
+        return None
     source_id, raw = picked
     dest_id = await _pick_destination(db, opted_in, exclude=source_id)
     if dest_id is None:
-        return
+        return None
     intensity = _roll_intensity()
     body = garble_pager(raw, intensity=intensity)
     text = _wrap(body)
-    log.debug("Ether intensity=%.2f for %s → %s", intensity, source_id, dest_id)
     try:
         sent = await bot.send_message(
             dest_id, text,
@@ -216,9 +219,20 @@ async def _maybe_broadcast(bot: Bot, db: Database) -> None:
             "SET last_ether_at = EXCLUDED.last_ether_at",
             dest_id,
         )
-        log.info("Ether broadcast: %s → %s.", source_id, dest_id)
+        log.info(
+            "Ether broadcast: %s → %s (intensity=%.2f).",
+            source_id, dest_id, intensity,
+        )
+        return source_id, dest_id
     except Exception as exc:  # pragma: no cover
         log.warning("Ether broadcast failed (%s → %s): %s", source_id, dest_id, exc)
+        return None
+
+
+async def _maybe_broadcast(bot: Bot, db: Database) -> None:
+    if random.random() >= _DROP_CHANCE:
+        return
+    await broadcast_now(bot, db)
 
 
 async def run_ether_loop(bot: Bot, db: Database, stop: asyncio.Event) -> None:

@@ -18,7 +18,11 @@ command, and ships in a Docker container that runs comfortably on Unraid.
 - **Postgres + pgvector** memory: raw messages, rolling summaries, durable
   facts, embeddings — assembled on demand and token-budgeted.
 - **Per-chat config**: response policy, persona, ambient probability,
-  duckhunt toggle, voice transcription toggle, memory toggle.
+  duckhunt toggle, voice transcription toggle, memory toggle, comic /
+  fortune / share-photo opt-ins, and **ether** — opt in to cross-chat
+  pager-style garbling, where a recent message from another opted-in
+  chat may show up in yours, corrupted with dropped chars, leet subs,
+  blackouts, and pager truncation.
 - **Duckhunt** with flat per-duck points (rarity tiers temporarily disabled — every duck behaves identically; column preserved for future revival),
   streaks, miss tracking, leaderboards, per-user cooldowns, AI-gated
   `bef` (the duck personality decides whether to be your friend), and a
@@ -107,6 +111,9 @@ a second message.
 |---|---|
 | `/list_chat_ids`, `/pick_chat` | Browse known chats (table / picker) |
 | `/send_message <chat_id> <text>` | Send a message to a chat as the bot |
+| `/delete_msg [chat_id]` | Picker → pick one of the bot's recent (≤ 20) messages in that chat to delete |
+| `/delete_last [chat_id] [N]` | Delete the bot's last N (≤ 20) messages in a chat; confirm prompt when N > 1 |
+| `/silent_chat <chat_id>`, `/unsilent_chat <chat_id>`, `/silenced_chats` | Admin-only override: silenced chats get `disable_notification=True` for celebration / fortune / retro / confession / ether sends. Not exposed in `/chat_config`. Reachable via `/manage → 💬 Chats → 🤫 Silenced chats`. |
 | `/logs [N] [filter]` | Tail the program log ring buffer |
 | `/cmdlog` | Command audit log from the DB |
 | `/cost [chat_id]` | AI spend last 7 days (works for either provider) |
@@ -124,7 +131,7 @@ a second message.
 | `/memory_search [chat_id] <query>` | Semantic-search the embedding store; shows top hits with similarity scores |
 | `/facts_chat` | Legacy alias for the `/memory_facts` picker |
 | `/debug_help` | Index of the debug-only commands |
-| `/debug_captcha`, `/debug_challenge`, `/debug_trivia`, `/debug_recipe`, `/debug_duck`, `/debug_sharephoto` | Force-trigger flows for testing |
+| `/debug_captcha`, `/debug_challenge`, `/debug_trivia`, `/debug_recipe`, `/debug_duck`, `/debug_sharephoto`, `/debug_ether` | Force-trigger flows for testing |
 
 Plus the ambient triggers: `bang`, `bef`, `ignore` resolve an active duck
 (`bef` is AI-gated and may be refused — see below); `bad bot` / `bad
