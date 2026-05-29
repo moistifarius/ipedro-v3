@@ -39,11 +39,21 @@ def test_ffmpeg_args_request_ogg_opus_mono():
     assert "pipe:0" in args and "pipe:1" in args
     # mono out
     assert args[args.index("-ac") + 1] == "1"
-    # two lavfi sources: white-noise static + heterodyne sine carrier
+    # two lavfi sources: white-noise static + FM-swept heterodyne whistle
     assert any("anoisesrc" in a for a in args)
-    assert any(a.startswith("sine=") for a in args)
+    assert any(a.startswith("aevalsrc=") for a in args)
     # the voice + 2 lavfi inputs = three '-i' flags
     assert args.count("-i") == 3
+
+
+def test_heterodyne_is_fm_swept_and_widens_with_intensity():
+    lo = radio_fx._heterodyne_lavfi(0.0)
+    hi = radio_fx._heterodyne_lavfi(1.0)
+    # FM phase form: carrier + (dev/rate)*sin(...) — a true sweep, not a
+    # static tone. Deviation grows with intensity.
+    assert "aevalsrc=" in lo and "sin(" in lo
+    assert lo != hi
+    assert "400/0.15" in lo and "900/0.15" in hi
 
 
 @pytest.mark.asyncio

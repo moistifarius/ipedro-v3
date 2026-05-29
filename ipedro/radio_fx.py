@@ -46,12 +46,16 @@ def _build_filtergraph(intensity: float) -> str:
         ionospheric drift plus a faster auroral "warble";
       * ``acrusher`` (bit + sample crush) and ``asoftclip`` overdrive →
         the gritty, saturated comms timbre;
-      * two ``tremolo`` stages → slow deep QSB fading plus fast flutter.
+      * three ``tremolo`` stages → two *detuned* slow-and-deep QSB LFOs
+        that beat against each other so the signal wanders between
+        almost-readable and lost-under-the-noise, plus a fast flutter.
 
-    The mix then gets ``compand`` (AGC pumping — hiss swells between words),
-    a final pass of the bandpass, and a limiter. Higher intensity tightens
-    the band, deepens every modulation, and raises the static + whistle.
-    ``amix=duration=first`` trims the infinite noise/sine to the voice.
+    The static (constant, band-limited white noise) doesn't fade, so when
+    the voice dips under it the transmission becomes momentarily garbled —
+    that's the wander. A light ``compand`` keeps some AGC hiss-pumping
+    without flattening the QSB. Higher intensity tightens the band and
+    deepens every modulation. ``amix=duration=first`` trims the infinite
+    noise/whistle sources to the voice length.
     """
     i = max(0.0, min(1.0, intensity))
     high = int(380 + 170 * i)          # 380 → 550 Hz  (narrow SSB)
@@ -63,12 +67,14 @@ def _build_filtergraph(intensity: float) -> str:
     drift_d = 0.10 + 0.40 * i          # slow pitch wander depth
     warble_f = 5.0 + 5.0 * i           # auroral flutter rate (Hz)
     warble_d = 0.06 + 0.16 * i         # auroral flutter depth
-    qsb_f = 0.15 + 0.55 * i            # slow fade rate (Hz)
-    qsb_d = 0.45 + 0.45 * i            # slow fade depth
+    # Two detuned, deep, slow QSB LFOs. Their beat makes intelligibility
+    # wander instead of pulsing metronomically.
+    qsb_a_d = 0.55 + 0.35 * i          # 0.55 → 0.90 deep
+    qsb_b_d = 0.45 + 0.35 * i          # 0.45 → 0.80 deep
     flutter_f = 7.0 + 6.0 * i          # amplitude flutter rate (Hz)
     flutter_d = 0.15 + 0.30 * i        # amplitude flutter depth
-    noise_vol = 0.20 + 0.55 * i        # static hiss level
-    het_vol = 0.04 + 0.16 * i          # heterodyne whistle level
+    noise_vol = 0.22 + 0.50 * i        # constant static hiss level
+    het_vol = 0.18 + 0.22 * i          # heterodyne whistle level (prominent)
     return (
         # --- voice: band-limit → pitch drift/warble → crush/clip → fade ---
         f"[0:a]aresample=8000,"
@@ -76,21 +82,35 @@ def _build_filtergraph(intensity: float) -> str:
         f"vibrato=f=0.25:d={drift_d:.2f},vibrato=f={warble_f:.2f}:d={warble_d:.2f},"
         f"acrusher=bits={bits}:samples={samp}:mode=log:mix={crush_mix:.2f},"
         f"volume={drive:.2f},asoftclip=type=atan,"
-        f"tremolo=f={qsb_f:.2f}:d={qsb_d:.2f},"
+        f"tremolo=f=0.13:d={qsb_a_d:.2f},tremolo=f=0.21:d={qsb_b_d:.2f},"
         f"tremolo=f={flutter_f:.2f}:d={flutter_d:.2f}[v];"
         # --- static: white hiss, band-limited to the same SSB window ---
         f"[1:a]aresample=8000,highpass=f={high},lowpass=f={low},"
         f"volume={noise_vol:.2f}[n];"
-        # --- heterodyne: a slowly drifting, fading carrier whistle ---
-        f"[2:a]vibrato=f=0.2:d=0.6,volume={het_vol:.2f},"
-        f"tremolo=f={qsb_f:.2f}:d=0.7[h];"
-        # --- mix → AGC pump → final band → limit → 48k for opus ---
+        # --- heterodyne: FM-swept whistle (built in the source), leveled ---
+        f"[2:a]volume={het_vol:.2f}[h];"
+        # --- mix → light AGC → final band → limit → 48k for opus ---
         f"[v][n][h]amix=inputs=3:duration=first:dropout_transition=0:normalize=0,"
-        f"compand=attacks=0.02:decays=0.3:"
-        f"points=-80/-30|-45/-18|-20/-9|0/-5:soft-knee=6:gain=4,"
+        f"compand=attacks=0.05:decays=0.6:"
+        f"points=-70/-40|-40/-25|-15/-12|0/-6:soft-knee=8:gain=2,"
         f"highpass=f={high},lowpass=f={low},"
         f"alimiter=limit=0.95,aresample=48000[out]"
     )
+
+
+def _heterodyne_lavfi(intensity: float) -> str:
+    """lavfi source string for the drifting tuning whistle.
+
+    A pure FM-swept sine (the "wheeeooouup"): a 1 kHz carrier whose pitch
+    sweeps ±``dev`` Hz at 0.15 Hz, gated in and out by a squared 0.22 Hz
+    envelope so it surfaces and vanishes. Deviation widens with intensity.
+    Phase form ``carrier + (dev/rate)*sin(2π·rate·t)`` gives true FM.
+    """
+    i = max(0.0, min(1.0, intensity))
+    dev = int(400 + 500 * i)           # 400 → 900 Hz sweep depth
+    env = "(0.5+0.5*sin(2*PI*0.22*t))*(0.5+0.5*sin(2*PI*0.22*t))"
+    tone = f"sin(2*PI*1000*t+({dev}/0.15)*sin(2*PI*0.15*t))"
+    return f"aevalsrc={env}*{tone}:s=8000"
 
 
 def _ffmpeg_args(intensity: float) -> list[str]:
@@ -98,7 +118,7 @@ def _ffmpeg_args(intensity: float) -> list[str]:
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
         "-i", "pipe:0",
         "-f", "lavfi", "-i", "anoisesrc=c=white:a=1.0",
-        "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=8000",
+        "-f", "lavfi", "-i", _heterodyne_lavfi(intensity),
         "-filter_complex", _build_filtergraph(intensity),
         "-map", "[out]",
         "-ac", "1",
