@@ -221,6 +221,90 @@ def test_bundled_numbers_station_asset_present():
     assert path.stat().st_size > 50_000
 
 
+# ---------------------------------------------------------------- live fetch
+def test_live_urls_defaults_to_builtin_when_env_unset(monkeypatch):
+    monkeypatch.delenv("RADIO_FX_LIVE_URLS", raising=False)
+    urls = radio_fx._live_urls()
+    assert len(urls) >= 1
+    assert all(u.startswith("http") for u in urls)
+
+
+def test_live_urls_honors_env_override_and_disable(monkeypatch):
+    monkeypatch.setenv("RADIO_FX_LIVE_URLS", "http://a/, http://b/")
+    assert radio_fx._live_urls() == ("http://a/", "http://b/")
+    # Empty string disables the feature.
+    monkeypatch.setenv("RADIO_FX_LIVE_URLS", "")
+    assert radio_fx._live_urls() == ()
+
+
+def test_ensure_live_pcm_disabled_returns_none(monkeypatch):
+    radio_fx.reset_live_cache()
+    monkeypatch.setenv("RADIO_FX_LIVE_URLS", "")
+    assert radio_fx._ensure_live_pcm() is None
+
+
+def test_ensure_live_pcm_walks_failover_until_success(monkeypatch):
+    radio_fx.reset_live_cache()
+    monkeypatch.setenv("RADIO_FX_LIVE_URLS", "http://bad/, http://good/, http://unused/")
+    calls: list[str] = []
+    fake_pcm = np.ones(SR * 2, dtype=np.float32) * 0.1
+
+    def fake_fetch(url: str) -> np.ndarray:
+        calls.append(url)
+        return fake_pcm if url == "http://good/" else np.zeros(0, dtype=np.float32)
+
+    monkeypatch.setattr(radio_fx, "_fetch_live_from_url", fake_fetch)
+    result = radio_fx._ensure_live_pcm()
+    assert result is not None
+    pcm, src = result
+    assert src == "http://good/" and pcm.size == fake_pcm.size
+    # bad → tried; good → tried and won; unused → never tried (short-circuit).
+    assert calls == ["http://bad/", "http://good/"]
+
+
+def test_ensure_live_pcm_caches_and_does_not_refetch(monkeypatch):
+    radio_fx.reset_live_cache()
+    monkeypatch.setenv("RADIO_FX_LIVE_URLS", "http://x/")
+    n_calls = [0]
+
+    def fake_fetch(url: str) -> np.ndarray:
+        n_calls[0] += 1
+        return np.ones(SR, dtype=np.float32) * 0.1
+
+    monkeypatch.setattr(radio_fx, "_fetch_live_from_url", fake_fetch)
+    radio_fx._ensure_live_pcm()
+    radio_fx._ensure_live_pcm()
+    radio_fx._ensure_live_pcm()
+    assert n_calls[0] == 1
+
+
+def test_ensure_live_pcm_returns_none_when_all_urls_fail(monkeypatch):
+    radio_fx.reset_live_cache()
+    monkeypatch.setenv("RADIO_FX_LIVE_URLS", "http://a/, http://b/")
+    monkeypatch.setattr(radio_fx, "_fetch_live_from_url",
+                        lambda url: np.zeros(0, dtype=np.float32))
+    assert radio_fx._ensure_live_pcm() is None
+
+
+def test_live_shortwave_bed_uses_cache(monkeypatch):
+    radio_fx.reset_live_cache()
+    monkeypatch.setenv("RADIO_FX_LIVE_URLS", "http://x/")
+    monkeypatch.setattr(radio_fx, "_fetch_live_from_url",
+                        lambda url: np.random.default_rng(0).standard_normal(SR * 3).astype(np.float32) * 0.2)
+    out = radio_fx._live_shortwave_bed(
+        SR * 4, level=0.5, rng=np.random.default_rng(1),
+    )
+    assert out is not None
+    assert out.shape == (SR * 4,)
+    assert float(np.sqrt(np.mean(out * out))) > 0.001
+
+
+def test_live_shortwave_bed_returns_none_when_disabled(monkeypatch):
+    radio_fx.reset_live_cache()
+    monkeypatch.setenv("RADIO_FX_LIVE_URLS", "")
+    assert radio_fx._live_shortwave_bed(SR, level=0.5) is None
+
+
 # ---------------------------------------------------------------- entry guards
 @pytest.mark.asyncio
 async def test_apply_radio_effect_empty_input_returns_none():

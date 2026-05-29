@@ -40,9 +40,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 import random
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import numpy as np
@@ -57,6 +59,137 @@ _FFMPEG_TIMEOUT_SECONDS = 60
 # continuous-bleed interference layer. Optional: if the asset is missing,
 # the effect still runs with just the synthetic beds.
 _INTERFERENCE_FILE = Path(__file__).parent / "assets" / "swedish_rhapsody.ogg"
+
+# ---- Live shortwave fetch ---------------------------------------------------
+# Static bed priority chain: live cached recording → bundled
+# ``shortwave_*.ogg`` → synthetic (pink noise + crackles + carrier ghosts).
+#
+# Fetch is **lazy** — done on the /ether broadcast path, not on a background
+# poll. ``/ether`` is a rare command, so a sleeping bot has no business
+# hammering some volunteer's WebSDR. First call after a restart pays the
+# fetch cost (~10–25 s, runs in a thread); the cached PCM is then reused
+# for ~6 hours before the next call triggers a refresh.
+#
+# The source is a failover list of WebSDR / KiwiSDR / Icecast SSB stream
+# URLs. ``_ensure_live_pcm()`` walks them in order until one yields valid
+# PCM. Every layer fails open: no URL set → off, all URLs down → bundled
+# or synthetic.
+_LIVE_FETCH_DURATION_SECONDS = 30
+_LIVE_FETCH_TIMEOUT_SECONDS = 25
+_LIVE_CACHE_TTL_SECONDS = 6 * 3600  # 6h between refreshes
+# Built-in failover list. Each is a free public WebSDR receiver; order is
+# by typical uptime. Override / replace via the RADIO_FX_LIVE_URLS env var
+# (comma-separated). Set RADIO_FX_LIVE_URLS="" to disable live fetch.
+_DEFAULT_LIVE_URLS: tuple[str, ...] = (
+    # University of Twente WebSDR — the de-facto public reference receiver.
+    "http://websdr.ewi.utwente.nl:8901/m.mp3?f=14040lsb",
+    # Northern Utah WebSDR (very stable, 7.0 MHz 40m amateur band).
+    "http://websdr2.sdrutah.org:8902/m.mp3?f=7050lsb",
+    # Twente fallback on a different band.
+    "http://websdr.ewi.utwente.nl:8901/m.mp3?f=7050lsb",
+)
+
+
+def _live_urls() -> tuple[str, ...]:
+    """Configured failover list. Reads RADIO_FX_LIVE_URLS (comma-
+    separated) if set; otherwise falls back to the built-in defaults.
+    An explicit empty string disables live fetch entirely."""
+    env = os.environ.get("RADIO_FX_LIVE_URLS")
+    if env is None:
+        return _DEFAULT_LIVE_URLS
+    return tuple(p.strip() for p in env.split(",") if p.strip())
+
+
+# In-memory cache: (pcm, fetched_at_monotonic, source_url) or None.
+_live_cache: tuple[np.ndarray, float, str] | None = None
+
+
+def _fetch_live_from_url(url: str) -> np.ndarray:
+    """Pull ~30 s from one streaming URL via ffmpeg, decoded to mono
+    float32 at SR. Returns an empty array on any failure (timeout, bad
+    status, decode error, empty body). Doesn't raise."""
+    try:
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+                "-rw_timeout", str(_LIVE_FETCH_TIMEOUT_SECONDS * 1_000_000),
+                "-i", url,
+                "-t", str(_LIVE_FETCH_DURATION_SECONDS),
+                "-vn", "-ac", "1", "-ar", str(SR),
+                "-f", "f32le", "pipe:1",
+            ],
+            capture_output=True, check=False,
+            timeout=_LIVE_FETCH_TIMEOUT_SECONDS + 5,
+        )
+    except subprocess.TimeoutExpired:
+        log.info("live shortwave fetch %s timed out", url)
+        return np.zeros(0, dtype=np.float32)
+    if proc.returncode != 0 or not proc.stdout:
+        tail = (proc.stderr or b"")[-200:].decode("utf-8", "replace")
+        log.info("live shortwave fetch %s failed rc=%s: %s",
+                 url, proc.returncode, tail)
+        return np.zeros(0, dtype=np.float32)
+    pcm = np.frombuffer(proc.stdout, dtype=np.float32)
+    # Sanity: a stream of literal silence isn't useful.
+    if pcm.size < SR or float(np.max(np.abs(pcm))) < 1e-4:
+        return np.zeros(0, dtype=np.float32)
+    return pcm.copy()
+
+
+def _ensure_live_pcm() -> tuple[np.ndarray, str] | None:
+    """Return (pcm, source_url) using the cache when fresh; otherwise
+    walk the failover list, cache the first success, and return it.
+    ``None`` if live fetch is disabled or every URL failed."""
+    global _live_cache
+    urls = _live_urls()
+    if not urls:
+        return None
+    now = time.monotonic()
+    if _live_cache is not None:
+        pcm, fetched_at, src = _live_cache
+        if now - fetched_at < _LIVE_CACHE_TTL_SECONDS and pcm.size > 0:
+            return pcm, src
+    for url in urls:
+        log.info("live shortwave: fetching from %s", url)
+        pcm = _fetch_live_from_url(url)
+        if pcm.size > 0:
+            _live_cache = (pcm, now, url)
+            log.info("live shortwave: cached %.1fs from %s",
+                     pcm.size / SR, url)
+            return pcm, url
+    log.info("live shortwave: all %d URLs failed, falling back", len(urls))
+    return None
+
+
+def _live_shortwave_bed(
+    n: int, *, level: float, rng: np.random.Generator | None = None,
+) -> np.ndarray | None:
+    """Use the live-fetched cached recording as the static bed when
+    available. Returns ``None`` on cold-miss or hard failure so the
+    caller falls back through the priority chain."""
+    if n <= 0:
+        return None
+    cached = _ensure_live_pcm()
+    if cached is None:
+        return None
+    src, _ = cached
+    if src.size == 0:
+        return None
+    r = rng if rng is not None else np.random.default_rng()
+    offset = int(r.integers(0, src.size))
+    rolled = np.roll(src, -offset)
+    tiled = np.tile(rolled, n // rolled.size + 2)[:n].astype(np.float32)
+    # Band-limit into the SSB window so it sits where the other beds do.
+    tiled = _bandpass(tiled, 420, 2400, order=4)
+    return (tiled * level).astype(np.float32)
+
+
+def reset_live_cache() -> None:
+    """Test/admin helper: drop the cached live PCM so the next call
+    fetches again."""
+    global _live_cache
+    _live_cache = None
+
 
 
 def ffmpeg_available() -> bool:
@@ -473,9 +606,11 @@ def _process_pcm(
     x = x * 2.2
 
     n = len(x)
-    # Prefer a real bundled shortwave recording for the bed; fall back to
-    # the synthetic shortwave-style noise + crackles + carrier-ghost mix.
-    bed = _shortwave_real_bed(n, level=0.45 + 0.10 * i, rng=r)
+    # Bed priority: live-fetched WebSDR cache → bundled shortwave_*.ogg
+    # → synthetic (pink + crackles + ghosts). Each layer fails open.
+    bed = _live_shortwave_bed(n, level=0.40 + 0.10 * i, rng=r)
+    if bed is None:
+        bed = _shortwave_real_bed(n, level=0.45 + 0.10 * i, rng=r)
     if bed is None:
         bed = _static_bed(n, level=0.22 + 0.08 * i, burst_amp=0.6, rng=r)
     out = (x

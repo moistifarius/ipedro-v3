@@ -61,15 +61,21 @@ than the ambient loop's garbled text:
   narrow bandpass + 1.2 kHz presence boost, 6:1 compression, light tanh
   saturation, pitch wobble + slow drift + a constant −20 ¢ "wrong-tuning"
   detune, subtle ring modulation, multi-LFO QSB fades, 180 ms slapback
-  delay, and a dark convolution reverb. Mixed in parallel: a breathing
-  band-limited **static** bed with sharp word-gap **bursts**, a
-  prominent FM-swept heterodyne **tuning whistle**, sparse high-frequency
-  **squeals**, a continuous **numbers-station** bleed (a bundled
-  "Swedish Rhapsody" recording, looped with a random entry point and
-  ridden on a high-floor envelope so it never cuts to silence), and a
-  squelch **click** at the start and end. Mono OGG/Opus, broadcast as a
-  voice note. Every render uses a fresh random seed, so no two
-  transmissions are identical.
+  delay, and a dark convolution reverb. Mixed in parallel: a band-limited
+  **static** bed, a faint FM-swept heterodyne **tuning whistle** that
+  fades in and out, sparse high-frequency **squeals**, a continuous
+  **numbers-station** bleed (a bundled "Swedish Rhapsody" recording,
+  looped with a random entry point and ridden on a high-floor envelope so
+  it never cuts to silence), and a squelch **click** at the start and
+  end. Mono OGG/Opus, broadcast as a voice note. Every render uses a
+  fresh random seed, so no two transmissions are identical.
+
+  The static bed has a priority chain: **live WebSDR fetch** (cached for
+  6 h on first /ether call after a restart) → bundled
+  `ipedro/assets/shortwave_*.ogg` files → synthetic pink-noise hash with
+  lightning crackles and carrier ghosts. Set `RADIO_FX_LIVE_URLS` (comma-
+  separated, in `.env`) to override the built-in public WebSDR list, or
+  set it to an empty string to disable the live fetch.
 - `/ether` as the **caption of a voice note**, or as a **reply to a voice
   note** — your actual recording gets the radio treatment instead.
 - `/ether` replying to a **text** message — transmits that message's text.
