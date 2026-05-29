@@ -55,18 +55,21 @@ bot's admin user. Fields:
 Manually transmit into the ether, as a **far-away radio voice** rather
 than the ambient loop's garbled text:
 
-- `/ether <text>` — your text is spoken aloud (OpenAI TTS) then put
-  through a long-haul HF/SSB treatment (the full "far-away SSB" chain:
-  narrow bandpass + presence EQ → compression → light saturation → noise
-  layers → pitch wobble/drift → slapback delay → convolution reverb →
-  final EQ): a narrow comms passband, wandering pitch, an audible
-  breathing **static** bed with bursts, smooth deep QSB fading (so the
-  voice slips under the static and surfaces again), a prominent drifting
-  heterodyne **tuning whistle**, and a continuous **numbers-station**
-  bleed (a bundled "Swedish Rhapsody" recording) as one interference
-  layer. The voice stays on top; every layer rides its own slow cycle so
-  it never sounds like looping, switched effects. Mono. Broadcast as a
-  voice note.
+- `/ether <text>` — your text is spoken aloud (OpenAI TTS), then run
+  through a Python DSP chain (numpy + scipy.signal, with ffmpeg only at
+  the edges for decode/encode) that models a long-haul HF/SSB signal:
+  narrow bandpass + 1.2 kHz presence boost, 6:1 compression, light tanh
+  saturation, pitch wobble + slow drift + a constant −20 ¢ "wrong-tuning"
+  detune, subtle ring modulation, multi-LFO QSB fades, 180 ms slapback
+  delay, and a dark convolution reverb. Mixed in parallel: a breathing
+  band-limited **static** bed with sharp word-gap **bursts**, a
+  prominent FM-swept heterodyne **tuning whistle**, sparse high-frequency
+  **squeals**, a continuous **numbers-station** bleed (a bundled
+  "Swedish Rhapsody" recording, looped with a random entry point and
+  ridden on a high-floor envelope so it never cuts to silence), and a
+  squelch **click** at the start and end. Mono OGG/Opus, broadcast as a
+  voice note. Every render uses a fresh random seed, so no two
+  transmissions are identical.
 - `/ether` as the **caption of a voice note**, or as a **reply to a voice
   note** — your actual recording gets the radio treatment instead.
 - `/ether` replying to a **text** message — transmits that message's text.
