@@ -48,6 +48,7 @@ bot's admin user. Fields:
 | `duckhunt` | `on` / `off` |
 | `voice` | `on` / `off` — transcribe inbound voice notes |
 | `memory` | `on` / `off` — store messages and build context from history |
+| `ether` | `on` / `off` — opt this chat into cross-chat pager garbling (📟). Every ~hour, a recent message from any other ether-opted chat may be picked, garbled (dropped chars, leet subs, blackouts, truncation), and broadcast here with a spooky wrapper. Receiver cooldown: 4h. Needs ≥ 2 chats opted in. |
 
 ### Duckhunt
 

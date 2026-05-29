@@ -736,6 +736,7 @@ def build_router(rt: Runtime) -> Router:
             "fortune": ("fortune_enabled", not cfg.fortune_enabled),
             "voice": ("voice_transcribe", not cfg.voice_transcribe),
             "memory": ("memory_enabled", not cfg.memory_enabled),
+            "ether": ("ether_enabled", not cfg.ether_enabled),
         }
         if field in toggles:
             col, new_val = toggles[field]
@@ -812,6 +813,9 @@ def _config_keyboard(cfg, *, target_chat_id: int) -> InlineKeyboardMarkup:
         [
             b(f"Voice: {on if cfg.voice_transcribe else off}", "voice"),
             b(f"Memory: {on if cfg.memory_enabled else off}", "memory"),
+        ],
+        [
+            b(f"📟 Ether: {on if cfg.ether_enabled else off}", "ether"),
         ],
         [
             noop_btn(f"Policy: {cfg.response_policy}"),

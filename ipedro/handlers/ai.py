@@ -129,7 +129,8 @@ def build_router(rt: Runtime) -> Router:
                 f"Comic enabled: {cfg.comic_enabled}\n"
                 f"Fortune enabled: {cfg.fortune_enabled}\n"
                 f"Voice transcribe: {cfg.voice_transcribe}\n"
-                f"Memory enabled: {cfg.memory_enabled}\n\n"
+                f"Memory enabled: {cfg.memory_enabled}\n"
+                f"Ether enabled: {cfg.ether_enabled}\n\n"
                 "Set a field: /chat_config <field> <value>\n"
                 "  policy     commands|mention|reply|ambient|always\n"
                 "  ambient    <0.0-1.0>\n"
@@ -139,7 +140,8 @@ def build_router(rt: Runtime) -> Router:
                 "  comic      on|off\n"
                 "  fortune    on|off\n"
                 "  voice      on|off\n"
-                "  memory     on|off",
+                "  memory     on|off\n"
+                "  ether      on|off",
                 disable_notification=True,
             )
             return
@@ -191,6 +193,8 @@ def build_router(rt: Runtime) -> Router:
             updates["voice_transcribe"] = raw.lower() in ("on", "true", "1", "yes")
         elif field == "memory":
             updates["memory_enabled"] = raw.lower() in ("on", "true", "1", "yes")
+        elif field == "ether":
+            updates["ether_enabled"] = raw.lower() in ("on", "true", "1", "yes")
         else:
             await msg.reply("Unknown field.", disable_notification=True)
             return

@@ -324,6 +324,12 @@ ALTER TABLE chat_config
 ALTER TABLE chat_state
     ADD COLUMN IF NOT EXISTS last_fortune_date DATE;
 
+-- Ether (cross-chat pager garbling) opt-in + receiver cooldown timestamp.
+ALTER TABLE chat_config
+    ADD COLUMN IF NOT EXISTS ether_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE chat_state
+    ADD COLUMN IF NOT EXISTS last_ether_at TIMESTAMPTZ;
+
 -- Generic key/value store for global tunables (e.g. the master Pedro prompt).
 CREATE TABLE IF NOT EXISTS kv_store (
     key        TEXT PRIMARY KEY,
