@@ -51,98 +51,95 @@ def _interference_path() -> Path | None:
 def _build_filtergraph(intensity: float, *, with_station: bool = False) -> str:
     """Build the ffmpeg -filter_complex string for the given intensity.
 
-    Models a long-haul HF/SSB transmission — the "2000 miles of ionospheric
-    bounce" sound. The realism comes from *continuous* modulation rather
-    than switched effects: every layer rides smooth sine envelopes at its
-    own incommensurate rate, so they drift in and out of phase and the
-    "swallowed" moments happen by coincidence, never on a shared on/off
-    gate (hard gates sound mechanical). Inputs:
-      0 = the voice, 1 = a white-noise band (the static bed),
+    Built straight off the "far-away SSB" recipe, in order:
+    EQ/bandpass → compression → light saturation → noise layer → pitch
+    wobble/flutter → slapback delay → reverb → final EQ + volume dropouts.
+
+    Inputs (the reverb IR is always last; the station is optional):
+      0 = the voice,
+      1 = a white-noise static bed,
       2 = the FM-swept heterodyne carrier whistle,
-      3 = (optional) the bundled numbers-station recording.
+      3 = (optional) the bundled numbers-station recording,
+      N = an exponential-decay noise impulse response for the reverb.
 
-    The voice chain aims for *thin and distant*, not low/gravelly:
-      * downsample to 8 kHz + cascaded high/low pass → narrow SSB band
-        (~440–2700 Hz; the low body is gone);
-      * ``acompressor`` + ``dynaudnorm`` → squashed comms dynamic and a
-        consistent level regardless of how loud the source note was;
-      * an ``equalizer`` presence bump near 1.55 kHz → the tinny, nasal
-        radio-speaker honk;
-      * two ``vibrato`` stages → the wandering pitch (slow ionospheric
-        drift + faster auroral warble);
-      * a light ``acrusher`` (bit-only, no sample-hold) + ``asoftclip``
-        overdrive → a subtle electrical edge, *not* the old gravel;
-      * four ``tremolo`` stages → three *detuned* slow QSB fades that beat
-        together into smooth, organic deep fades, plus a faster flutter.
-        When the fade bottoms out the steady static naturally takes over —
-        that's the voice being "eaten", no gating required;
-      * two ``aecho`` stages (slapback + dark tail) → distance;
-      * a makeup ``volume`` so the voice rides clearly on top.
+    Voice chain:
+      1. ``highpass``×2 + ``lowpass``×2 → a hard SSB band (~450–2400 Hz);
+         downsampled to 8 kHz; ``equalizer`` presence bump ~1.25 kHz for
+         the nasal radio honk.
+      2. ``acompressor`` 6:1 (+ ``dynaudnorm`` so the level is consistent
+         regardless of how loud the source note was).
+      3. light ``acrusher`` + ``asoftclip`` → grit/clip, not metal.
+      4. (noise is mixed in as parallel beds, below.)
+      5. ``vibrato`` ×2 → subtle pitch wobble + slow drift; ``tremolo`` ×4
+         → detuned QSB fades that beat into smooth volume dropouts.
+      6. ``aecho`` → a faint 180 ms slapback (far-away cue).
+      7. ``afir`` convolution reverb against a dark, decaying IR, mixed in
+         parallel and low (genuine reverb tail, not just echo).
+      8. makeup ``volume`` (kept on the quiet/distant side) → final
+         ``highpass``/``lowpass`` and a limiter after the mix.
 
-    The static bed breathes on two incommensurate sines (+ an opening
-    squelch click); the whistle and numbers station each drift in and out
-    on their own slow product-of-sines envelopes. Higher intensity tightens
-    the band and deepens every modulation. ``amix=duration=first`` trims
-    the looping/infinite beds to the voice length.
+    The beds: a breathing band-limited hiss with an opening squelch click,
+    the faint swept whistle, and the numbers station drifting in/out on its
+    own slow envelope — each on incommensurate cycles so nothing repeats in
+    lockstep. Everything is mono. Higher intensity tightens the band a touch
+    and shifts the sweep. ``amix=duration=first`` trims the beds to the voice.
     """
     i = max(0.0, min(1.0, intensity))
-    high = int(440 + 120 * i)          # 440 → 560 Hz  (thin, no low body)
-    low = int(2700 - 500 * i)          # 2700 → 2200 Hz
-    bits = round(12 - 2 * i)           # 12 → 10  (subtle bit grit, no s-hold)
-    crush_mix = 0.18 + 0.18 * i        # 0.18 → 0.36 (light)
-    drive = 1.2 + 0.6 * i              # gentle overdrive edge (not gravel)
-    drift_d = 0.06 + 0.16 * i          # slow pitch wander depth
-    warble_f = 6.0 + 4.0 * i           # auroral flutter rate (Hz)
-    warble_d = 0.04 + 0.08 * i         # auroral flutter depth
-    # Three detuned QSB tremolos (≥0.1 Hz, ffmpeg's floor) that beat into
-    # smooth organic fades, + a faster flutter.
-    qa = 0.35 + 0.22 * i
-    qb = 0.30 + 0.22 * i
-    qc = 0.24 + 0.18 * i
-    flutter_f = 7.0 + 4.0 * i
-    flutter_d = 0.05 + 0.10 * i
-    noise_vol = 0.030 + 0.040 * i      # static bed (breathes, ~steady)
-    het_vol = 0.022 + 0.030 * i        # heterodyne whistle (faint)
-    station_vol = 0.12 + 0.06 * i      # numbers-station layer (one of several)
+    high = int(420 + 60 * i)           # ~420 → 480 Hz  (SSB high-pass)
+    low = int(2500 - 300 * i)          # ~2500 → 2200 Hz (SSB low-pass)
+    noise_vol = 0.13 + 0.07 * i        # static bed — clearly audible
+    het_vol = 0.10 + 0.05 * i          # heterodyne whistle (prominent)
+    station_vol = 0.14 + 0.06 * i      # numbers-station layer (continuous)
 
-    voice = (
+    # The reverb IR is always the final input; its index shifts by whether
+    # the optional station input is present (0 voice,1 noise,2 whistle,
+    # [3 station], then IR).
+    ir_idx = 4 if with_station else 3
+
+    # 1 EQ/bandpass · 2 compress · 3 saturate · 5 pitch+fades · 6 slapback
+    pre = (
         f"[0:a]aresample=8000,"
         f"highpass=f={high},highpass=f={high},lowpass=f={low},lowpass=f={low},"
-        f"acompressor=threshold=-18dB:ratio=3.5:attack=12:release=180:makeup=2,"
+        f"equalizer=f=1250:width_type=q:w=1.2:g=4.5,"
+        f"acompressor=threshold=-20dB:ratio=6:attack=5:release=120:makeup=3,"
         f"dynaudnorm=p=0.9:m=18:g=15,"
-        f"equalizer=f=1550:width_type=q:w=1.1:g=3.5,"
-        f"vibrato=f=0.22:d={drift_d:.2f},vibrato=f={warble_f:.2f}:d={warble_d:.2f},"
-        f"acrusher=bits={bits}:samples=1:mode=log:mix={crush_mix:.2f},"
-        f"volume={drive:.2f},asoftclip=type=atan,"
-        f"tremolo=f=0.11:d={qa:.2f},tremolo=f=0.16:d={qb:.2f},"
-        f"tremolo=f=0.23:d={qc:.2f},tremolo=f={flutter_f:.2f}:d={flutter_d:.2f},"
-        f"aecho=1.0:0.9:200:0.16,aecho=0.9:0.85:130|260:0.20|0.12,volume=2.4[v]"
+        f"acrusher=bits=11:samples=1:mode=log:mix=0.25,volume=1.4,asoftclip=type=atan,"
+        f"vibrato=f=0.30:d=0.08,vibrato=f=0.15:d=0.05,"
+        f"tremolo=f=0.11:d=0.45,tremolo=f=0.17:d=0.40,"
+        f"tremolo=f=0.27:d=0.30,tremolo=f=8:d=0.12,"
+        f"aecho=0.9:0.92:180:0.18[pre]"
     )
-    # Static: smooth breathing baseline (two incommensurate sines) + a short
-    # opening squelch click. Roughly steady, so it takes over when the voice
-    # fades — no surge gate needed.
+    # 7 reverb: split → convolve the send with the dark decaying IR → mix
+    # back low → makeup. (dry/wet kept low; reverb is a distance cue.)
+    reverb = (
+        f"[{ir_idx}:a]aresample=8000,volume=eval=frame:volume=exp(-4*t),"
+        f"lowpass=f=2200,highpass=f=400[ir];"
+        f"[pre]asplit=2[dry][snd];"
+        f"[snd][ir]afir=dry=0:wet=1,volume=0.45[rv];"
+        f"[dry][rv]amix=inputs=2:normalize=0,volume=2.6[v]"
+    )
+    # 4 noise beds (parallel): an audible breathing hiss that swells into
+    # bursts (two incommensurate sines) + an opening squelch click; the
+    # prominent swept whistle; and the numbers station on a single slow
+    # swell with a level FLOOR so it stays present (never cuts to silence).
     noise = (
         f"[1:a]aresample=8000,highpass=f={high},lowpass=f={low},"
         f"volume=eval=frame:volume={noise_vol:.3f}"
-        f"*(0.55+0.35*sin(2*PI*0.11*t))*(0.7+0.3*sin(2*PI*0.17*t))"
-        f"+0.35*lt(t\\,0.04)[n]"
+        f"*(0.6+0.5*sin(2*PI*0.11*t))*(0.7+0.45*sin(2*PI*0.19*t))"
+        f"+0.6*lt(t\\,0.05)[n]"
     )
-    # Whistle: faint, leveled (its drift/sweep lives in the source).
     whistle = f"[2:a]volume={het_vol:.3f}[h]"
 
-    parts = [voice, noise, whistle]
+    parts = [pre, noise, whistle, reverb]
     mix_labels = "[v][n][h]"
     if with_station:
-        # Numbers station: drifts in and out on its own slow product-of-sines
-        # envelope (mostly low, occasionally swelling up) — one layer of the
-        # interference, never the whole bed.
         parts.append(
             f"[3:a]aresample=8000,highpass=f={high},lowpass=f={low},"
-            f"volume=eval=frame:volume={station_vol:.3f}*2.0"
-            f"*(0.5+0.5*sin(2*PI*0.037*t))*(0.5+0.5*sin(2*PI*0.061*t))[g]"
+            f"volume=eval=frame:volume={station_vol:.3f}*(0.6+0.4*sin(2*PI*0.045*t))[g]"
         )
         mix_labels = "[v][n][h][g]"
     n_inputs = 4 if with_station else 3
+    # 8 final mix → EQ → limiter (mono is enforced by -ac 1 in the args).
     mix = (
         f"{mix_labels}amix=inputs={n_inputs}:duration=first:"
         f"dropout_transition=0:normalize=0,"
@@ -156,14 +153,15 @@ def _heterodyne_lavfi(intensity: float) -> str:
     """lavfi source string for the drifting tuning whistle.
 
     A pure FM-swept sine (the "wheeeooouup"): a 1 kHz carrier whose pitch
-    sweeps ±``dev`` Hz at 0.15 Hz, drifting in and out on a smooth
-    product-of-two-incommensurate-sines envelope so it surfaces and
-    vanishes irregularly (not on a regular pulse). Deviation widens with
+    sweeps ±``dev`` Hz at 0.15 Hz, drifting on a smooth
+    product-of-incommensurate-sines envelope. The envelope keeps a level
+    FLOOR (≈0.55) so the whistle stays present and clearly audible while
+    still swelling, rather than vanishing entirely. Deviation widens with
     intensity. Phase form ``carrier + (dev/rate)*sin(2π·rate·t)`` is FM.
     """
     i = max(0.0, min(1.0, intensity))
     dev = int(400 + 500 * i)           # 400 → 900 Hz sweep depth
-    env = "(0.5+0.5*sin(2*PI*0.07*t))*(0.5+0.5*sin(2*PI*0.13*t))"
+    env = ("(0.55+0.45*(0.5+0.5*sin(2*PI*0.06*t))*(0.5+0.5*sin(2*PI*0.11*t)))")
     tone = f"sin(2*PI*1000*t+({dev}/0.15)*sin(2*PI*0.15*t))"
     return f"aevalsrc={env}*{tone}:s=8000"
 
@@ -185,6 +183,9 @@ def _ffmpeg_args(intensity: float) -> list[str]:
         # trims it back to the voice length.
         offset = random.uniform(0, _INTERFERENCE_DURATION)
         args += ["-stream_loop", "-1", "-ss", f"{offset:.2f}", "-i", str(station)]
+    # Reverb impulse response: 2 s of white noise, decayed/darkened in the
+    # filtergraph. Always the LAST input.
+    args += ["-f", "lavfi", "-i", "anoisesrc=c=white:d=2"]
     args += [
         "-filter_complex", _build_filtergraph(intensity, with_station=station is not None),
         "-map", "[out]",

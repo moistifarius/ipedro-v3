@@ -15,17 +15,17 @@ def test_filtergraph_contains_core_filters():
     fg = radio_fx._build_filtergraph(0.5)
     # Band-limit, compress, normalize, presence, pitch drift, light crush,
     # soft-clip, smooth QSB fades, delay/reverb, mix.
-    for needle in ("highpass", "lowpass", "acompressor", "dynaudnorm",
-                   "equalizer", "acrusher", "asoftclip", "vibrato",
-                   "tremolo", "aecho", "amix"):
+    # Full recipe: bandpass, presence EQ, compress, light crush, soft-clip,
+    # pitch wobble, QSB-fade tremolos, slapback delay, convolution reverb, mix.
+    for needle in ("highpass", "lowpass", "equalizer", "acompressor",
+                   "dynaudnorm", "acrusher", "asoftclip", "vibrato",
+                   "tremolo", "aecho", "afir", "amix"):
         assert needle in fg, f"missing {needle!r}"
-    # Two aecho stages: slapback + reverb tail.
-    assert fg.count("aecho") == 2
-    # Realism: the modulation is continuous — NO hard gt()/lt() gate logic
-    # in the voice/whistle level paths (a single lt() click is allowed in
-    # the static path, but no gt() mode-switch gates anywhere).
+    # One aecho (slapback); reverb is real convolution (afir), not echo.
+    assert fg.count("aecho") == 1
+    # Realism: continuous modulation — no hard gt() mode-switch gates.
     assert "gt(" not in fg
-    # Three-input mix (voice + static + heterodyne) into a single [out] pad.
+    # Voice + static + heterodyne into a single [out] pad (final mix=3).
     assert "[0:a]" in fg and "[1:a]" in fg and "[2:a]" in fg
     assert "[v]" in fg and "[n]" in fg and "[h]" in fg and "[out]" in fg
     assert "amix=inputs=3" in fg
@@ -64,12 +64,13 @@ def test_ffmpeg_args_request_ogg_opus_mono():
     # lavfi sources: white-noise static + FM-swept heterodyne whistle
     assert any("anoisesrc" in a for a in args)
     assert any(a.startswith("aevalsrc=") for a in args)
-    # voice + 2 lavfi + (numbers station, since the asset is bundled) = 4 -i
+    # Inputs = voice + noise + whistle + reverb-IR (+ numbers station when
+    # the asset is bundled). The reverb IR is always present.
     if radio_fx._interference_path() is not None:
-        assert args.count("-i") == 4
+        assert args.count("-i") == 5
         assert "-stream_loop" in args
     else:
-        assert args.count("-i") == 3
+        assert args.count("-i") == 4
 
 
 def test_heterodyne_is_fm_swept_and_widens_with_intensity():
