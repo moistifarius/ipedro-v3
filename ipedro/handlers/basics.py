@@ -87,6 +87,7 @@ HELP_TEXT_ADMIN = (
     "/manage - one-screen menu of every admin function (categorized)\n"
     "/list_chat_ids - list all known chats\n"
     "/pick_chat - picker that returns a chat id\n"
+    "/config_for [chat_id] - open the /config wizard for any chat from DM\n"
     "/send_message <chat_id> <text> - send a message as the bot\n"
     "/logs [N] [filter] - tail the bot's program logs\n"
     "/cmdlog - command audit log from the DB\n"

@@ -14,7 +14,9 @@ from datetime import date, datetime, timezone
 
 from aiogram import Bot
 
+from ipedro.bot_messages import track
 from ipedro.db.pool import Database
+from ipedro.silenced_chats import is_silenced
 
 log = logging.getLogger(__name__)
 
@@ -72,15 +74,19 @@ async def run_celebrations_loop(
             today = _today_utc()
             for row in await _due_today(db):
                 name = row.get("name") or "someone"
+                chat_id = row["chat_id"]
+                text = _build_message(row, name)
                 try:
-                    await bot.send_message(
-                        row["chat_id"], _build_message(row, name),
+                    sent = await bot.send_message(
+                        chat_id, text,
+                        disable_notification=is_silenced(chat_id),
                     )
+                    track(chat_id, sent.message_id, text)
                     await _stamp_celebrated(db, row["id"], today)
                 except Exception as exc:
                     log.warning(
                         "Celebration send failed for chat %s: %s",
-                        row["chat_id"], exc,
+                        chat_id, exc,
                     )
             wait = _TICK_SECONDS
         except Exception as exc:

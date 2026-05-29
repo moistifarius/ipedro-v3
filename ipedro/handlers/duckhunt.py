@@ -9,6 +9,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, Message
 
+from ipedro.bot_messages import track
 from ipedro.duckhunt.captcha_gen import make_captcha
 from ipedro.duckhunt.debug_toggles import is_on as debug_is_on
 from ipedro.duckhunt.spawner import build_quack_message_for
@@ -291,7 +292,7 @@ def build_router(rt: Runtime) -> Router:
             # No active duck. Reply briefly instead of silent return so the
             # user gets feedback when a stale /quackflag misled them.
             await msg.reply(
-                "🦆 No duck here. Wait for one to spawn.",
+                "🦆 There's no ducks around right now, are you feeling okay?",
                 disable_notification=True,
             )
             return
@@ -333,7 +334,7 @@ def build_router(rt: Runtime) -> Router:
         duck = await rt.duckhunt.active_duck(msg.chat.id)
         if not duck:
             await msg.reply(
-                "🦆 No duck here. Wait for one to spawn.",
+                "🦆 There's no ducks around right now, are you feeling okay?",
                 disable_notification=True,
             )
             return
@@ -389,7 +390,8 @@ def build_router(rt: Runtime) -> Router:
                 duck_after.id, friend_count + 1,
             )
             try:
-                await msg.answer(follow_up, disable_notification=True)
+                sent = await msg.answer(follow_up, disable_notification=True)
+                track(msg.chat.id, sent.message_id, follow_up)
             except Exception as exc:
                 log.debug("bef follow-up send failed: %s", exc)
 

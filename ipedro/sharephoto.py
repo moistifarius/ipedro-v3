@@ -17,6 +17,7 @@ import time
 from aiogram import Bot
 from aiogram.types import BufferedInputFile
 
+from ipedro.bot_messages import track
 from ipedro.config import Settings
 from ipedro.db.pool import Database
 from ipedro.openai_client import OpenAIClient
@@ -55,12 +56,13 @@ async def _take_and_post_photo(
     )
     caption = (caption or scene).strip()[:1000]
     try:
-        await bot.send_photo(
+        sent = await bot.send_photo(
             chat_id,
             BufferedInputFile(image, filename="dude.png"),
             caption=caption,
             disable_notification=True,
         )
+        track(chat_id, sent.message_id, caption)
         log.info("Share-photo posted in chat %s: %s", chat_id, scene)
     except Exception as exc:  # pragma: no cover
         log.warning("Failed to send share-photo to %s: %s", chat_id, exc)

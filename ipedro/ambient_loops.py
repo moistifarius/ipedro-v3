@@ -15,9 +15,11 @@ from datetime import datetime, timezone
 
 from aiogram import Bot
 
+from ipedro.bot_messages import track
 from ipedro.db.pool import Database
 from ipedro.openai_client import OpenAIClient
 from ipedro.prompts import FORTUNE_PROMPT, YEAR_RETRO_PROMPT
+from ipedro.silenced_chats import is_silenced
 
 log = logging.getLogger(__name__)
 
@@ -41,11 +43,13 @@ async def _maybe_surface_confession(bot: Bot, db: Database) -> None:
     if not chats:
         return
     chat_id = random.choice(chats)["chat_id"]
+    text = f"📩 An anonymous confession from somewhere:\n\n{conf['text']}"
     try:
-        await bot.send_message(
-            chat_id,
-            f"📩 An anonymous confession from somewhere:\n\n{conf['text']}",
+        sent = await bot.send_message(
+            chat_id, text,
+            disable_notification=is_silenced(chat_id),
         )
+        track(chat_id, sent.message_id, text)
         await db.execute(
             "UPDATE confessions SET surfaced_at = NOW() WHERE id = $1",
             conf["id"],
@@ -86,11 +90,13 @@ async def _maybe_yearly_retro(
         )
         if not retro:
             continue
+        text = f"🎆 {year} — A Year in Review 🎆\n\n{retro}"
         try:
-            await bot.send_message(
-                chat_id,
-                f"🎆 {year} — A Year in Review 🎆\n\n{retro}",
+            sent = await bot.send_message(
+                chat_id, text,
+                disable_notification=is_silenced(chat_id),
             )
+            track(chat_id, sent.message_id, text)
             await db.execute(
                 "INSERT INTO chat_state (chat_id, last_retrospective_year) "
                 "VALUES ($1, $2) "
@@ -123,8 +129,13 @@ async def _maybe_daily_fortune(
         )
         if not fortune:
             continue
+        text = f"🥠 {fortune}"
         try:
-            await bot.send_message(chat_id, f"🥠 {fortune}")
+            sent = await bot.send_message(
+                chat_id, text,
+                disable_notification=is_silenced(chat_id),
+            )
+            track(chat_id, sent.message_id, text)
             await db.execute(
                 "INSERT INTO chat_state (chat_id, last_fortune_date) "
                 "VALUES ($1, $2) "

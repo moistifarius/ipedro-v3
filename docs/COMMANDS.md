@@ -48,6 +48,7 @@ bot's admin user. Fields:
 | `duckhunt` | `on` / `off` |
 | `voice` | `on` / `off` — transcribe inbound voice notes |
 | `memory` | `on` / `off` — store messages and build context from history |
+| `ether` | `on` / `off` — opt this chat into cross-chat pager garbling (📟). Every ~hour, a recent message from any other ether-opted chat may be picked, garbled (dropped chars, leet subs, blackouts, truncation), and broadcast here with a spooky wrapper. Receiver cooldown: 4h. Needs ≥ 2 chats opted in. |
 
 ### Duckhunt
 
@@ -139,6 +140,18 @@ One-screen menu of every admin operation. Five categories (Memory /
 Duckhunt / AI providers / Chats / Debug & status) each opening a
 sub-menu of buttons that fire the same underlying handlers as the
 individual slash commands.
+
+### `/config_for [<chat_id>]`
+DM-only. Opens the same inline-keyboard `/config` wizard that runs
+in-group, but scoped to any chat the bot knows. Two forms:
+
+- `/config_for` — chat picker → wizard for the picked chat.
+- `/config_for <chat_id>` — wizard for that chat directly.
+
+Lets the admin twiddle per-chat settings (duckhunt / sharephoto / comic /
+fortune / voice / memory / response policy / persona) without typing
+`/config` in the group, which would surface the wizard to every member.
+Also reachable as `/manage → Chats → Configure a chat`.
 
 ### `/memory_facts [chat_id]`
 List durable facts stored for a chat. With no argument, shows an inline
@@ -245,3 +258,22 @@ the row in `duck_events` with `resolved_action = 'admin_cleared'`.
 Useful when a stuck duck is blocking your `bef` flow testing or when
 you want to force the spawner to consider the chat as duck-less on the
 next tick.
+
+### `/delete_msg [<chat_id>]`
+Pick a chat (omitted → chat picker), then pick one of the bot's recent
+messages in that chat to delete. The buffer is in-memory and bounded to
+the last 20 sends per chat; restarts wipe it. Telegram only lets the bot
+delete its own messages within ~48h, so older entries may fail.
+
+### `/delete_last [<chat_id>] [<N>]`
+Delete the bot's last *N* messages (≤ 20) in a chosen chat. With both
+args, runs directly; with one or none, opens a picker. N > 1 shows a
+confirm prompt before deleting.
+
+### `/silent_chat <chat_id>`, `/unsilent_chat <chat_id>`, `/silenced_chats`
+Admin-only override: flag specific chats so the ambient loops
+(celebrations, fortune, retro, confession) send with
+`disable_notification=True`. Not exposed via `/chat_config` or the
+`/config` wizard — this is the admin's lever for keeping a chat quiet
+without exposing the toggle to chat members. Same panel is reachable
+from `/manage → 💬 Chats → 🤫 Silenced chats`. Persisted in `kv_store`.

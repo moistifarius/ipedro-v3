@@ -14,6 +14,9 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramBadRequest
 
 from ipedro.auth import is_admin_user
+from ipedro.bot_messages import (
+    TrackedMessage, forget as forget_tracked, recent as recent_tracked,
+)
 from ipedro.duckhunt.debug_toggles import (
     DEBUG_TOGGLE_NAMES, all_for as debug_toggles_all_for, set_toggle as set_debug_toggle,
 )
@@ -29,6 +32,9 @@ from ipedro.personas import (
     DEFAULT_DUDE_PROMPT, current_master_prompt, set_master_prompt_override,
 )
 from ipedro.runtime import Runtime
+from ipedro.silenced_chats import (
+    is_silenced, list_silenced, silence as silence_chat, unsilence as unsilence_chat,
+)
 
 # Admin-keyed stash for /memory_search: the user types `/memory_search <query>`
 # (the query can't fit in a 64-byte callback_data alongside the chat id), so
@@ -356,6 +362,8 @@ def _mgm_chats_submenu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="List chat ids",           callback_data="mgm:chats:list")],
         [InlineKeyboardButton(text="Pick chat (copy id)",     callback_data="mgm:chats:pick")],
+        [InlineKeyboardButton(text="Configure a chat",        callback_data="mgm:chats:config")],
+        [InlineKeyboardButton(text="🤫 Silenced chats",        callback_data="mgm:chats:silenced")],
         [InlineKeyboardButton(text="← back",                  callback_data="mgm:top")],
     ])
 
@@ -381,7 +389,8 @@ _MGM_LEAVES: tuple[str, ...] = (
     "mgm:duck", "mgm:duck:edit", "mgm:duck:reset",
     "mgm:duck:spawn", "mgm:duck:spawnall",
     "mgm:ai", "mgm:ai:show",
-    "mgm:chats", "mgm:chats:list", "mgm:chats:pick",
+    "mgm:chats", "mgm:chats:list", "mgm:chats:pick", "mgm:chats:config",
+    "mgm:chats:silenced", "mgm:chats:silenced:add",
     "mgm:debug", "mgm:debug:status", "mgm:debug:logs",
     "mgm:debug:cost", "mgm:debug:cmdlog",
     "mgm:debug:toggles", "mgm:debug:cleard",
@@ -996,6 +1005,640 @@ def build_router(rt: Runtime) -> Router:
             except TelegramBadRequest:
                 pass
         await cb.answer(str(target))
+
+    async def _render_config_for(target_chat_id: int, *, reply_to: Message | None,
+                                 edit_in: Message | None) -> None:
+        """Render the inline-keyboard config wizard for a target chat, scoped to
+        an admin DM. Re-uses utility.py's wizard primitives so we have exactly
+        one wizard code-path."""
+        # Local import — utility imports nothing from admin, but the inverse
+        # would require pulling utility's whole router graph if done at module
+        # top. Keeping the import inside the function keeps the cycle clean.
+        from ipedro.handlers.utility import (
+            _config_keyboard, _config_wizard_header,
+        )
+        # Ensure the row exists so the wizard has something to toggle.
+        cfg = await rt.chats.get_config(target_chat_id)
+        if cfg is None:
+            # No /config has ever run in the target chat. Seed with defaults
+            # so the wizard isn't an empty shell on first open. We don't have
+            # a Message scoped to that chat here, so use settings directly.
+            s = rt.settings
+            cfg = await rt.chats.upsert_default_config(
+                target_chat_id,
+                response_policy=s.default_response_policy_group,
+                ambient_probability=s.default_ambient_probability,
+                persona=s.default_persona,
+                duckhunt_enabled=s.duckhunt_enabled_by_default,
+            )
+        body = _config_wizard_header(cfg, target_chat_id, is_dm_scoped=True)
+        kb = _config_keyboard(cfg, target_chat_id=target_chat_id)
+        if reply_to:
+            await reply_to.reply(body, reply_markup=kb, disable_notification=True)
+        elif edit_in:
+            try:
+                await edit_in.edit_text(body, reply_markup=kb)
+            except TelegramBadRequest:
+                pass
+
+    @r.message(Command("config_for"))
+    async def config_for(msg: Message) -> None:
+        """Open the /config wizard from a DM, scoped to any known chat.
+
+        /config_for             → chat picker, then wizard
+        /config_for <chat_id>   → wizard directly for that chat
+        """
+        if not await require_admin(msg, admin_ids):
+            return
+        parts = (msg.text or "").split()
+        if len(parts) >= 2:
+            try:
+                target = int(parts[1])
+            except ValueError:
+                await msg.reply("Invalid chat id.", disable_notification=True)
+                return
+            await _render_config_for(target, reply_to=msg, edit_in=None)
+            return
+        chats = await rt.chats.list_known()
+        kb = _chat_picker(
+            chats, "cfgfor",
+            paginate=True,
+            admin_user_id=msg.from_user.id if msg.from_user else None,
+            home_to_manage=False,
+        )
+        if kb is None:
+            await msg.reply("No known chats yet.", disable_notification=True)
+            return
+        await msg.reply(
+            "Pick a chat to configure:",
+            reply_markup=kb,
+            disable_notification=True,
+        )
+
+    @r.callback_query(F.data.startswith("cfgfor:"))
+    async def on_config_for(cb: CallbackQuery) -> None:
+        if not await _gate_callback(cb):
+            return
+        parsed = _parse_picker_cb(cb.data)
+        if parsed is None:
+            await cb.answer(_expired("config_for"), show_alert=True)
+            return
+        kind, n = parsed
+        if kind == "page":
+            chats = await rt.chats.list_known()
+            kb = _chat_picker(
+                chats, "cfgfor", paginate=True, page=n,
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+                home_to_manage=False,
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_reply_markup(reply_markup=kb)
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        target = n
+        if cb.from_user is not None:
+            _LAST_PICKED_CHAT[cb.from_user.id] = (target, time.time())
+        await _render_config_for(target, reply_to=None, edit_in=cb.message)
+        await cb.answer()
+
+    # -------------------------------- /delete_msg + /delete_last ------------
+    def _format_tracked_entry(entry: TrackedMessage) -> str:
+        age = max(0, int(time.time() - entry.sent_at))
+        if age < 60:
+            ago = f"{age}s ago"
+        elif age < 3600:
+            ago = f"{age // 60}m ago"
+        elif age < 86400:
+            ago = f"{age // 3600}h ago"
+        else:
+            ago = f"{age // 86400}d ago"
+        snippet = entry.snippet or "(no preview)"
+        return f"{ago} #{entry.message_id} — {snippet}"[:60]
+
+    def _delete_msg_picker(chat_id: int) -> InlineKeyboardMarkup | None:
+        """Render the per-message list for /delete_msg."""
+        entries = recent_tracked(chat_id)
+        if not entries:
+            return None
+        rows: list[list[InlineKeyboardButton]] = []
+        for e in entries:
+            rows.append([InlineKeyboardButton(
+                text=_format_tracked_entry(e),
+                callback_data=f"dmsg:{chat_id}:{e.message_id}",
+            )])
+        rows.append([InlineKeyboardButton(
+            text="← chats", callback_data="dmsg:back",
+        )])
+        rows.append([_home_button()])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    async def _do_delete_bot_message(target_chat_id: int, message_id: int) -> bool:
+        """Attempt the actual Telegram delete. Returns True iff it succeeded."""
+        try:
+            await rt.bot.delete_message(target_chat_id, message_id)
+            forget_tracked(target_chat_id, message_id)
+            return True
+        except TelegramBadRequest as exc:
+            log.warning(
+                "delete_message failed chat=%s msg=%s: %s",
+                target_chat_id, message_id, exc,
+            )
+            return False
+        except Exception as exc:  # pragma: no cover
+            log.warning(
+                "delete_message error chat=%s msg=%s: %s",
+                target_chat_id, message_id, exc,
+            )
+            return False
+
+    @r.message(Command("delete_msg"))
+    async def delete_msg(msg: Message) -> None:
+        """Delete one of the bot's recent messages in a chat. Admin DM only.
+
+        /delete_msg                → chat picker → message picker
+        /delete_msg <chat_id>      → message picker for that chat
+        """
+        if not await require_admin(msg, admin_ids):
+            return
+        parts = (msg.text or "").split()
+        if len(parts) >= 2:
+            try:
+                target = int(parts[1])
+            except ValueError:
+                await msg.reply("Invalid chat id.", disable_notification=True)
+                return
+            kb = _delete_msg_picker(target)
+            if kb is None:
+                await msg.reply(
+                    f"No recent bot messages tracked for chat {target} "
+                    "(buffer is in-memory; restarts wipe it).",
+                    disable_notification=True,
+                )
+                return
+            await msg.reply(
+                f"Pick a bot message in chat {target} to delete:",
+                reply_markup=kb,
+                disable_notification=True,
+            )
+            return
+        chats = await rt.chats.list_known()
+        kb = _chat_picker(
+            chats, "dmsgchat",
+            paginate=True,
+            admin_user_id=msg.from_user.id if msg.from_user else None,
+            home_to_manage=False,
+        )
+        if kb is None:
+            await msg.reply("No known chats yet.", disable_notification=True)
+            return
+        await msg.reply(
+            "Pick a chat to delete a bot message in:",
+            reply_markup=kb,
+            disable_notification=True,
+        )
+
+    @r.callback_query(F.data.startswith("dmsgchat:"))
+    async def on_delete_msg_chat(cb: CallbackQuery) -> None:
+        if not await _gate_callback(cb):
+            return
+        parsed = _parse_picker_cb(cb.data)
+        if parsed is None:
+            await cb.answer(_expired("delete_msg"), show_alert=True)
+            return
+        kind, n = parsed
+        if kind == "page":
+            chats = await rt.chats.list_known()
+            kb = _chat_picker(
+                chats, "dmsgchat", paginate=True, page=n,
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+                home_to_manage=False,
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_reply_markup(reply_markup=kb)
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        target = n
+        if cb.from_user is not None:
+            _LAST_PICKED_CHAT[cb.from_user.id] = (target, time.time())
+        kb = _delete_msg_picker(target)
+        if cb.message:
+            if kb is None:
+                try:
+                    await cb.message.edit_text(
+                        f"No recent bot messages tracked for chat {target}.",
+                    )
+                except TelegramBadRequest:
+                    pass
+            else:
+                try:
+                    await cb.message.edit_text(
+                        f"Pick a bot message in chat {target} to delete:",
+                        reply_markup=kb,
+                    )
+                except TelegramBadRequest:
+                    pass
+        await cb.answer()
+
+    @r.callback_query(F.data.startswith("dmsg:"))
+    async def on_delete_msg(cb: CallbackQuery) -> None:
+        if not await _gate_callback(cb):
+            return
+        parts = cb.data.split(":")
+        # dmsg:back → re-open the chat picker
+        if len(parts) >= 2 and parts[1] == "back":
+            await _open_picker(
+                rt, edit_in=cb.message,
+                prompt="Pick a chat to delete a bot message in:",
+                action="dmsgchat",
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+                home_to_manage=False,
+            )
+            await cb.answer()
+            return
+        if len(parts) < 3:
+            await cb.answer(_expired("delete_msg"), show_alert=True)
+            return
+        try:
+            target = int(parts[1])
+            message_id = int(parts[2])
+        except ValueError:
+            await cb.answer(_expired("delete_msg"), show_alert=True)
+            return
+        ok = await _do_delete_bot_message(target, message_id)
+        # Re-render the picker so the deleted row is gone.
+        if cb.message:
+            kb = _delete_msg_picker(target)
+            if kb is None:
+                try:
+                    await cb.message.edit_text(
+                        f"Deleted. No more tracked messages in chat {target}."
+                        if ok else
+                        f"Couldn't delete msg #{message_id} in chat {target} "
+                        "(too old? bot lacks delete perms?).",
+                    )
+                except TelegramBadRequest:
+                    pass
+            else:
+                head = (
+                    f"Deleted #{message_id}. Pick another:"
+                    if ok else
+                    f"Couldn't delete #{message_id}. Pick another:"
+                )
+                try:
+                    await cb.message.edit_text(head, reply_markup=kb)
+                except TelegramBadRequest:
+                    pass
+        await cb.answer("Deleted." if ok else "Delete failed.")
+
+    @r.message(Command("delete_last"))
+    async def delete_last(msg: Message) -> None:
+        """Delete the bot's last N messages in a picked chat. Admin DM only.
+
+        /delete_last                       → picker; defaults N=1
+        /delete_last <N>                   → picker; defaults to N (≤ 20)
+        /delete_last <chat_id> <N>         → direct
+        """
+        if not await require_admin(msg, admin_ids):
+            return
+        parts = (msg.text or "").split()
+        n: int = 1
+        chat_id: int | None = None
+        if len(parts) == 2:
+            try:
+                n = max(1, min(20, int(parts[1])))
+            except ValueError:
+                await msg.reply("Bad N.", disable_notification=True)
+                return
+        elif len(parts) >= 3:
+            try:
+                chat_id = int(parts[1])
+                n = max(1, min(20, int(parts[2])))
+            except ValueError:
+                await msg.reply(
+                    "Usage: /delete_last [chat_id] <N>",
+                    disable_notification=True,
+                )
+                return
+        if chat_id is not None:
+            if n > 1:
+                kb = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text=f"⚠️ Delete last {n}",
+                        callback_data=f"dlast:{chat_id}:{n}:confirm",
+                    ),
+                    InlineKeyboardButton(
+                        text="Cancel",
+                        callback_data=f"dlast:{chat_id}:{n}:cancel",
+                    ),
+                ]])
+                await msg.reply(
+                    f"Delete the last {n} bot messages in chat {chat_id}?",
+                    reply_markup=kb, disable_notification=True,
+                )
+                return
+            # N == 1, just do it.
+            await _execute_delete_last(msg, chat_id, 1)
+            return
+        # No chat id → picker. Stash the N on the callback prefix.
+        chats = await rt.chats.list_known()
+        kb = _chat_picker(
+            chats, f"dlastch:{n}",
+            paginate=True,
+            admin_user_id=msg.from_user.id if msg.from_user else None,
+            home_to_manage=False,
+        )
+        if kb is None:
+            await msg.reply("No known chats yet.", disable_notification=True)
+            return
+        await msg.reply(
+            f"Pick a chat to delete the last {n} bot message(s) in:",
+            reply_markup=kb, disable_notification=True,
+        )
+
+    async def _execute_delete_last(
+        target_msg: Message | None,
+        chat_id: int,
+        n: int,
+        edit_in: Message | None = None,
+    ) -> None:
+        entries = recent_tracked(chat_id)[:n]
+        if not entries:
+            body = f"No recent bot messages tracked for chat {chat_id}."
+        else:
+            ok = 0
+            for e in entries:
+                if await _do_delete_bot_message(chat_id, e.message_id):
+                    ok += 1
+            body = (
+                f"Deleted {ok}/{len(entries)} message(s) in chat {chat_id}."
+            )
+        if target_msg is not None:
+            await target_msg.reply(body, disable_notification=True)
+        elif edit_in is not None:
+            try:
+                await edit_in.edit_text(body)
+            except TelegramBadRequest:
+                pass
+
+    @r.callback_query(F.data.startswith("dlastch:"))
+    async def on_delete_last_chat(cb: CallbackQuery) -> None:
+        if not await _gate_callback(cb):
+            return
+        # dlastch:N:CHATID  or  dlastch:N:p:PAGE
+        parts = cb.data.split(":")
+        if len(parts) < 3:
+            await cb.answer(_expired("delete_last"), show_alert=True)
+            return
+        try:
+            n = max(1, min(20, int(parts[1])))
+        except ValueError:
+            await cb.answer(_expired("delete_last"), show_alert=True)
+            return
+        # Pagination?
+        if len(parts) >= 4 and parts[2] == "p":
+            try:
+                page = int(parts[3])
+            except ValueError:
+                await cb.answer(_expired("delete_last"), show_alert=True)
+                return
+            chats = await rt.chats.list_known()
+            kb = _chat_picker(
+                chats, f"dlastch:{n}", paginate=True, page=page,
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+                home_to_manage=False,
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_reply_markup(reply_markup=kb)
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        try:
+            target = int(parts[2])
+        except ValueError:
+            await cb.answer(_expired("delete_last"), show_alert=True)
+            return
+        if cb.from_user is not None:
+            _LAST_PICKED_CHAT[cb.from_user.id] = (target, time.time())
+        if n > 1 and cb.message:
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text=f"⚠️ Delete last {n}",
+                    callback_data=f"dlast:{target}:{n}:confirm",
+                ),
+                InlineKeyboardButton(
+                    text="Cancel",
+                    callback_data=f"dlast:{target}:{n}:cancel",
+                ),
+            ]])
+            try:
+                await cb.message.edit_text(
+                    f"Delete the last {n} bot messages in chat {target}?",
+                    reply_markup=kb,
+                )
+            except TelegramBadRequest:
+                pass
+            await cb.answer()
+            return
+        # N == 1, just do it.
+        await _execute_delete_last(None, target, 1, edit_in=cb.message)
+        await cb.answer("Deleted.")
+
+    @r.callback_query(F.data.startswith("dlast:"))
+    async def on_delete_last_confirm(cb: CallbackQuery) -> None:
+        if not await _gate_callback(cb):
+            return
+        parts = cb.data.split(":")
+        if len(parts) < 4:
+            await cb.answer(_expired("delete_last"), show_alert=True)
+            return
+        try:
+            target = int(parts[1])
+            n = max(1, min(20, int(parts[2])))
+        except ValueError:
+            await cb.answer(_expired("delete_last"), show_alert=True)
+            return
+        suffix = parts[3]
+        if suffix == "cancel":
+            if cb.message:
+                try:
+                    await cb.message.edit_text("Cancelled.")
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        await _execute_delete_last(None, target, n, edit_in=cb.message)
+        await cb.answer("Deleted.")
+
+    # -------------------------------- silenced-chats (admin-only override) ---
+    @r.message(Command("silenced_chats"))
+    async def silenced_chats_cmd(msg: Message) -> None:
+        """List the chats currently silenced for the ambient loops."""
+        if not await require_admin(msg, admin_ids):
+            return
+        ids = list_silenced()
+        if not ids:
+            await msg.reply(
+                "No chats silenced. Use /silent_chat <chat_id> to add one.",
+                disable_notification=True,
+            )
+            return
+        chats_map = {c["chat_id"]: c for c in await rt.chats.list_known()}
+        lines = ["🤫 Silenced chats:"]
+        for cid in ids:
+            ch = chats_map.get(cid)
+            title = (ch.get("title") if ch else None) or "(unknown)"
+            lines.append(f"  {cid} — {title}")
+        lines.append("\nUnsilence with /unsilent_chat <chat_id>.")
+        await msg.reply("\n".join(lines)[:4000], disable_notification=True)
+
+    @r.message(Command("silent_chat"))
+    async def silent_chat_cmd(msg: Message) -> None:
+        """Silence a chat — celebrations / fortune / retro / confession sends
+        will be posted with disable_notification=True. Admin DM only."""
+        if not await require_admin(msg, admin_ids):
+            return
+        parts = (msg.text or "").split()
+        if len(parts) < 2:
+            await msg.reply(
+                "Usage: /silent_chat <chat_id>", disable_notification=True,
+            )
+            return
+        try:
+            chat_id = int(parts[1])
+        except ValueError:
+            await msg.reply("Invalid chat id.", disable_notification=True)
+            return
+        added = await silence_chat(rt.db, chat_id)
+        await msg.reply(
+            f"Silenced chat {chat_id}." if added else
+            f"Chat {chat_id} was already silenced.",
+            disable_notification=True,
+        )
+
+    @r.message(Command("unsilent_chat"))
+    async def unsilent_chat_cmd(msg: Message) -> None:
+        """Drop a chat from the silenced set. Admin DM only."""
+        if not await require_admin(msg, admin_ids):
+            return
+        parts = (msg.text or "").split()
+        if len(parts) < 2:
+            await msg.reply(
+                "Usage: /unsilent_chat <chat_id>", disable_notification=True,
+            )
+            return
+        try:
+            chat_id = int(parts[1])
+        except ValueError:
+            await msg.reply("Invalid chat id.", disable_notification=True)
+            return
+        removed = await unsilence_chat(rt.db, chat_id)
+        await msg.reply(
+            f"Unsilenced chat {chat_id}." if removed else
+            f"Chat {chat_id} was not silenced.",
+            disable_notification=True,
+        )
+
+    async def _render_silenced_panel(edit_in: Message) -> None:
+        ids = list_silenced()
+        chats_map = {c["chat_id"]: c for c in await rt.chats.list_known()}
+        lines = [
+            "🤫 Silenced chats — bot suppresses notifications on these chats "
+            "for ambient sends (celebrations / fortune / retro / confession).",
+            "",
+        ]
+        rows: list[list[InlineKeyboardButton]] = []
+        if not ids:
+            lines.append("(none silenced)")
+        else:
+            for cid in ids:
+                ch = chats_map.get(cid)
+                title = (ch.get("title") if ch else None) or "(unknown)"
+                lines.append(f"  {cid} — {title}")
+                rows.append([InlineKeyboardButton(
+                    text=f"🔔 Unsilence {title[:30]}",
+                    callback_data=f"unsil:{cid}",
+                )])
+        rows.append([InlineKeyboardButton(
+            text="🤫 Silence a chat…", callback_data="mgm:chats:silenced:add",
+        )])
+        rows.append([
+            InlineKeyboardButton(text="← back", callback_data="mgm:chats"),
+            _home_button(),
+        ])
+        try:
+            await edit_in.edit_text(
+                "\n".join(lines)[:4000],
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+            )
+        except TelegramBadRequest:
+            pass
+
+    @r.callback_query(F.data.startswith("unsil:"))
+    async def on_unsilence(cb: CallbackQuery) -> None:
+        if not await _gate_callback(cb):
+            return
+        parts = cb.data.split(":")
+        if len(parts) < 2:
+            await cb.answer(_expired("unsilence"), show_alert=True)
+            return
+        try:
+            chat_id = int(parts[1])
+        except ValueError:
+            await cb.answer(_expired("unsilence"), show_alert=True)
+            return
+        await unsilence_chat(rt.db, chat_id)
+        if cb.message:
+            await _render_silenced_panel(cb.message)
+        await cb.answer(f"Unsilenced {chat_id}.")
+
+    @r.callback_query(F.data.startswith("silch:"))
+    async def on_silence_picker(cb: CallbackQuery) -> None:
+        if not await _gate_callback(cb):
+            return
+        parts = cb.data.split(":")
+        if len(parts) < 2:
+            await cb.answer(_expired("silence"), show_alert=True)
+            return
+        # Pagination: silch:p:N
+        if parts[1] == "p" and len(parts) >= 3:
+            try:
+                page = int(parts[2])
+            except ValueError:
+                await cb.answer(_expired("silence"), show_alert=True)
+                return
+            chats = await rt.chats.list_known()
+            kb = _chat_picker(
+                chats, "silch", paginate=True, page=page,
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+                home_to_manage=False,
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_reply_markup(reply_markup=kb)
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        try:
+            chat_id = int(parts[1])
+        except ValueError:
+            await cb.answer(_expired("silence"), show_alert=True)
+            return
+        if is_silenced(chat_id):
+            await cb.answer(f"Chat {chat_id} already silenced.")
+        else:
+            await silence_chat(rt.db, chat_id)
+            await cb.answer(f"Silenced {chat_id}.")
+        if cb.message:
+            await _render_silenced_panel(cb.message)
 
     @r.message(Command("ai_provider"))
     async def ai_provider(msg: Message) -> None:
@@ -2828,6 +3471,31 @@ def build_router(rt: Runtime) -> Router:
                 action="pchat",
                 admin_user_id=cb.from_user.id if cb.from_user else None,
             home_to_manage=True,
+            )
+            await cb.answer()
+            return
+        if data == "mgm:chats:config":
+            await _open_picker(
+                rt, edit_in=msg,
+                prompt="Pick a chat to configure:",
+                action="cfgfor",
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+                home_to_manage=True,
+            )
+            await cb.answer()
+            return
+        if data == "mgm:chats:silenced":
+            if msg:
+                await _render_silenced_panel(msg)
+            await cb.answer()
+            return
+        if data == "mgm:chats:silenced:add":
+            await _open_picker(
+                rt, edit_in=msg,
+                prompt="Pick a chat to silence:",
+                action="silch",
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+                home_to_manage=False,
             )
             await cb.answer()
             return

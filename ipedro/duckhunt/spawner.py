@@ -25,6 +25,7 @@ import time
 
 from aiogram import Bot
 
+from ipedro.bot_messages import track
 from ipedro.config import Settings
 from ipedro.db.pool import Database
 from ipedro.duckhunt.scoring import current_holiday
@@ -147,7 +148,8 @@ async def _maybe_spawn(
     )
     text = await build_quack_message_for(openai, duck)
     try:
-        await bot.send_message(chat_id, text, disable_notification=True)
+        sent = await bot.send_message(chat_id, text, disable_notification=True)
+        track(chat_id, sent.message_id, text)
     except Exception as exc:  # pragma: no cover
         log.warning("Failed to deliver quack to %s: %s", chat_id, exc)
     log.info(
@@ -187,11 +189,12 @@ async def run_spawner(
                 # `bang` / `bef` / `ignore`.
                 for chat_id in departed:
                     try:
-                        await bot.send_message(
+                        sent = await bot.send_message(
                             chat_id,
-                            "🦆 *the duck wanders off, never to be seen again.*",
+                            "🦆 The duck wandered off.",
                             disable_notification=True,
                         )
+                        track(chat_id, sent.message_id, "🦆 The duck wandered off.")
                     except Exception as exc:  # pragma: no cover
                         log.warning(
                             "Wander-off announce failed for chat %s: %s",

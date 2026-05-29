@@ -30,6 +30,7 @@ from ipedro.handlers import utility as utility_h
 from ipedro.logging_setup import configure_logging
 from ipedro.celebrations import run_celebrations_loop
 from ipedro.comic import run_comic_loop
+from ipedro.ether import run_ether_loop
 from ipedro.kv import kv_get
 from ipedro.personas import set_master_prompt_override
 from ipedro.memory.store import MemoryStore
@@ -38,6 +39,7 @@ from ipedro.persona_state import PersonaStateService
 from ipedro.reminders import run_reminders_loop
 from ipedro.runtime import Runtime
 from ipedro.sharephoto import run_share_photo_loop
+from ipedro.silenced_chats import load_all as load_silenced_chats
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +93,10 @@ async def build_runtime(settings: Settings) -> Runtime:
     # Prime the admin debug-toggle cache from kv_store so the bot honors
     # any toggles the admin had set before the last restart.
     await load_debug_toggles(db, settings.admin_ids)
+
+    # Prime the admin-only silenced-chats set so ambient loops respect it
+    # from the first tick after restart.
+    await load_silenced_chats(db)
 
     memory = MemoryStore(db=db, openai=openai, pgvector_available=pgvector_available)
     return Runtime(
@@ -163,6 +169,10 @@ async def run() -> None:
         run_ambient_loops(rt.bot, rt.db, rt.openai, stop),
         name="ambient-loops",
     )
+    ether_task = asyncio.create_task(
+        run_ether_loop(rt.bot, rt.db, stop),
+        name="ether",
+    )
 
     try:
         polling = asyncio.create_task(
@@ -186,7 +196,7 @@ async def run() -> None:
         stop.set()
         for task in (
             spawner_task, share_photo_task, reminders_task,
-            celebrations_task, comic_task, ambient_task,
+            celebrations_task, comic_task, ambient_task, ether_task,
         ):
             task.cancel()
             try:
