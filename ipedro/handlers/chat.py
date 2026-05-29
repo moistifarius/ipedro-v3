@@ -6,6 +6,7 @@ import io
 import logging
 import random
 import re
+from datetime import datetime, timezone
 
 from aiogram import F, Router
 from aiogram.types import Message, ReactionTypeEmoji
@@ -23,6 +24,14 @@ from ipedro.runtime import Runtime
 from ipedro.user_flags import has_flag, maybe_auto_grudge
 
 log = logging.getLogger(__name__)
+
+# A pending bef challenge gates the chat: while one is outstanding, any
+# plain text the user sends is judged as their answer. Without an upper
+# bound a forgotten challenge would hijack the chat forever (most painful
+# in a 1:1 DM, where there's nothing else to talk past). After this many
+# seconds we treat the challenge as abandoned: clear it silently and let
+# the message flow through as normal conversation.
+_BEF_CHALLENGE_TTL_SECONDS = 3600  # 1h
 
 # Bare "dude" / "man" are way too common, so only the specific Dude
 # aliases trigger a name mention. Legacy "pedro" mentions still trigger.
@@ -118,6 +127,22 @@ def _is_command(text: str | None) -> bool:
     return bool(text) and text.startswith("/")
 
 
+def _challenge_is_stale(challenge) -> bool:
+    """True if a pending bef challenge is older than the TTL.
+
+    Tolerant of a missing/naive ``created_at``: a challenge we can't age
+    is treated as fresh (never auto-cleared) so we don't drop a freshly
+    issued one on a clock quirk.
+    """
+    created = getattr(challenge, "created_at", None)
+    if created is None:
+        return False
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - created).total_seconds()
+    return age > _BEF_CHALLENGE_TTL_SECONDS
+
+
 def _bot_username(rt: Runtime) -> str | None:
     me = getattr(rt.bot, "_me", None)
     if me and getattr(me, "username", None):
@@ -195,10 +220,17 @@ def build_router(rt: Runtime) -> Router:
         #      outstanding challenge per (chat, user), so any text they send
         #      while a challenge is pending becomes the attempt. This mirrors
         #      the "Solve the challenge first" rule the bef action enforces.
+        # Slash-commands are never challenge answers: a user mid-challenge
+        # must still be able to run /chat_config, /help, /debug_*, etc.
+        # (Registered commands route to their own handlers before this
+        # catch-all, but an unrecognized /foo would otherwise fall through
+        # and get judged — and worse, block the escape hatches.)
+        _challenge_text = (msg.text or msg.caption or "")
         if (
             cfg.duckhunt_enabled
             and msg.from_user is not None
-            and (msg.text or msg.caption)
+            and _challenge_text
+            and not _is_command(_challenge_text)
         ):
             challenge = None
             if msg.reply_to_message is not None:
@@ -209,6 +241,17 @@ def build_router(rt: Runtime) -> Router:
                 challenge = await rt.duckhunt.get_bef_challenge(
                     msg.chat.id, msg.from_user.id,
                 )
+            # Stale challenge → abandon it and fall through to normal
+            # handling instead of judging this message as an answer.
+            if challenge is not None and _challenge_is_stale(challenge):
+                log.info(
+                    "Clearing stale bef challenge: chat=%s user=%s age>%ss",
+                    msg.chat.id, challenge.user_id, _BEF_CHALLENGE_TTL_SECONDS,
+                )
+                await rt.duckhunt.clear_bef_challenge(
+                    msg.chat.id, challenge.user_id,
+                )
+                challenge = None
             if challenge and challenge.user_id == msg.from_user.id:
                 answer = (msg.text or msg.caption or "").strip()
                 verdict: bool | None

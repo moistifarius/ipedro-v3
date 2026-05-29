@@ -128,6 +128,8 @@ HELP_TEXT_ADMIN = (
     "/debug_help - debug-command index\n"
     "/debug_captcha, /debug_challenge, /debug_trivia, /debug_recipe, "
     "/debug_duck, /debug_sharephoto, /debug_ether\n"
+    "/debug_clear_challenge [chat_id] - clear stuck bef challenge(s) in a "
+    "chat (unsticks endless 'Not quite. Try again.')\n"
     "/debug_toggle [name] [on|off] - admin-scoped duckhunt cheats "
     "(always_hit, always_miss, always_pass_challenge, "
     "always_fail_challenge, always_refuse_bef, bypass_cooldowns)\n"

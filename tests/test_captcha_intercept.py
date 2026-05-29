@@ -14,7 +14,7 @@ just to confirm the intercept fires (or doesn't) in each scenario.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -31,12 +31,15 @@ def _find_message_handler(router, name: str):
     raise AssertionError(f"handler {name} not registered")
 
 
-def _challenge(*, chat_id=42, user_id=7, answer="RMY4X", prompt_message_id=99):
+def _challenge(
+    *, chat_id=42, user_id=7, answer="RMY4X", prompt_message_id=99,
+    created_at=None,
+):
     """Build a PendingBefChallenge for a captcha — stored answer IS the text."""
     return PendingBefChallenge(
         chat_id=chat_id, user_id=user_id, challenge=answer, kind="captcha",
         prompt_message_id=prompt_message_id,
-        created_at=datetime.now(timezone.utc),
+        created_at=created_at or datetime.now(timezone.utc),
     )
 
 
@@ -184,6 +187,49 @@ async def test_intercept_skipped_when_duckhunt_disabled():
     # With duckhunt off, neither lookup should run.
     rt.duckhunt.find_bef_challenge_by_prompt.assert_not_called()
     rt.duckhunt.get_bef_challenge.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stale_challenge_is_cleared_and_not_judged():
+    """A challenge older than the TTL must be silently cleared and the
+    message allowed to flow through — never judged as a (failing) answer.
+
+    Without this guard a forgotten challenge hijacks the chat forever,
+    replying 'Not quite. Try again.' to everything (worst in a DM)."""
+    stale = _challenge(
+        created_at=datetime.now(timezone.utc) - timedelta(hours=2),
+    )
+    rt = _rt_with(get_by_user=stale)
+    on_message = _find_message_handler(build_router(rt), "on_message")
+    # Text that is NOT the captcha answer — if it were judged it'd fail.
+    msg = _msg(text="hey what's up", reply_to=None)
+    try:
+        await on_message(msg)
+    except Exception:
+        pass
+    # Stale challenge was cleared exactly once for the right (chat, user)…
+    rt.duckhunt.clear_bef_challenge.assert_awaited_once_with(42, 7)
+    # …and the bot did NOT reply with a judge verdict (no "Not quite").
+    for call in msg.reply.await_args_list:
+        assert "Not quite" not in (call.args[0] if call.args else "")
+
+
+@pytest.mark.asyncio
+async def test_command_mid_challenge_is_not_judged():
+    """A slash-command typed while a challenge is pending must not be
+    treated as an answer — the escape hatches have to stay reachable."""
+    challenge = _challenge()
+    rt = _rt_with(get_by_user=challenge)
+    on_message = _find_message_handler(build_router(rt), "on_message")
+    msg = _msg(text="/chat_config duckhunt off", reply_to=None)
+    try:
+        await on_message(msg)
+    except Exception:
+        pass
+    # The intercept never ran its lookups for a command message.
+    rt.duckhunt.get_bef_challenge.assert_not_called()
+    rt.duckhunt.find_bef_challenge_by_prompt.assert_not_called()
+    rt.duckhunt.clear_bef_challenge.assert_not_called()
 
 
 @pytest.mark.asyncio

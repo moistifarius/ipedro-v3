@@ -30,6 +30,9 @@ _HELP = (
     "  /debug_captcha — issue a captcha challenge\n"
     "  /debug_trivia — issue a trivia challenge\n"
     "  /debug_recipe — issue a recipe challenge\n"
+    "  /debug_clear_challenge [chat_id] — clear stuck bef challenge(s) in a "
+    "chat (default: this chat). Unsticks a chat where every message is "
+    "judged 'Not quite. Try again.'\n"
     "  /debug_duck — alias for /duckhunt (force-spawn in this chat)\n"
     "\nFor the others, just type the trigger:\n"
     "  say 'the dude' / 'duder' / 'el duderino' — Dude should reply\n"
@@ -104,6 +107,27 @@ def build_router(rt: Runtime) -> Router:
     @r.message(Command("debug_recipe"))
     async def debug_recipe(msg: Message) -> None:
         await _force_challenge(msg, kind="recipe")
+
+    @r.message(Command("debug_clear_challenge"))
+    async def debug_clear_challenge(msg: Message) -> None:
+        if not await require_admin(msg, rt.settings.admin_ids):
+            return
+        parts = (msg.text or "").split()
+        if len(parts) >= 2:
+            try:
+                target = int(parts[1])
+            except ValueError:
+                await msg.reply("Invalid chat id.", disable_notification=True)
+                return
+        else:
+            target = msg.chat.id
+        n = await rt.duckhunt.clear_all_bef_challenges(target)
+        await msg.reply(
+            f"Cleared {n} pending bef challenge(s) in chat {target}."
+            if n else
+            f"No pending bef challenges in chat {target}.",
+            disable_notification=True,
+        )
 
     @r.message(Command("debug_duck"))
     async def debug_duck(msg: Message) -> None:

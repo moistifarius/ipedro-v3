@@ -80,6 +80,13 @@ captcha, a weird trivia question, or "write me a recipe"). Reply
 directly to that challenge message with your attempt; if the AI judges
 it as good-faith, the challenge clears and you can try `bef` again.
 
+While a challenge is outstanding, any plain text you send in that chat
+is treated as your answer (so you don't have to formally reply). Two
+guardrails keep this from trapping you: slash-commands are never judged
+as answers, and a challenge auto-expires after 1h (the next message
+clears it and is handled normally). An admin can also force-clear a
+stuck challenge with `/debug_clear_challenge [chat_id]`.
+
 Ducks may also wander off on their own at any time — more likely as they
 hang around longer, and almost certainly gone after a day.
 

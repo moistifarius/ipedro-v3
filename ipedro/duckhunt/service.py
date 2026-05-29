@@ -537,6 +537,20 @@ class DuckhuntService:
             chat_id, user_id,
         )
 
+    async def clear_all_bef_challenges(self, chat_id: int) -> int:
+        """Drop every pending bef challenge in a chat. Returns the count.
+
+        Admin escape hatch (``/debug_clear_challenge``) for when a stuck
+        challenge is gating a chat — most acutely a DM, where the
+        interceptor otherwise judges every message as a failed answer."""
+        res = await self.db.execute(
+            "DELETE FROM bef_challenges WHERE chat_id = $1", chat_id,
+        )
+        try:
+            return int(res.split()[-1])
+        except (AttributeError, ValueError, IndexError):
+            return 0
+
     async def find_bef_challenge_by_prompt(
         self, chat_id: int, prompt_message_id: int,
     ) -> PendingBefChallenge | None:

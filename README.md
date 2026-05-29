@@ -132,6 +132,7 @@ a second message.
 | `/facts_chat` | Legacy alias for the `/memory_facts` picker |
 | `/debug_help` | Index of the debug-only commands |
 | `/debug_captcha`, `/debug_challenge`, `/debug_trivia`, `/debug_recipe`, `/debug_duck`, `/debug_sharephoto`, `/debug_ether` | Force-trigger flows for testing |
+| `/debug_clear_challenge [chat_id]` | Clear stuck bef challenge(s) in a chat (default: current). Unsticks a chat where every message gets judged "Not quite. Try again." Challenges also now auto-expire after 1h. |
 
 Plus the ambient triggers: `bang`, `bef`, `ignore` resolve an active duck
 (`bef` is AI-gated and may be refused — see below); `bad bot` / `bad
