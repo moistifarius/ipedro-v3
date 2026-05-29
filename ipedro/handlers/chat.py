@@ -10,6 +10,7 @@ import re
 from aiogram import F, Router
 from aiogram.types import Message, ReactionTypeEmoji
 
+from ipedro.bot_messages import track
 from ipedro.chat_policy import IncomingMessage, should_respond
 from ipedro.duckhunt.captcha_gen import matches as captcha_matches
 from ipedro.duckhunt.debug_toggles import is_on as debug_is_on
@@ -299,6 +300,7 @@ def build_router(rt: Runtime) -> Router:
         if cfg.response_policy != "commands" and _THANKS_PEDRO_RE.search(text):
             line = random.choice(_THANKS_PEDRO_LINES)
             sent = await msg.reply(line, disable_notification=True)
+            track(msg.chat.id, sent.message_id, line)
             if cfg.memory_enabled:
                 await rt.memory.record_message(
                     chat_id=msg.chat.id, role="assistant", content=line,
@@ -328,6 +330,7 @@ def build_router(rt: Runtime) -> Router:
             fact = await rt.openai.short_completion(CAT_FACT_PROMPT, max_tokens=120)
             reply_text = catify(fact or "🐈")
             sent = await msg.reply(reply_text, disable_notification=True)
+            track(msg.chat.id, sent.message_id, reply_text)
             if cfg.memory_enabled:
                 await rt.memory.record_message(
                     chat_id=msg.chat.id,
@@ -363,6 +366,7 @@ def build_router(rt: Runtime) -> Router:
             ):
                 line = random.choice(_CREDIT_LINES)
                 sent = await msg.answer(line, disable_notification=True)
+                track(msg.chat.id, sent.message_id, line)
                 if cfg.memory_enabled:
                     await rt.memory.record_message(
                         chat_id=msg.chat.id, role="assistant", content=line,
@@ -406,6 +410,7 @@ def build_router(rt: Runtime) -> Router:
             return
 
         sent = await msg.answer(reply, disable_notification=True)
+        track(msg.chat.id, sent.message_id, reply)
 
         if cfg.memory_enabled:
             await rt.memory.record_message(

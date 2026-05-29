@@ -257,3 +257,22 @@ the row in `duck_events` with `resolved_action = 'admin_cleared'`.
 Useful when a stuck duck is blocking your `bef` flow testing or when
 you want to force the spawner to consider the chat as duck-less on the
 next tick.
+
+### `/delete_msg [<chat_id>]`
+Pick a chat (omitted → chat picker), then pick one of the bot's recent
+messages in that chat to delete. The buffer is in-memory and bounded to
+the last 20 sends per chat; restarts wipe it. Telegram only lets the bot
+delete its own messages within ~48h, so older entries may fail.
+
+### `/delete_last [<chat_id>] [<N>]`
+Delete the bot's last *N* messages (≤ 20) in a chosen chat. With both
+args, runs directly; with one or none, opens a picker. N > 1 shows a
+confirm prompt before deleting.
+
+### `/silent_chat <chat_id>`, `/unsilent_chat <chat_id>`, `/silenced_chats`
+Admin-only override: flag specific chats so the ambient loops
+(celebrations, fortune, retro, confession) send with
+`disable_notification=True`. Not exposed via `/chat_config` or the
+`/config` wizard — this is the admin's lever for keeping a chat quiet
+without exposing the toggle to chat members. Same panel is reachable
+from `/manage → 💬 Chats → 🤫 Silenced chats`. Persisted in `kv_store`.

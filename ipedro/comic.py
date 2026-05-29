@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from aiogram import Bot
 from aiogram.types import BufferedInputFile
 
+from ipedro.bot_messages import track
 from ipedro.db.pool import Database
 from ipedro.openai_client import OpenAIClient
 from ipedro.prompts import COMIC_RENDER_TEMPLATE, COMIC_SCENES_PROMPT
@@ -67,12 +68,13 @@ async def _build_and_post(
     if not image:
         return False
     try:
-        await bot.send_photo(
+        sent = await bot.send_photo(
             chat_id,
             BufferedInputFile(image, filename="comic.png"),
             caption="📰 The Daily — yesterday in 4 panels.",
             disable_notification=True,
         )
+        track(chat_id, sent.message_id, "📰 The Daily comic")
         log.info("Comic posted in %s.", chat_id)
         return True
     except Exception as exc:  # pragma: no cover

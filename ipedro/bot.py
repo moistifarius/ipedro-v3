@@ -38,6 +38,7 @@ from ipedro.persona_state import PersonaStateService
 from ipedro.reminders import run_reminders_loop
 from ipedro.runtime import Runtime
 from ipedro.sharephoto import run_share_photo_loop
+from ipedro.silenced_chats import load_all as load_silenced_chats
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +92,10 @@ async def build_runtime(settings: Settings) -> Runtime:
     # Prime the admin debug-toggle cache from kv_store so the bot honors
     # any toggles the admin had set before the last restart.
     await load_debug_toggles(db, settings.admin_ids)
+
+    # Prime the admin-only silenced-chats set so ambient loops respect it
+    # from the first tick after restart.
+    await load_silenced_chats(db)
 
     memory = MemoryStore(db=db, openai=openai, pgvector_available=pgvector_available)
     return Runtime(
