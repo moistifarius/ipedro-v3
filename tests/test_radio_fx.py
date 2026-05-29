@@ -13,11 +13,11 @@ from ipedro import radio_fx
 
 def test_filtergraph_contains_core_filters():
     fg = radio_fx._build_filtergraph(0.5)
-    # Band-limit, compress, crush/clip, pitch drift, fade, delay/reverb,
-    # dropouts, static bursts, AGC, mix.
-    for needle in ("highpass", "lowpass", "acompressor", "acrusher",
-                   "asoftclip", "vibrato", "tremolo", "aecho",
-                   "volume=eval=frame", "compand", "amix"):
+    # Band-limit, compress, normalize, crush/clip, pitch drift, fade,
+    # delay/reverb, dropouts, static bursts, mix.
+    for needle in ("highpass", "lowpass", "acompressor", "dynaudnorm",
+                   "acrusher", "asoftclip", "vibrato", "tremolo", "aecho",
+                   "volume=eval=frame", "amix"):
         assert needle in fg, f"missing {needle!r}"
     # Two aecho stages: slapback + reverb tail.
     assert fg.count("aecho") == 2

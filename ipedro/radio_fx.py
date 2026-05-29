@@ -36,14 +36,15 @@ def _build_filtergraph(intensity: float) -> str:
 
     Models a long-haul HF/SSB transmission — the "2000 miles of ionospheric
     bounce" sound. Three inputs are mixed:
-      0 = the voice, 1 = a white-noise band (static hiss),
-      2 = a 1 kHz sine (the drifting heterodyne carrier whistle).
+      0 = the voice, 1 = a white-noise band (static hiss + bursts + click),
+      2 = the FM-swept heterodyne carrier whistle.
 
     The voice chain, in order (loosely the classic "fighting the medium"
     recipe — bandpass, compress, distort, modulate, delay, reverb):
       * downsample to 8 kHz + cascaded high/low pass → brutally narrow SSB
         passband (everything outside ~400–2600 Hz is gone);
-      * ``acompressor`` → the flattened, squashed comms dynamic;
+      * ``acompressor`` + ``dynaudnorm`` → squashed comms dynamic, and a
+        consistent voice level no matter how loud the source note was;
       * two ``vibrato`` stages → the wandering pitch: a slow oscillator/
         ionospheric drift plus a faster auroral "warble";
       * ``acrusher`` (bit + sample crush) and ``asoftclip`` overdrive →
@@ -52,64 +53,71 @@ def _build_filtergraph(intensity: float) -> str:
         that beat against each other so the signal wanders between
         almost-readable and lost-under-the-noise, plus a fast flutter;
       * a time-varying ``volume`` gate → DROPOUTS: the voice briefly
-        vanishes (to ~8%) when two slow LFOs coincide — a weak signal
+        vanishes (to ~15%) when two slow LFOs coincide — a weak signal
         doesn't just get noisy, it disappears;
       * two ``aecho`` stages → a slapback plus a faint dark reverb tail,
-        for the "far away / swallowed by space" distance.
+        for the "far away / swallowed by space" distance;
+      * a makeup ``volume`` so the voice lands ~9 dB above the static.
 
-    The static is band-limited white noise that *punches up in bursts*
-    (another time-varying ``volume``), so when the voice dips or drops the
-    transmission is momentarily buried in garbage. A drifting FM-swept
-    heterodyne whistle sits behind it all. A light ``compand`` keeps some
-    AGC hiss-pumping without flattening the QSB. Everything is mono.
-    Higher intensity tightens the band and deepens every modulation.
-    ``amix=duration=first`` trims the infinite noise/whistle to the voice.
+    The static is faint band-limited white noise that *punches up in bursts*
+    and opens with a short squelch *click* (time-varying ``volume``), so
+    when the voice dips or drops it's momentarily buried in garbage. A
+    drifting FM-swept heterodyne whistle sits faintly behind it all.
+    Everything is mono and voice-forward. Higher intensity tightens the
+    band and deepens every modulation. ``amix=duration=first`` trims the
+    infinite noise/whistle sources to the voice length.
     """
     i = max(0.0, min(1.0, intensity))
     high = int(380 + 170 * i)          # 380 → 550 Hz  (narrow SSB)
     low = int(2600 - 900 * i)          # 2600 → 1700 Hz
     bits = round(8 - 4 * i)            # 8 → 4 bit crush
     samp = 1 + round(7 * i)            # 1 → 8 sample-hold crush
-    crush_mix = 0.45 + 0.45 * i        # 0.45 → 0.90
-    drive = 1.6 + 3.2 * i              # pre-clip gain → harder overdrive
-    drift_d = 0.10 + 0.40 * i          # slow pitch wander depth
+    crush_mix = 0.35 + 0.35 * i        # 0.35 → 0.70 (gentler — keep words)
+    drive = 1.3 + 1.5 * i              # pre-clip overdrive
+    drift_d = 0.08 + 0.30 * i          # slow pitch wander depth
     warble_f = 5.0 + 5.0 * i           # auroral flutter rate (Hz)
-    warble_d = 0.06 + 0.16 * i         # auroral flutter depth
+    warble_d = 0.05 + 0.12 * i         # auroral flutter depth
     # Two detuned, deep, slow QSB LFOs. Their beat makes intelligibility
     # wander instead of pulsing metronomically.
-    qsb_a_d = 0.55 + 0.35 * i          # 0.55 → 0.90 deep
-    qsb_b_d = 0.45 + 0.35 * i          # 0.45 → 0.80 deep
-    flutter_f = 7.0 + 6.0 * i          # amplitude flutter rate (Hz)
-    flutter_d = 0.15 + 0.30 * i        # amplitude flutter depth
-    noise_vol = 0.20 + 0.40 * i        # baseline static hiss level
-    burst_amp = 1.5 + 1.0 * i          # how hard the static bursts punch up
-    het_vol = 0.14 + 0.16 * i          # heterodyne whistle level (toned down)
+    qsb_a_d = 0.30 + 0.28 * i          # 0.30 → 0.58
+    qsb_b_d = 0.22 + 0.28 * i          # 0.22 → 0.50
+    flutter_f = 7.0 + 5.0 * i          # amplitude flutter rate (Hz)
+    flutter_d = 0.08 + 0.16 * i        # amplitude flutter depth
+    noise_vol = 0.022 + 0.040 * i      # baseline static — sits UNDER the voice
+    burst_amp = 0.8 + 0.6 * i          # how hard the static bursts punch up
+    het_vol = 0.025 + 0.040 * i        # heterodyne whistle — faint bed
     return (
-        # --- voice: band-limit → compress → pitch drift/warble → crush/clip
-        #     → QSB fade → DROPOUTS → slapback delay → faint reverb tail ---
+        # --- voice: band-limit → compress → NORMALIZE → pitch drift/warble →
+        #     crush/clip → QSB fade → DROPOUTS → slapback → reverb → makeup ---
+        # Gain staging matters: dynaudnorm fixes the voice level regardless of
+        # how loud the source note was, asoftclip caps it, then the makeup at
+        # the end offsets the (known) tremolo + echo losses so the voice lands
+        # ~9 dB over the static bed. (aecho gains stay near 1.0 — low gains
+        # multiply the dry voice down catastrophically.)
         f"[0:a]aresample=8000,"
         f"highpass=f={high},highpass=f={high},lowpass=f={low},lowpass=f={low},"
-        f"acompressor=threshold=-20dB:ratio=6:attack=5:release=120:makeup=3,"
+        f"acompressor=threshold=-18dB:ratio=4:attack=10:release=150:makeup=2,"
+        f"dynaudnorm=p=0.9:m=20:g=15,"
         f"vibrato=f=0.25:d={drift_d:.2f},vibrato=f={warble_f:.2f}:d={warble_d:.2f},"
         f"acrusher=bits={bits}:samples={samp}:mode=log:mix={crush_mix:.2f},"
         f"volume={drive:.2f},asoftclip=type=atan,"
         f"tremolo=f=0.13:d={qsb_a_d:.2f},tremolo=f=0.21:d={qsb_b_d:.2f},"
         f"tremolo=f={flutter_f:.2f}:d={flutter_d:.2f},"
-        # signal cuts: voice briefly drops to ~8% when two slow LFOs coincide
-        f"volume=eval=frame:volume=1-0.92*gt(sin(2*PI*0.23*t)*sin(2*PI*0.37*t)\\,0.5),"
-        f"aecho=0.9:0.85:220:0.18,"               # slapback (far away)
-        f"aecho=0.85:0.55:70|150|260:0.3|0.2|0.12"  # faint dark reverb tail
+        # signal cuts: voice briefly drops to ~15% when two slow LFOs coincide
+        f"volume=eval=frame:volume=1-0.85*gt(sin(2*PI*0.23*t)*sin(2*PI*0.37*t)\\,0.62),"
+        f"aecho=1.0:0.9:200:0.15,"                # slapback (far away)
+        f"aecho=0.9:0.85:90|180:0.15|0.1,"        # faint dark reverb tail
+        f"volume=2.2"                             # makeup → voice sits on top
         f"[v];"
-        # --- static: band-limited white hiss that PUNCHES UP in bursts ---
+        # --- static: faint band-limited hiss + bursts + a start squelch click
         f"[1:a]aresample=8000,highpass=f={high},lowpass=f={low},"
-        f"volume=eval=frame:volume={noise_vol:.2f}*"
-        f"(1+{burst_amp:.2f}*gt(sin(2*PI*0.29*t)*sin(2*PI*0.41*t)\\,0.5))[n];"
-        # --- heterodyne: FM-swept whistle (built in the source), leveled ---
-        f"[2:a]volume={het_vol:.2f}[h];"
-        # --- mix → light AGC → final band → limit → 48k for opus ---
+        f"volume=eval=frame:volume={noise_vol:.3f}*"
+        f"(1+{burst_amp:.2f}*gt(sin(2*PI*0.29*t)*sin(2*PI*0.41*t)\\,0.62))"
+        f"+0.4*lt(t\\,0.04)[n];"
+        # --- heterodyne: FM-swept whistle (built in the source), faint ---
+        f"[2:a]volume={het_vol:.3f}[h];"
+        # --- mix (voice-forward) → final band → limit → 48k for opus ---
         f"[v][n][h]amix=inputs=3:duration=first:dropout_transition=0:normalize=0,"
-        f"compand=attacks=0.05:decays=0.6:"
-        f"points=-70/-40|-40/-25|-15/-12|0/-6:soft-knee=8:gain=2,"
         f"highpass=f={high},lowpass=f={low},"
         f"alimiter=limit=0.95,aresample=48000[out]"
     )
