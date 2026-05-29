@@ -10,8 +10,8 @@ import pytest
 
 from ipedro import ether
 from ipedro.ether import (
-    _pick_destination_any, _roll_intensity, _wrap, garble_pager,
-    manual_broadcast,
+    _pick_destination_any, _roll_intensity, _roll_radio_intensity, _wrap,
+    garble_pager, manual_broadcast,
 )
 
 
@@ -101,6 +101,14 @@ def test_roll_intensity_stays_within_advertised_range() -> None:
     for _ in range(200):
         v = _roll_intensity(rng=rng)
         assert 0.15 <= v <= 0.95
+
+
+def test_roll_radio_intensity_is_high_biased() -> None:
+    rng = random.Random(7)
+    vals = [_roll_radio_intensity(rng=rng) for _ in range(400)]
+    assert all(0.55 <= v <= 1.0 for v in vals)
+    # Mode is 0.85, so the average should sit comfortably in the heavy band.
+    assert sum(vals) / len(vals) > 0.7
 
 
 def test_wrap_msg_code_template_has_zero_padded_code() -> None:

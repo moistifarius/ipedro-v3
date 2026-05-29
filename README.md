@@ -22,8 +22,9 @@ command, and ships in a Docker container that runs comfortably on Unraid.
   fortune / share-photo opt-ins, and **ether** — opt in to cross-chat
   transmissions, where a recent message from another opted-in chat may
   show up in yours: either as pager-style garbled text (the ambient
-  loop) or, via `/ether`, as a far-away **radio voice** (TTS or a real
-  voice note, run through an ffmpeg static/bandpass/tremolo effect).
+  loop) or, via `/ether`, as a far-away **HF radio voice** (TTS or a real
+  voice note, run through a long-haul DX ffmpeg effect — narrow SSB band,
+  wandering pitch, deep fading, overdrive, AGC hiss, heterodyne whistle).
 - **Duckhunt** with flat per-duck points (rarity tiers temporarily disabled — every duck behaves identically; column preserved for future revival),
   streaks, miss tracking, leaderboards, per-user cooldowns, AI-gated
   `bef` (the duck personality decides whether to be your friend), and a
@@ -91,7 +92,7 @@ a second message.
 | `/roast @user`, `/compliment @user` | What it says on the tin |
 | `/lyric <line>` | Bot misheard it |
 | `/meme top \| bottom` | Generate a meme image |
-| `/ether <text>` (or on/replying to a voice note) | Transmit a message into another ether-enabled chat as a staticky far-away **radio voice** — text is TTS'd, a real voice note is used as-is, then both get a bandpass + static + tremolo ffmpeg treatment |
+| `/ether <text>` (or on/replying to a voice note) | Transmit a message into another ether-enabled chat as a far-away **HF radio voice** — text is TTS'd, a real voice note is used as-is, then both get a long-haul DX ffmpeg treatment (narrow SSB band, wandering pitch, fading, crush/overdrive, AGC hiss, heterodyne whistle) |
 | `/duckhunt`, `/quackflag` | Spawn / check current duck |
 | `/duckstats`, `/duckfriends`, `/duckname <id> <name>`, `/global_leaderboard` | Duckhunt stats and management |
 | `/quote`, `/quotes`, `/unquote <id>` | Save / list / delete quotes |

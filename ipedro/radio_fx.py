@@ -34,27 +34,62 @@ def ffmpeg_available() -> bool:
 def _build_filtergraph(intensity: float) -> str:
     """Build the ffmpeg -filter_complex string for the given intensity.
 
-    Input 0 = the voice audio, input 1 = an infinite pink-noise source.
-    Higher intensity tightens the band, deepens the crush, and raises the
-    static level. ``amix=duration=first`` trims the (infinite) noise to
-    the voice length.
+    Models a long-haul HF/SSB transmission — the "2000 miles of ionospheric
+    bounce" sound. Three inputs are mixed:
+      0 = the voice, 1 = a white-noise band (static hiss),
+      2 = a 1 kHz sine (the drifting heterodyne carrier whistle).
+
+    The voice chain, in order:
+      * downsample to 8 kHz + cascaded high/low pass → brutally narrow SSB
+        passband (everything outside ~400–2600 Hz is gone);
+      * two ``vibrato`` stages → the wandering pitch: a slow oscillator/
+        ionospheric drift plus a faster auroral "warble";
+      * ``acrusher`` (bit + sample crush) and ``asoftclip`` overdrive →
+        the gritty, saturated comms timbre;
+      * two ``tremolo`` stages → slow deep QSB fading plus fast flutter.
+
+    The mix then gets ``compand`` (AGC pumping — hiss swells between words),
+    a final pass of the bandpass, and a limiter. Higher intensity tightens
+    the band, deepens every modulation, and raises the static + whistle.
+    ``amix=duration=first`` trims the infinite noise/sine to the voice.
     """
     i = max(0.0, min(1.0, intensity))
-    # Tighten the passband as intensity climbs (more "telephone"/distant).
-    high_pass = int(250 + 250 * i)     # 250 → 500 Hz
-    low_pass = int(3400 - 1200 * i)    # 3400 → 2200 Hz
-    crush_mix = 0.20 + 0.45 * i        # 0.20 → 0.65
-    tremolo_depth = 0.30 + 0.40 * i    # 0.30 → 0.70
-    noise_vol = 0.06 + 0.40 * i        # 0.06 → 0.46
+    high = int(380 + 170 * i)          # 380 → 550 Hz  (narrow SSB)
+    low = int(2600 - 900 * i)          # 2600 → 1700 Hz
+    bits = round(8 - 4 * i)            # 8 → 4 bit crush
+    samp = 1 + round(7 * i)            # 1 → 8 sample-hold crush
+    crush_mix = 0.45 + 0.45 * i        # 0.45 → 0.90
+    drive = 1.6 + 3.2 * i              # pre-clip gain → harder overdrive
+    drift_d = 0.10 + 0.40 * i          # slow pitch wander depth
+    warble_f = 5.0 + 5.0 * i           # auroral flutter rate (Hz)
+    warble_d = 0.06 + 0.16 * i         # auroral flutter depth
+    qsb_f = 0.15 + 0.55 * i            # slow fade rate (Hz)
+    qsb_d = 0.45 + 0.45 * i            # slow fade depth
+    flutter_f = 7.0 + 6.0 * i          # amplitude flutter rate (Hz)
+    flutter_d = 0.15 + 0.30 * i        # amplitude flutter depth
+    noise_vol = 0.20 + 0.55 * i        # static hiss level
+    het_vol = 0.04 + 0.16 * i          # heterodyne whistle level
     return (
-        f"[0:a]aresample=24000,"
-        f"highpass=f={high_pass},lowpass=f={low_pass},"
-        f"acrusher=bits=8:mode=log:mix={crush_mix:.2f},"
-        f"tremolo=f=6.5:d={tremolo_depth:.2f},"
-        f"volume=2.0[v];"
-        f"[1:a]volume={noise_vol:.2f}[n];"
-        f"[v][n]amix=inputs=2:duration=first:dropout_transition=0,"
-        f"alimiter=limit=0.9[out]"
+        # --- voice: band-limit → pitch drift/warble → crush/clip → fade ---
+        f"[0:a]aresample=8000,"
+        f"highpass=f={high},highpass=f={high},lowpass=f={low},lowpass=f={low},"
+        f"vibrato=f=0.25:d={drift_d:.2f},vibrato=f={warble_f:.2f}:d={warble_d:.2f},"
+        f"acrusher=bits={bits}:samples={samp}:mode=log:mix={crush_mix:.2f},"
+        f"volume={drive:.2f},asoftclip=type=atan,"
+        f"tremolo=f={qsb_f:.2f}:d={qsb_d:.2f},"
+        f"tremolo=f={flutter_f:.2f}:d={flutter_d:.2f}[v];"
+        # --- static: white hiss, band-limited to the same SSB window ---
+        f"[1:a]aresample=8000,highpass=f={high},lowpass=f={low},"
+        f"volume={noise_vol:.2f}[n];"
+        # --- heterodyne: a slowly drifting, fading carrier whistle ---
+        f"[2:a]vibrato=f=0.2:d=0.6,volume={het_vol:.2f},"
+        f"tremolo=f={qsb_f:.2f}:d=0.7[h];"
+        # --- mix → AGC pump → final band → limit → 48k for opus ---
+        f"[v][n][h]amix=inputs=3:duration=first:dropout_transition=0:normalize=0,"
+        f"compand=attacks=0.02:decays=0.3:"
+        f"points=-80/-30|-45/-18|-20/-9|0/-5:soft-knee=6:gain=4,"
+        f"highpass=f={high},lowpass=f={low},"
+        f"alimiter=limit=0.95,aresample=48000[out]"
     )
 
 
@@ -62,7 +97,8 @@ def _ffmpeg_args(intensity: float) -> list[str]:
     return [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
         "-i", "pipe:0",
-        "-f", "lavfi", "-i", "anoisesrc=c=pink:a=1.0",
+        "-f", "lavfi", "-i", "anoisesrc=c=white:a=1.0",
+        "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=8000",
         "-filter_complex", _build_filtergraph(intensity),
         "-map", "[out]",
         "-ac", "1",

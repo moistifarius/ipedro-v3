@@ -137,6 +137,15 @@ def _roll_intensity(rng: random.Random | None = None) -> float:
     return r.triangular(0.15, 0.95, 0.5)
 
 
+def _roll_radio_intensity(rng: random.Random | None = None) -> float:
+    """Intensity for the /ether radio-voice effect. Biased HIGH —
+    Triangular(0.55, 1.0, mode=0.85) — so every transmission sounds like
+    a genuine long-haul DX signal (heavy fade, drift, static), with the
+    occasional one barely punching through at all."""
+    r = rng if rng is not None else random
+    return r.triangular(0.55, 1.0, 0.85)
+
+
 def _wrap(body: str, *, rng: random.Random | None = None) -> str:
     r = rng if rng is not None else random
     template = r.choice(_WRAPPERS)
@@ -258,7 +267,8 @@ async def manual_broadcast(
     if dest_id is None:
         return ManualEtherResult(mode="no_dest")
 
-    intensity = _roll_intensity()
+    # Radio audio leans heavy; the (rare) text fallback stays readable.
+    radio_intensity = _roll_radio_intensity()
 
     # 1) Obtain the source audio (real recording, or TTS of the text).
     src_audio = voice_bytes
@@ -267,7 +277,7 @@ async def manual_broadcast(
 
     # 2) Apply the radio effect and send as a voice note.
     if src_audio:
-        treated = await apply_radio_effect(src_audio, intensity=intensity)
+        treated = await apply_radio_effect(src_audio, intensity=radio_intensity)
         if treated:
             caption = random.choice(_VOICE_CAPTIONS)
             try:
@@ -281,7 +291,7 @@ async def manual_broadcast(
                 await _stamp_receiver(db, dest_id)
                 log.info(
                     "Ether voice: %s → %s (intensity=%.2f).",
-                    source_chat_id, dest_id, intensity,
+                    source_chat_id, dest_id, radio_intensity,
                 )
                 return ManualEtherResult(mode="voice", dest_id=dest_id)
             except Exception as exc:  # pragma: no cover - telegram hiccup
@@ -289,7 +299,7 @@ async def manual_broadcast(
 
     # 3) Fallbacks: text → garbled text broadcast; voice-only → give up.
     if text:
-        body = garble_pager(text, intensity=intensity)
+        body = garble_pager(text, intensity=_roll_intensity())
         msg_text = _wrap(body)
         try:
             sent = await bot.send_message(

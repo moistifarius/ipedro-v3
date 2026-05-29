@@ -55,9 +55,12 @@ bot's admin user. Fields:
 Manually transmit into the ether, as a **far-away radio voice** rather
 than the ambient loop's garbled text:
 
-- `/ether <text>` — your text is spoken aloud (OpenAI TTS) then drenched
-  in static, bandpass, and tremolo so it sounds like a distant radio
-  signal, and broadcast as a voice note.
+- `/ether <text>` — your text is spoken aloud (OpenAI TTS) then put
+  through a long-haul HF/SSB treatment so it sounds like a signal that's
+  bounced 2000 miles off the ionosphere: a brutally narrow comms
+  passband, wandering pitch (slow drift + auroral warble), bit/sample
+  crush + overdrive, slow deep QSB fading, AGC hiss that pumps between
+  words, and a drifting heterodyne whistle. Broadcast as a voice note.
 - `/ether` as the **caption of a voice note**, or as a **reply to a voice
   note** — your actual recording gets the radio treatment instead.
 - `/ether` replying to a **text** message — transmits that message's text.
@@ -65,9 +68,10 @@ than the ambient loop's garbled text:
 The destination is a random *other* ether-enabled chat, chosen
 anonymously (the manual command ignores the 4h receiver cooldown but
 still only lands in opted-in chats). Each transmission rolls a random
-intensity, so some come through clearer than others. If TTS or the audio
-toolchain (ffmpeg) is unavailable, a text `/ether` falls back to a
-garbled text broadcast. Requires another chat to have `ether` enabled.
+intensity — biased heavy, so it always sounds like genuine DX — and a
+rare one barely punches through at all. If TTS or the audio toolchain
+(ffmpeg) is unavailable, a text `/ether` falls back to a garbled text
+broadcast. Requires another chat to have `ether` enabled.
 
 ### Duckhunt
 
