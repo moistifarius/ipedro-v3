@@ -139,15 +139,20 @@ def test_static_bed_is_audible_and_band_limited():
     assert out_band < in_band * 0.05
 
 
-def test_whistle_has_high_floor_envelope():
-    """The whistle envelope floor keeps it audibly present at all times."""
-    n = SR * 6
+def test_whistle_fades_in_and_out():
+    """The whistle now genuinely fades to near-silent and surges back,
+    rather than sitting at a high constant floor — the envelope must
+    show a wide dynamic range across its swell cycle."""
+    n = SR * 10
     w = radio_fx._whistle(n, level=0.20)
     abs_w = np.abs(w)
-    # The minimum envelope (over a small window) is well above zero.
     window = SR // 5
-    min_env = float(np.min(np.convolve(abs_w, np.ones(window) / window, mode="valid")))
-    assert min_env > 0.05
+    env = np.convolve(abs_w, np.ones(window) / window, mode="valid")
+    peak = float(np.max(env))
+    trough = float(np.min(env))
+    # Peak should be a clearly heard tone; trough should be very quiet.
+    assert peak > 0.05
+    assert trough < peak * 0.25
 
 
 def test_squeals_are_sparse_high_frequency_events():

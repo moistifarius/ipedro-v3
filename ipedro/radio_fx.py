@@ -67,6 +67,21 @@ def _interference_path() -> Path | None:
     return _INTERFERENCE_FILE if _INTERFERENCE_FILE.is_file() else None
 
 
+# Bundled shortwave/SSB recordings used as the static bed. Drop one (or
+# more) ``shortwave_*.ogg`` files into ``ipedro/assets/`` and they'll
+# auto-replace the synthetic noise bed at runtime — a random one is
+# picked per broadcast. If none exist, the synthetic shortwave bed
+# (pink noise + crackles + carrier ghosts) is used instead.
+_SHORTWAVE_DIR = Path(__file__).parent / "assets"
+
+
+def _shortwave_pool() -> list[Path]:
+    """List of bundled shortwave recordings, sorted for determinism."""
+    if not _SHORTWAVE_DIR.is_dir():
+        return []
+    return sorted(_SHORTWAVE_DIR.glob("shortwave_*.ogg"))
+
+
 # ---------------------------------------------------------------- I/O
 def _decode_to_pcm(audio: bytes) -> np.ndarray:
     """ffmpeg decode arbitrary input bytes → mono float32 at SR."""
@@ -249,42 +264,111 @@ def _reverb(
     return (x + wet * wet_sig).astype(np.float32)
 
 
+def _pink_noise(n: int, rng: np.random.Generator) -> np.ndarray:
+    """Cheap pink-ish noise via a one-pole low-pass on white noise.
+    Output is RMS-normalised so it slots in like the old white bed."""
+    w = rng.standard_normal(n).astype(np.float32)
+    # y[k] = a y[k-1] + (1-a) x[k]; a≈0.98 gives ~ -3 dB/oct (pink-ish)
+    out = np.empty_like(w)
+    y = 0.0
+    a = 0.98
+    one_minus_a = 1.0 - a
+    for i in range(n):
+        y = a * y + one_minus_a * w[i]
+        out[i] = y
+    sd = float(np.std(out)) + 1e-9
+    return (out / sd).astype(np.float32)
+
+
 def _static_bed(
     n: int, *, level: float, burst_amp: float = 0.6,
     rng: np.random.Generator | None = None,
 ) -> np.ndarray:
-    """Band-limited white noise that breathes on two LFOs and has sharp
-    bursts at randomized positions (the kssht between words)."""
+    """Synthetic shortwave bed when no real recording is bundled.
+
+    Closer to actual SSB hash than a plain white bandpass: pink-band
+    noise (1/f-ish, more low-mid energy) modulated by *three* slow LFOs
+    at incommensurate rates so density wanders chaotically, plus brief
+    LIGHTNING-style crackles (sub-10 ms peaks at random offsets) and a
+    handful of faint, drifting CARRIER GHOSTS (weak SSB sines bleeding
+    in from other "stations"). The old kssht word-gap bursts are folded
+    into the density variation.
+    """
     if n <= 0:
         return np.zeros(0, dtype=np.float32)
     r = rng if rng is not None else np.random.default_rng()
-    noise = r.standard_normal(n).astype(np.float32)
-    noise = _bandpass(noise, 450, 2400, order=4)
+    bed = _bandpass(_pink_noise(n, r), 380, 2500, order=4)
     t = np.arange(n) / SR
-    breathe = ((0.7 + 0.30 * np.sin(2 * np.pi * 0.13 * t))
-               * (0.8 + 0.25 * np.sin(2 * np.pi * 0.21 * t)))
-    burst = np.zeros(n, dtype=np.float32)
-    n_bursts = max(2, n // (SR * 3))  # ~1 burst per 3 s
-    for _ in range(n_bursts):
-        width = int(SR * r.uniform(0.08, 0.22))
-        center = int(r.integers(SR // 4, max(SR // 4 + 1, n - SR // 4)))
-        amp = float(r.uniform(0.6, 1.0))
-        s = max(0, center - width // 2)
-        e = min(n, s + width)
-        env = np.hanning(width).astype(np.float32)[: e - s] * amp
-        burst[s:e] += env
-    return (noise * (breathe + burst) * level).astype(np.float32)
+    # Three irregular sub-Hz LFOs → chaotic density envelope.
+    density = ((0.5 + 0.5 * np.sin(2 * np.pi * 0.07 * t + 1.3))
+               * (0.6 + 0.4 * np.sin(2 * np.pi * 0.13 * t + 2.7))
+               * (0.7 + 0.3 * np.sin(2 * np.pi * 0.23 * t + 0.6))) * 1.6 + 0.4
+    bed = bed * density.astype(np.float32)
+    # Lightning crackles — short sharp spikes
+    n_crackles = max(4, n // (SR * 2))  # ~1 every 2 s
+    for _ in range(n_crackles):
+        width = int(r.uniform(20, 80))  # 2.5–10 ms
+        pos = int(r.integers(0, max(1, n - width)))
+        peak = float(r.uniform(0.4, 1.4)) * burst_amp
+        env = np.hanning(width).astype(np.float32) ** 2
+        crack = (r.standard_normal(width).astype(np.float32) * env * peak)
+        bed[pos:pos + width] += crack
+    # Faint carrier ghosts — weak drifting sines from other stations
+    n_ghosts = max(2, n // (SR * 5))
+    for _ in range(n_ghosts):
+        dur = int(r.uniform(0.4, 1.6) * SR)
+        start = int(r.integers(0, max(1, n - dur)))
+        tt = np.arange(dur) / SR
+        f = float(r.uniform(700, 2200))
+        drift = float(r.uniform(-40, 40))
+        env = np.hanning(dur).astype(np.float32) * float(r.uniform(0.06, 0.18))
+        phase = 2 * np.pi * (f * tt + drift * tt * tt / 2)
+        bed[start:start + dur] += (np.sin(phase) * env).astype(np.float32)
+    # Re-apply the SSB band so crackles don't leak above the roof
+    bed = _bandpass(bed, 420, 2400, order=6)
+    return (bed * level).astype(np.float32)
+
+
+def _shortwave_real_bed(
+    n: int, *, level: float, rng: np.random.Generator | None = None,
+) -> np.ndarray | None:
+    """Use a bundled real shortwave recording as the static bed.
+
+    Returns None when no ``shortwave_*.ogg`` is present in the assets
+    directory (caller falls back to the synthetic bed). Picks a random
+    file from the pool, then a random entry point within that file, so
+    no two transmissions catch the same slice."""
+    pool = _shortwave_pool()
+    if not pool or n <= 0:
+        return None
+    r = rng if rng is not None else np.random.default_rng()
+    path = pool[int(r.integers(0, len(pool)))]
+    src = _decode_file_to_pcm(path)
+    if len(src) == 0:
+        return None
+    offset = int(r.integers(0, len(src)))
+    rolled = np.roll(src, -offset)
+    tiled = np.tile(rolled, n // len(rolled) + 2)[:n].astype(np.float32)
+    # Band-limit to the SSB window so it sits where the rest of the bed does.
+    tiled = _bandpass(tiled, 420, 2400, order=4)
+    return (tiled * level).astype(np.float32)
 
 
 def _whistle(n: int, *, level: float) -> np.ndarray:
-    """FM-swept ~1 kHz heterodyne — the "wheeeooouup". Floor 0.60 so it's
-    always audibly present while still swelling."""
+    """FM-swept ~1 kHz heterodyne — the "wheeeooouup".
+
+    Envelope range is [0.10, 1.00] so the whistle genuinely fades to
+    near-silent between sweeps, rather than sitting in the mix at a
+    high floor. Two incommensurate sines drive the swell so it never
+    pulses on a metronomic cycle.
+    """
     if n <= 0:
         return np.zeros(0, dtype=np.float32)
     t = np.arange(n) / SR
     dev, rate = 700.0, 0.15
     phase = 2 * np.pi * 1000 * t + (dev / rate) * np.sin(2 * np.pi * rate * t)
-    env = (0.60 + 0.40 * (0.5 + 0.5 * np.sin(2 * np.pi * 0.06 * t))
+    env = (0.10 + 0.90
+           * (0.5 + 0.5 * np.sin(2 * np.pi * 0.06 * t))
            * (0.5 + 0.5 * np.sin(2 * np.pi * 0.11 * t)))
     return (np.sin(phase) * env * level).astype(np.float32)
 
@@ -389,9 +473,14 @@ def _process_pcm(
     x = x * 2.2
 
     n = len(x)
+    # Prefer a real bundled shortwave recording for the bed; fall back to
+    # the synthetic shortwave-style noise + crackles + carrier-ghost mix.
+    bed = _shortwave_real_bed(n, level=0.45 + 0.10 * i, rng=r)
+    if bed is None:
+        bed = _static_bed(n, level=0.22 + 0.08 * i, burst_amp=0.6, rng=r)
     out = (x
-           + _static_bed(n, level=0.20 + 0.10 * i, burst_amp=0.6, rng=r)
-           + _whistle(n, level=0.14 + 0.06 * i)
+           + bed
+           + _whistle(n, level=0.09 + 0.04 * i)
            + _squeals(n, level=0.10 + 0.04 * i, rng=r)
            + _station_layer(n, level=0.30 + 0.05 * i, rng=r)
            + _clicks(n, level=0.55, rng=r))
