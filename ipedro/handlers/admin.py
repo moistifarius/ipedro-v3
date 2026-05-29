@@ -356,6 +356,7 @@ def _mgm_chats_submenu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="List chat ids",           callback_data="mgm:chats:list")],
         [InlineKeyboardButton(text="Pick chat (copy id)",     callback_data="mgm:chats:pick")],
+        [InlineKeyboardButton(text="Configure a chat",        callback_data="mgm:chats:config")],
         [InlineKeyboardButton(text="← back",                  callback_data="mgm:top")],
     ])
 
@@ -381,7 +382,7 @@ _MGM_LEAVES: tuple[str, ...] = (
     "mgm:duck", "mgm:duck:edit", "mgm:duck:reset",
     "mgm:duck:spawn", "mgm:duck:spawnall",
     "mgm:ai", "mgm:ai:show",
-    "mgm:chats", "mgm:chats:list", "mgm:chats:pick",
+    "mgm:chats", "mgm:chats:list", "mgm:chats:pick", "mgm:chats:config",
     "mgm:debug", "mgm:debug:status", "mgm:debug:logs",
     "mgm:debug:cost", "mgm:debug:cmdlog",
     "mgm:debug:toggles", "mgm:debug:cleard",
@@ -996,6 +997,104 @@ def build_router(rt: Runtime) -> Router:
             except TelegramBadRequest:
                 pass
         await cb.answer(str(target))
+
+    async def _render_config_for(target_chat_id: int, *, reply_to: Message | None,
+                                 edit_in: Message | None) -> None:
+        """Render the inline-keyboard config wizard for a target chat, scoped to
+        an admin DM. Re-uses utility.py's wizard primitives so we have exactly
+        one wizard code-path."""
+        # Local import — utility imports nothing from admin, but the inverse
+        # would require pulling utility's whole router graph if done at module
+        # top. Keeping the import inside the function keeps the cycle clean.
+        from ipedro.handlers.utility import (
+            _config_keyboard, _config_wizard_header,
+        )
+        # Ensure the row exists so the wizard has something to toggle.
+        cfg = await rt.chats.get_config(target_chat_id)
+        if cfg is None:
+            # No /config has ever run in the target chat. Seed with defaults
+            # so the wizard isn't an empty shell on first open. We don't have
+            # a Message scoped to that chat here, so use settings directly.
+            s = rt.settings
+            cfg = await rt.chats.upsert_default_config(
+                target_chat_id,
+                response_policy=s.default_response_policy_group,
+                ambient_probability=s.default_ambient_probability,
+                persona=s.default_persona,
+                duckhunt_enabled=s.duckhunt_enabled_by_default,
+            )
+        body = _config_wizard_header(cfg, target_chat_id, is_dm_scoped=True)
+        kb = _config_keyboard(cfg, target_chat_id=target_chat_id)
+        if reply_to:
+            await reply_to.reply(body, reply_markup=kb, disable_notification=True)
+        elif edit_in:
+            try:
+                await edit_in.edit_text(body, reply_markup=kb)
+            except TelegramBadRequest:
+                pass
+
+    @r.message(Command("config_for"))
+    async def config_for(msg: Message) -> None:
+        """Open the /config wizard from a DM, scoped to any known chat.
+
+        /config_for             → chat picker, then wizard
+        /config_for <chat_id>   → wizard directly for that chat
+        """
+        if not await require_admin(msg, admin_ids):
+            return
+        parts = (msg.text or "").split()
+        if len(parts) >= 2:
+            try:
+                target = int(parts[1])
+            except ValueError:
+                await msg.reply("Invalid chat id.", disable_notification=True)
+                return
+            await _render_config_for(target, reply_to=msg, edit_in=None)
+            return
+        chats = await rt.chats.list_known()
+        kb = _chat_picker(
+            chats, "cfgfor",
+            paginate=True,
+            admin_user_id=msg.from_user.id if msg.from_user else None,
+            home_to_manage=False,
+        )
+        if kb is None:
+            await msg.reply("No known chats yet.", disable_notification=True)
+            return
+        await msg.reply(
+            "Pick a chat to configure:",
+            reply_markup=kb,
+            disable_notification=True,
+        )
+
+    @r.callback_query(F.data.startswith("cfgfor:"))
+    async def on_config_for(cb: CallbackQuery) -> None:
+        if not await _gate_callback(cb):
+            return
+        parsed = _parse_picker_cb(cb.data)
+        if parsed is None:
+            await cb.answer(_expired("config_for"), show_alert=True)
+            return
+        kind, n = parsed
+        if kind == "page":
+            chats = await rt.chats.list_known()
+            kb = _chat_picker(
+                chats, "cfgfor", paginate=True, page=n,
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+                home_to_manage=False,
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_reply_markup(reply_markup=kb)
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        target = n
+        if cb.from_user is not None:
+            _LAST_PICKED_CHAT[cb.from_user.id] = (target, time.time())
+        await _render_config_for(target, reply_to=None, edit_in=cb.message)
+        await cb.answer()
 
     @r.message(Command("ai_provider"))
     async def ai_provider(msg: Message) -> None:
@@ -2828,6 +2927,16 @@ def build_router(rt: Runtime) -> Router:
                 action="pchat",
                 admin_user_id=cb.from_user.id if cb.from_user else None,
             home_to_manage=True,
+            )
+            await cb.answer()
+            return
+        if data == "mgm:chats:config":
+            await _open_picker(
+                rt, edit_in=msg,
+                prompt="Pick a chat to configure:",
+                action="cfgfor",
+                admin_user_id=cb.from_user.id if cb.from_user else None,
+                home_to_manage=True,
             )
             await cb.answer()
             return

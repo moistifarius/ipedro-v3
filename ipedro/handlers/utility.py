@@ -697,11 +697,10 @@ def build_router(rt: Runtime) -> Router:
     @r.message(Command("config"))
     async def config_wizard(msg: Message) -> None:
         await get_or_create_chat_config(rt, msg)
+        cfg = await rt.chats.get_config(msg.chat.id)
         await msg.reply(
-            "⚙️ Chat settings:",
-            reply_markup=_config_keyboard(
-                await rt.chats.get_config(msg.chat.id),
-            ),
+            _config_wizard_header(cfg, msg.chat.id, is_dm_scoped=False),
+            reply_markup=_config_keyboard(cfg, target_chat_id=msg.chat.id),
             disable_notification=True,
         )
 
@@ -709,9 +708,24 @@ def build_router(rt: Runtime) -> Router:
     async def on_cfg(cb: CallbackQuery) -> None:
         if not cb.data or not cb.message:
             return
-        field = cb.data.split(":", 1)[1]
-        chat_id = cb.message.chat.id
-        cfg = await rt.chats.get_config(chat_id)
+        # New callback shape: ``cfg:<target_chat_id>:<rest>``. The target
+        # chat id encoded in the callback drives the edits, NOT the chat
+        # that hosts the wizard message — that lets the admin run the
+        # wizard from their DM scoped to any chat (see /config_for).
+        parts = cb.data.split(":", 2)
+        if len(parts) < 3:
+            await cb.answer("Stale wizard — re-open /config.", show_alert=True)
+            return
+        try:
+            target_chat_id = int(parts[1])
+        except ValueError:
+            await cb.answer("Stale wizard — re-open /config.", show_alert=True)
+            return
+        field = parts[2]
+        if field == "noop":
+            await cb.answer()
+            return
+        cfg = await rt.chats.get_config(target_chat_id)
         if not cfg:
             await cb.answer("Run /config first.", show_alert=True)
             return
@@ -725,22 +739,27 @@ def build_router(rt: Runtime) -> Router:
         }
         if field in toggles:
             col, new_val = toggles[field]
-            await rt.chats.update_config(chat_id, **{col: new_val})
+            await rt.chats.update_config(target_chat_id, **{col: new_val})
         elif field.startswith("policy:"):
             new_policy = field.split(":", 1)[1]
             if new_policy in ("commands", "mention", "reply", "ambient", "always"):
-                await rt.chats.update_config(chat_id, response_policy=new_policy)
+                await rt.chats.update_config(
+                    target_chat_id, response_policy=new_policy,
+                )
         elif field.startswith("persona:"):
             new_persona = field.split(":", 1)[1]
             if new_persona in ("dude", "pedro", "neutral"):
                 await rt.chats.update_config(
-                    chat_id, persona=new_persona, persona_custom=None,
+                    target_chat_id, persona=new_persona, persona_custom=None,
                 )
-        new_cfg = await rt.chats.get_config(chat_id)
+        new_cfg = await rt.chats.get_config(target_chat_id)
+        # DM-scoped means the cb.message.chat.id (where the wizard is shown)
+        # differs from the target_chat_id (whose config we're editing).
+        is_dm_scoped = cb.message.chat.id != target_chat_id
         try:
             await cb.message.edit_text(
-                "⚙️ Chat settings:",
-                reply_markup=_config_keyboard(new_cfg),
+                _config_wizard_header(new_cfg, target_chat_id, is_dm_scoped=is_dm_scoped),
+                reply_markup=_config_keyboard(new_cfg, target_chat_id=target_chat_id),
             )
         except Exception:
             pass
@@ -749,11 +768,34 @@ def build_router(rt: Runtime) -> Router:
     return r
 
 
-def _config_keyboard(cfg) -> InlineKeyboardMarkup:
-    """Build the /config wizard keyboard. Mirrors fields editable via /chat_config."""
+def _config_wizard_header(cfg, target_chat_id: int, *, is_dm_scoped: bool) -> str:
+    """Build the header line shown above the wizard keyboard.
+
+    DM-scoped renders surface the target chat id so the admin can see at a
+    glance which chat they're editing. In-group renders keep the original
+    short label.
+    """
+    if is_dm_scoped:
+        return f"⚙️ Settings for chat {target_chat_id}:"
+    return "⚙️ Chat settings:"
+
+
+def _config_keyboard(cfg, *, target_chat_id: int) -> InlineKeyboardMarkup:
+    """Build the /config wizard keyboard. Mirrors fields editable via /chat_config.
+
+    target_chat_id is encoded into every callback so the handler can edit the
+    config row of an arbitrary chat (used by the DM-scoped /config_for flow).
+    """
 
     def b(label: str, data: str) -> InlineKeyboardButton:
-        return InlineKeyboardButton(text=label, callback_data=f"cfg:{data}")
+        return InlineKeyboardButton(
+            text=label, callback_data=f"cfg:{target_chat_id}:{data}",
+        )
+
+    def noop_btn(label: str) -> InlineKeyboardButton:
+        return InlineKeyboardButton(
+            text=label, callback_data=f"cfg:{target_chat_id}:noop",
+        )
 
     on = "ON"
     off = "off"
@@ -772,10 +814,7 @@ def _config_keyboard(cfg) -> InlineKeyboardMarkup:
             b(f"Memory: {on if cfg.memory_enabled else off}", "memory"),
         ],
         [
-            InlineKeyboardButton(
-                text=f"Policy: {cfg.response_policy}",
-                callback_data="cfg:noop",
-            ),
+            noop_btn(f"Policy: {cfg.response_policy}"),
         ],
         [
             b("commands", "policy:commands"),
@@ -787,10 +826,7 @@ def _config_keyboard(cfg) -> InlineKeyboardMarkup:
             b("always", "policy:always"),
         ],
         [
-            InlineKeyboardButton(
-                text=f"Persona: {cfg.persona}",
-                callback_data="cfg:noop",
-            ),
+            noop_btn(f"Persona: {cfg.persona}"),
         ],
         [
             b("dude", "persona:dude"),

@@ -140,6 +140,18 @@ Duckhunt / AI providers / Chats / Debug & status) each opening a
 sub-menu of buttons that fire the same underlying handlers as the
 individual slash commands.
 
+### `/config_for [<chat_id>]`
+DM-only. Opens the same inline-keyboard `/config` wizard that runs
+in-group, but scoped to any chat the bot knows. Two forms:
+
+- `/config_for` — chat picker → wizard for the picked chat.
+- `/config_for <chat_id>` — wizard for that chat directly.
+
+Lets the admin twiddle per-chat settings (duckhunt / sharephoto / comic /
+fortune / voice / memory / response policy / persona) without typing
+`/config` in the group, which would surface the wizard to every member.
+Also reachable as `/manage → Chats → Configure a chat`.
+
 ### `/memory_facts [chat_id]`
 List durable facts stored for a chat. With no argument, shows an inline
 keyboard of every known chat — tap one to drill in. With a chat id, jumps
