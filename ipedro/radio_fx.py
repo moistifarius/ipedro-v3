@@ -39,23 +39,31 @@ def _build_filtergraph(intensity: float) -> str:
       0 = the voice, 1 = a white-noise band (static hiss),
       2 = a 1 kHz sine (the drifting heterodyne carrier whistle).
 
-    The voice chain, in order:
+    The voice chain, in order (loosely the classic "fighting the medium"
+    recipe — bandpass, compress, distort, modulate, delay, reverb):
       * downsample to 8 kHz + cascaded high/low pass → brutally narrow SSB
         passband (everything outside ~400–2600 Hz is gone);
+      * ``acompressor`` → the flattened, squashed comms dynamic;
       * two ``vibrato`` stages → the wandering pitch: a slow oscillator/
         ionospheric drift plus a faster auroral "warble";
       * ``acrusher`` (bit + sample crush) and ``asoftclip`` overdrive →
         the gritty, saturated comms timbre;
       * three ``tremolo`` stages → two *detuned* slow-and-deep QSB LFOs
         that beat against each other so the signal wanders between
-        almost-readable and lost-under-the-noise, plus a fast flutter.
+        almost-readable and lost-under-the-noise, plus a fast flutter;
+      * a time-varying ``volume`` gate → DROPOUTS: the voice briefly
+        vanishes (to ~8%) when two slow LFOs coincide — a weak signal
+        doesn't just get noisy, it disappears;
+      * two ``aecho`` stages → a slapback plus a faint dark reverb tail,
+        for the "far away / swallowed by space" distance.
 
-    The static (constant, band-limited white noise) doesn't fade, so when
-    the voice dips under it the transmission becomes momentarily garbled —
-    that's the wander. A light ``compand`` keeps some AGC hiss-pumping
-    without flattening the QSB. Higher intensity tightens the band and
-    deepens every modulation. ``amix=duration=first`` trims the infinite
-    noise/whistle sources to the voice length.
+    The static is band-limited white noise that *punches up in bursts*
+    (another time-varying ``volume``), so when the voice dips or drops the
+    transmission is momentarily buried in garbage. A drifting FM-swept
+    heterodyne whistle sits behind it all. A light ``compand`` keeps some
+    AGC hiss-pumping without flattening the QSB. Everything is mono.
+    Higher intensity tightens the band and deepens every modulation.
+    ``amix=duration=first`` trims the infinite noise/whistle to the voice.
     """
     i = max(0.0, min(1.0, intensity))
     high = int(380 + 170 * i)          # 380 → 550 Hz  (narrow SSB)
@@ -73,20 +81,29 @@ def _build_filtergraph(intensity: float) -> str:
     qsb_b_d = 0.45 + 0.35 * i          # 0.45 → 0.80 deep
     flutter_f = 7.0 + 6.0 * i          # amplitude flutter rate (Hz)
     flutter_d = 0.15 + 0.30 * i        # amplitude flutter depth
-    noise_vol = 0.22 + 0.50 * i        # constant static hiss level
-    het_vol = 0.18 + 0.22 * i          # heterodyne whistle level (prominent)
+    noise_vol = 0.20 + 0.40 * i        # baseline static hiss level
+    burst_amp = 1.5 + 1.0 * i          # how hard the static bursts punch up
+    het_vol = 0.14 + 0.16 * i          # heterodyne whistle level (toned down)
     return (
-        # --- voice: band-limit → pitch drift/warble → crush/clip → fade ---
+        # --- voice: band-limit → compress → pitch drift/warble → crush/clip
+        #     → QSB fade → DROPOUTS → slapback delay → faint reverb tail ---
         f"[0:a]aresample=8000,"
         f"highpass=f={high},highpass=f={high},lowpass=f={low},lowpass=f={low},"
+        f"acompressor=threshold=-20dB:ratio=6:attack=5:release=120:makeup=3,"
         f"vibrato=f=0.25:d={drift_d:.2f},vibrato=f={warble_f:.2f}:d={warble_d:.2f},"
         f"acrusher=bits={bits}:samples={samp}:mode=log:mix={crush_mix:.2f},"
         f"volume={drive:.2f},asoftclip=type=atan,"
         f"tremolo=f=0.13:d={qsb_a_d:.2f},tremolo=f=0.21:d={qsb_b_d:.2f},"
-        f"tremolo=f={flutter_f:.2f}:d={flutter_d:.2f}[v];"
-        # --- static: white hiss, band-limited to the same SSB window ---
+        f"tremolo=f={flutter_f:.2f}:d={flutter_d:.2f},"
+        # signal cuts: voice briefly drops to ~8% when two slow LFOs coincide
+        f"volume=eval=frame:volume=1-0.92*gt(sin(2*PI*0.23*t)*sin(2*PI*0.37*t)\\,0.5),"
+        f"aecho=0.9:0.85:220:0.18,"               # slapback (far away)
+        f"aecho=0.85:0.55:70|150|260:0.3|0.2|0.12"  # faint dark reverb tail
+        f"[v];"
+        # --- static: band-limited white hiss that PUNCHES UP in bursts ---
         f"[1:a]aresample=8000,highpass=f={high},lowpass=f={low},"
-        f"volume={noise_vol:.2f}[n];"
+        f"volume=eval=frame:volume={noise_vol:.2f}*"
+        f"(1+{burst_amp:.2f}*gt(sin(2*PI*0.29*t)*sin(2*PI*0.41*t)\\,0.5))[n];"
         # --- heterodyne: FM-swept whistle (built in the source), leveled ---
         f"[2:a]volume={het_vol:.2f}[h];"
         # --- mix → light AGC → final band → limit → 48k for opus ---
