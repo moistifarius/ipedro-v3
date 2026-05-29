@@ -57,10 +57,14 @@ than the ambient loop's garbled text:
 
 - `/ether <text>` — your text is spoken aloud (OpenAI TTS) then put
   through a long-haul HF/SSB treatment so it sounds like a signal that's
-  bounced 2000 miles off the ionosphere: a brutally narrow comms
-  passband, wandering pitch (slow drift + auroral warble), bit/sample
-  crush + overdrive, slow deep QSB fading, AGC hiss that pumps between
-  words, and a drifting heterodyne whistle. Broadcast as a voice note.
+  bounced 2000 miles off the ionosphere: a narrow comms passband,
+  wandering pitch (slow drift + auroral warble), light grit/overdrive,
+  smooth deep QSB fading (so the voice slips under the static and
+  surfaces again), a drifting heterodyne tuning whistle, and a faint
+  numbers-station bleed (a bundled "Swedish Rhapsody" recording) that
+  drifts in and out as one interference layer. The voice stays on top and
+  intelligible; every layer rides its own slow cycle so it never sounds
+  like looping, switched effects. Broadcast as a voice note.
 - `/ether` as the **caption of a voice note**, or as a **reply to a voice
   note** — your actual recording gets the radio treatment instead.
 - `/ether` replying to a **text** message — transmits that message's text.

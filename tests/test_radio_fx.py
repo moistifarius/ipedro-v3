@@ -13,19 +13,28 @@ from ipedro import radio_fx
 
 def test_filtergraph_contains_core_filters():
     fg = radio_fx._build_filtergraph(0.5)
-    # Band-limit, compress, normalize, crush/clip, pitch drift, fade,
-    # delay/reverb, dropouts, static bursts, mix.
+    # Band-limit, compress, normalize, presence, pitch drift, light crush,
+    # soft-clip, smooth QSB fades, delay/reverb, mix.
     for needle in ("highpass", "lowpass", "acompressor", "dynaudnorm",
-                   "acrusher", "asoftclip", "vibrato", "tremolo", "aecho",
-                   "volume=eval=frame", "amix"):
+                   "equalizer", "acrusher", "asoftclip", "vibrato",
+                   "tremolo", "aecho", "amix"):
         assert needle in fg, f"missing {needle!r}"
     # Two aecho stages: slapback + reverb tail.
     assert fg.count("aecho") == 2
-    # Time-varying gates carry escaped commas inside gt(...).
-    assert "\\," in fg
+    # Realism: the modulation is continuous — NO hard gt()/lt() gate logic
+    # in the voice/whistle level paths (a single lt() click is allowed in
+    # the static path, but no gt() mode-switch gates anywhere).
+    assert "gt(" not in fg
     # Three-input mix (voice + static + heterodyne) into a single [out] pad.
     assert "[0:a]" in fg and "[1:a]" in fg and "[2:a]" in fg
     assert "[v]" in fg and "[n]" in fg and "[h]" in fg and "[out]" in fg
+    assert "amix=inputs=3" in fg
+
+
+def test_filtergraph_with_station_adds_fourth_layer():
+    fg = radio_fx._build_filtergraph(0.5, with_station=True)
+    assert "[3:a]" in fg and "[g]" in fg
+    assert "amix=inputs=4" in fg
 
 
 def test_filtergraph_intensity_changes_output():
@@ -38,6 +47,13 @@ def test_filtergraph_intensity_is_clamped():
     assert radio_fx._build_filtergraph(5.0) == radio_fx._build_filtergraph(1.0)
 
 
+def test_bundled_numbers_station_asset_present():
+    # The interference bed is committed and non-trivial.
+    path = radio_fx._interference_path()
+    assert path is not None and path.is_file()
+    assert path.stat().st_size > 50_000
+
+
 def test_ffmpeg_args_request_ogg_opus_mono():
     args = radio_fx._ffmpeg_args(0.5)
     assert args[0] == "ffmpeg"
@@ -45,11 +61,15 @@ def test_ffmpeg_args_request_ogg_opus_mono():
     assert "pipe:0" in args and "pipe:1" in args
     # mono out
     assert args[args.index("-ac") + 1] == "1"
-    # two lavfi sources: white-noise static + FM-swept heterodyne whistle
+    # lavfi sources: white-noise static + FM-swept heterodyne whistle
     assert any("anoisesrc" in a for a in args)
     assert any(a.startswith("aevalsrc=") for a in args)
-    # the voice + 2 lavfi inputs = three '-i' flags
-    assert args.count("-i") == 3
+    # voice + 2 lavfi + (numbers station, since the asset is bundled) = 4 -i
+    if radio_fx._interference_path() is not None:
+        assert args.count("-i") == 4
+        assert "-stream_loop" in args
+    else:
+        assert args.count("-i") == 3
 
 
 def test_heterodyne_is_fm_swept_and_widens_with_intensity():
