@@ -73,18 +73,25 @@ than the ambient loop's garbled text:
   bundled `ipedro/assets/shortwave_*.ogg` files → synthetic pink-noise
   hash with lightning crackles and carrier ghosts.
 
-  **Live fetch is OFF by default.** Most public WebSDRs (Twente,
-  Northern Utah, KiwiSDRs) use WebSocket players or Java applets, not
-  plain HTTP streams ffmpeg can pull from, so there's no reliable
-  always-on default. To enable it, set `RADIO_FX_LIVE_URLS` in `.env`
-  to a comma-separated list of URLs that *are* directly fetchable —
-  e.g. an Icecast SDR relay you operate or know works, or your own
-  KiwiSDR with an HTTP audio gateway. The default-off behaviour means
-  the bed falls straight to bundled (if any) or synthetic.
+  **Live fetch is OFF by default.** To enable it, set
+  `RADIO_FX_LIVE_URLS` in `.env` to a comma-separated list. Two URL
+  schemes are supported:
 
-  The easiest way to get real shortwave hash without operating an SDR
-  is to drop one or more `shortwave_*.ogg` recordings into
-  `ipedro/assets/` — the module picks a random file per broadcast.
+  - `kiwi://host:port?freq=14040&mode=lsb` — opens a WebSocket to a
+    public **KiwiSDR** node, tunes to the given frequency (kHz) and
+    mode (`lsb` / `usb` / `am` / `cw` / `sam`), decodes the 4-bit
+    IMA-ADPCM stream, and resamples to the working rate. Anonymous
+    connect; optional `&password=...`. Pick a node from
+    [kiwisdr.com/public](http://kiwisdr.com/public). Please use the
+    bot's natural cadence (6 h cache → ≤ a few connects/day) — these
+    are volunteer-operated receivers.
+  - `http://...` / `https://...` — anything ffmpeg can decode in one
+    shot (Icecast relay, direct MP3, etc).
+
+  Failover walks the list in order until one yields ≥ 1 s of audio.
+  The easiest non-SDR alternative is to drop one or more
+  `shortwave_*.ogg` recordings into `ipedro/assets/` — the module picks
+  a random file per broadcast.
 
   Use `/ether_status` to see which source the last broadcast actually
   used; `/ether_refresh` drops the live cache so the next call

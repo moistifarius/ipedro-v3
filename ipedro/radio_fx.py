@@ -100,9 +100,31 @@ _live_cache: tuple[np.ndarray, float, str] | None = None
 
 
 def _fetch_live_from_url(url: str) -> np.ndarray:
-    """Pull ~30 s from one streaming URL via ffmpeg, decoded to mono
-    float32 at SR. Returns an empty array on any failure (timeout, bad
-    status, decode error, empty body). Doesn't raise."""
+    """Pull ~30 s from one streaming URL, decoded to mono float32 at SR.
+
+    Dispatches on URL scheme:
+      * ``kiwi://host:port?freq=...&mode=...`` → KiwiSDR WebSocket client
+        (anonymous connect, tune, 4-bit IMA-ADPCM decode, resample).
+      * everything else → ffmpeg HTTP(S) fetch (Icecast / direct MP3 etc).
+
+    Returns an empty array on any failure (timeout, bad status, decode
+    error, empty body, malformed URL). Doesn't raise."""
+    if url.startswith("kiwi://"):
+        from ipedro import kiwisdr
+        # KiwiSDR streams at 12 kHz int16 → convert to float32 at SR.
+        int16_pcm = kiwisdr.fetch_pcm_from_url(
+            url, duration_s=_LIVE_FETCH_DURATION_SECONDS,
+            timeout=_LIVE_FETCH_TIMEOUT_SECONDS,
+        )
+        if int16_pcm.size < kiwisdr.KIWI_SAMPLE_RATE:  # need ≥ 1s of audio
+            return np.zeros(0, dtype=np.float32)
+        floats = int16_pcm.astype(np.float32) / 32768.0
+        # 12000 → 8000 via 2/3 resampling.
+        from scipy.signal import resample_poly
+        out = resample_poly(floats, up=2, down=3).astype(np.float32)
+        if out.size < SR or float(np.max(np.abs(out))) < 1e-4:
+            return np.zeros(0, dtype=np.float32)
+        return out
     try:
         proc = subprocess.run(
             [
@@ -125,7 +147,6 @@ def _fetch_live_from_url(url: str) -> np.ndarray:
                  url, proc.returncode, tail)
         return np.zeros(0, dtype=np.float32)
     pcm = np.frombuffer(proc.stdout, dtype=np.float32)
-    # Sanity: a stream of literal silence isn't useful.
     if pcm.size < SR or float(np.max(np.abs(pcm))) < 1e-4:
         return np.zeros(0, dtype=np.float32)
     return pcm.copy()

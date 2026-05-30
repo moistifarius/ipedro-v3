@@ -103,9 +103,10 @@ def build_router(rt: Runtime) -> Router:
         if not urls:
             url_block = (
                 "  (live fetch is OFF — no RADIO_FX_LIVE_URLS configured.\n"
-                "  Most public WebSDRs don't expose plain HTTP audio.\n"
-                "  Set RADIO_FX_LIVE_URLS=<icecast-or-direct-mp3-url[,…]>\n"
-                "  in .env to enable.)"
+                "  Supported URL schemes:\n"
+                "    kiwi://host:port?freq=14040&mode=lsb  — KiwiSDR client\n"
+                "    http(s)://...                          — direct audio\n"
+                "  Set RADIO_FX_LIVE_URLS=<url[,url2,...]> in .env to enable.)"
             )
             cache_state = ""
         else:

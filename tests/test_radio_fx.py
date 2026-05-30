@@ -286,6 +286,30 @@ def test_live_shortwave_bed_returns_none_when_disabled(monkeypatch):
     assert radio_fx._live_shortwave_bed(SR, level=0.5) is None
 
 
+def test_fetch_live_from_url_dispatches_kiwi_scheme(monkeypatch):
+    """URLs starting with ``kiwi://`` go through the KiwiSDR client, not
+    ffmpeg. We stub the client to return a fixed int16 buffer and assert
+    the radio_fx side resamples + level-checks correctly."""
+    from ipedro import kiwisdr
+    fake_int16 = (np.sin(np.arange(kiwisdr.KIWI_SAMPLE_RATE * 3)
+                         * 0.1).astype(np.float32) * 8000).astype(np.int16)
+    monkeypatch.setattr(kiwisdr, "fetch_pcm_from_url",
+                        lambda url, **kw: fake_int16)
+    out = radio_fx._fetch_live_from_url("kiwi://h:8073?freq=14040&mode=lsb")
+    # 12000 Hz → 8000 Hz: 3s input ≈ 2s output
+    assert out.dtype == np.float32
+    assert out.size >= radio_fx.SR  # ≥ 1 second
+    assert float(np.max(np.abs(out))) > 0.05
+
+
+def test_fetch_live_from_url_kiwi_returns_empty_on_short_audio(monkeypatch):
+    from ipedro import kiwisdr
+    monkeypatch.setattr(kiwisdr, "fetch_pcm_from_url",
+                        lambda url, **kw: np.zeros(100, dtype=np.int16))
+    out = radio_fx._fetch_live_from_url("kiwi://h:8073?freq=14040&mode=lsb")
+    assert out.size == 0
+
+
 # ---------------------------------------------------------------- status surface
 def test_live_cache_status_reports_empty_when_disabled(monkeypatch):
     radio_fx.reset_live_cache()
