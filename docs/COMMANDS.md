@@ -68,15 +68,27 @@ than the ambient loop's garbled text:
   note. Every render uses a fresh random seed, so no two transmissions
   are identical.
 
-  The static bed has a priority chain: **live WebSDR fetch** (lazy —
-  pulled on the first `/ether` after a restart, cached for 6 h) →
+  The static bed has a three-tier priority: **live audio fetch** (lazy
+  — pulled on the first `/ether` after a restart, cached for 6 h) →
   bundled `ipedro/assets/shortwave_*.ogg` files → synthetic pink-noise
-  hash with lightning crackles and carrier ghosts. Set
-  `RADIO_FX_LIVE_URLS` (comma-separated, in `.env`) to override the
-  built-in public WebSDR list, or set it to an empty string to disable
-  the live fetch. Use `/ether_status` to see which source the last
-  broadcast actually used; `/ether_refresh` drops the cache so the next
-  call refetches.
+  hash with lightning crackles and carrier ghosts.
+
+  **Live fetch is OFF by default.** Most public WebSDRs (Twente,
+  Northern Utah, KiwiSDRs) use WebSocket players or Java applets, not
+  plain HTTP streams ffmpeg can pull from, so there's no reliable
+  always-on default. To enable it, set `RADIO_FX_LIVE_URLS` in `.env`
+  to a comma-separated list of URLs that *are* directly fetchable —
+  e.g. an Icecast SDR relay you operate or know works, or your own
+  KiwiSDR with an HTTP audio gateway. The default-off behaviour means
+  the bed falls straight to bundled (if any) or synthetic.
+
+  The easiest way to get real shortwave hash without operating an SDR
+  is to drop one or more `shortwave_*.ogg` recordings into
+  `ipedro/assets/` — the module picks a random file per broadcast.
+
+  Use `/ether_status` to see which source the last broadcast actually
+  used; `/ether_refresh` drops the live cache so the next call
+  refetches.
 - `/ether` as the **caption of a voice note**, or as a **reply to a voice
   note** — your actual recording gets the radio treatment instead.
 - `/ether` replying to a **text** message — transmits that message's text.

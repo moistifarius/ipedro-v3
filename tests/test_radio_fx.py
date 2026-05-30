@@ -203,11 +203,11 @@ def test_process_pcm_intensity_changes_output():
 
 
 # ---------------------------------------------------------------- live fetch
-def test_live_urls_defaults_to_builtin_when_env_unset(monkeypatch):
+def test_live_urls_defaults_off_when_env_unset(monkeypatch):
+    # The ship-default is *empty*: no reliable public HTTP audio URL
+    # exists for SSB shortwave, so live fetch is opt-in.
     monkeypatch.delenv("RADIO_FX_LIVE_URLS", raising=False)
-    urls = radio_fx._live_urls()
-    assert len(urls) >= 1
-    assert all(u.startswith("http") for u in urls)
+    assert radio_fx._live_urls() == ()
 
 
 def test_live_urls_honors_env_override_and_disable(monkeypatch):

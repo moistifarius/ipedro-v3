@@ -101,33 +101,44 @@ def build_router(rt: Runtime) -> Router:
         s = radio_fx.live_cache_status()
         urls: tuple[str, ...] = s["urls"]   # type: ignore[assignment]
         if not urls:
-            url_block = "  (disabled — RADIO_FX_LIVE_URLS is empty)"
+            url_block = (
+                "  (live fetch is OFF — no RADIO_FX_LIVE_URLS configured.\n"
+                "  Most public WebSDRs don't expose plain HTTP audio.\n"
+                "  Set RADIO_FX_LIVE_URLS=<icecast-or-direct-mp3-url[,…]>\n"
+                "  in .env to enable.)"
+            )
+            cache_state = ""
         else:
             lines = []
             for i, u in enumerate(urls, 1):
                 marker = "  ★" if u == s.get("cached_source") else "   "
                 lines.append(f"{marker} {i}. {u}")
             url_block = "\n".join(lines)
-        cache_state = (
-            f"  cached: {s['cached_seconds']:.1f}s "
-            f"from {s['cached_source']} "
-            f"({_format_age(s['cached_age_seconds'])}, "
-            f"refresh after {int(s['ttl_seconds']/3600)}h)"
-            if s["cached"] else
-            "  cached: (empty — next /ether triggers a fetch)"
-        )
+            cache_state = (
+                f"\n  cached: {s['cached_seconds']:.1f}s "
+                f"from {s['cached_source']} "
+                f"({_format_age(s['cached_age_seconds'])}, "
+                f"refresh after {int(s['ttl_seconds']/3600)}h)"
+                if s["cached"] else
+                "\n  cached: (empty — next /ether will try to fetch)"
+            )
         bundled = int(s["bundled_count"])
         bundled_state = (
             f"  bundled assets: {bundled} shortwave_*.ogg in ipedro/assets/"
             if bundled else
-            "  bundled assets: (none)"
+            "  bundled assets: (none — drop shortwave_*.ogg into\n"
+            "  ipedro/assets/ to use a real recording as the bed)"
         )
         last = s.get("last_bed_source") or "(no ether broadcast yet)"
+        live_header = (
+            "Live audio sources (priority 1):"
+            if urls else
+            "Live audio fetch:"
+        )
         body = (
             "📡 Ether interference status\n\n"
-            "Live WebSDR sources (priority 1):\n"
-            f"{url_block}\n"
-            f"{cache_state}\n\n"
+            f"{live_header}\n"
+            f"{url_block}{cache_state}\n\n"
             f"{bundled_state}\n\n"
             f"Last broadcast used: {last}\n\n"
             "Priority chain: live cache → bundled → synthetic."

@@ -71,17 +71,18 @@ _FFMPEG_TIMEOUT_SECONDS = 60
 _LIVE_FETCH_DURATION_SECONDS = 30
 _LIVE_FETCH_TIMEOUT_SECONDS = 25
 _LIVE_CACHE_TTL_SECONDS = 6 * 3600  # 6h between refreshes
-# Built-in failover list. Each is a free public WebSDR receiver; order is
-# by typical uptime. Override / replace via the RADIO_FX_LIVE_URLS env var
-# (comma-separated). Set RADIO_FX_LIVE_URLS="" to disable live fetch.
-_DEFAULT_LIVE_URLS: tuple[str, ...] = (
-    # University of Twente WebSDR — the de-facto public reference receiver.
-    "http://websdr.ewi.utwente.nl:8901/m.mp3?f=14040lsb",
-    # Northern Utah WebSDR (very stable, 7.0 MHz 40m amateur band).
-    "http://websdr2.sdrutah.org:8902/m.mp3?f=7050lsb",
-    # Twente fallback on a different band.
-    "http://websdr.ewi.utwente.nl:8901/m.mp3?f=7050lsb",
-)
+# No defaults: live fetch is OFF unless the operator explicitly sets
+# RADIO_FX_LIVE_URLS in the environment. Reason: there is no reliable
+# always-on public HTTP audio URL for SSB shortwave. Most WebSDRs
+# (Twente, Northern Utah, KiwiSDRs) use WebSocket players or Java
+# applets, not plain HTTP streams ffmpeg can pull from. To enable live
+# fetch, point this at:
+#   * an Icecast/MP3 stream of an SDR receiver you control or know works,
+#   * a relay you operate, or
+#   * any other URL whose body is an audio container ffmpeg can decode.
+# When unset/empty, the bed falls through to bundled shortwave_*.ogg
+# files in ipedro/assets/, then to the synthetic bed.
+_DEFAULT_LIVE_URLS: tuple[str, ...] = ()
 
 
 def _live_urls() -> tuple[str, ...]:
