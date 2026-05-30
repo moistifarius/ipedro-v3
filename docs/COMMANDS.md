@@ -63,19 +63,20 @@ than the ambient loop's garbled text:
   detune, subtle ring modulation, multi-LFO QSB fades, 180 ms slapback
   delay, and a dark convolution reverb. Mixed in parallel: a band-limited
   **static** bed, a faint FM-swept heterodyne **tuning whistle** that
-  fades in and out, sparse high-frequency **squeals**, a continuous
-  **numbers-station** bleed (a bundled "Swedish Rhapsody" recording,
-  looped with a random entry point and ridden on a high-floor envelope so
-  it never cuts to silence), and a squelch **click** at the start and
-  end. Mono OGG/Opus, broadcast as a voice note. Every render uses a
-  fresh random seed, so no two transmissions are identical.
+  fades in and out, sparse high-frequency **squeals**, and a squelch
+  **click** at the start and end. Mono OGG/Opus, broadcast as a voice
+  note. Every render uses a fresh random seed, so no two transmissions
+  are identical.
 
-  The static bed has a priority chain: **live WebSDR fetch** (cached for
-  6 h on first /ether call after a restart) → bundled
-  `ipedro/assets/shortwave_*.ogg` files → synthetic pink-noise hash with
-  lightning crackles and carrier ghosts. Set `RADIO_FX_LIVE_URLS` (comma-
-  separated, in `.env`) to override the built-in public WebSDR list, or
-  set it to an empty string to disable the live fetch.
+  The static bed has a priority chain: **live WebSDR fetch** (lazy —
+  pulled on the first `/ether` after a restart, cached for 6 h) →
+  bundled `ipedro/assets/shortwave_*.ogg` files → synthetic pink-noise
+  hash with lightning crackles and carrier ghosts. Set
+  `RADIO_FX_LIVE_URLS` (comma-separated, in `.env`) to override the
+  built-in public WebSDR list, or set it to an empty string to disable
+  the live fetch. Use `/ether_status` to see which source the last
+  broadcast actually used; `/ether_refresh` drops the cache so the next
+  call refetches.
 - `/ether` as the **caption of a voice note**, or as a **reply to a voice
   note** — your actual recording gets the radio treatment instead.
 - `/ether` replying to a **text** message — transmits that message's text.

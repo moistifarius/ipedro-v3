@@ -13,6 +13,7 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from ipedro import radio_fx
 from ipedro.ether import broadcast_now as ether_broadcast_now
 from ipedro.handlers.common import display_name, require_admin
 from ipedro.handlers.duckhunt import _issue_bef_challenge
@@ -26,6 +27,8 @@ _HELP = (
     "  /debug_help — this list\n"
     "  /debug_sharephoto — force the Dude to generate + post a photo now\n"
     "  /debug_ether — force one ether broadcast right now (needs ≥ 2 ether-enabled chats)\n"
+    "  /ether_status — show which interference source (live WebSDR / bundled / synthetic) the last ether used, and cache state\n"
+    "  /ether_refresh — drop the live shortwave cache; next /ether will refetch from the WebSDR list\n"
     "  /debug_challenge — issue a random bef challenge (captcha|trivia|recipe)\n"
     "  /debug_captcha — issue a captcha challenge\n"
     "  /debug_trivia — issue a trivia challenge\n"
@@ -39,6 +42,17 @@ _HELP = (
     "  say 'cat' / 'kitty' / 🐈 — Dude drops a dubious cat fact\n"
     "  type 'bang' twice within 15s — second one trips the cooldown challenge"
 )
+
+
+def _format_age(seconds: float | None) -> str:
+    if seconds is None:
+        return "never"
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s ago"
+    if s < 3600:
+        return f"{s // 60}m{s % 60:02d}s ago"
+    return f"{s // 3600}h{(s % 3600) // 60:02d}m ago"
 
 
 def build_router(rt: Runtime) -> Router:
@@ -71,8 +85,64 @@ def build_router(rt: Runtime) -> Router:
             )
             return
         source_id, dest_id = result
+        # Reports which interference source actually fed the bed, so the
+        # admin can confirm the WebSDR fetch is hot vs falling back.
+        bed = radio_fx.last_bed_source() or "(unknown)"
         await msg.reply(
-            f"📟 Ether: {source_id} → {dest_id}.",
+            f"📟 Ether: {source_id} → {dest_id}. Interference: {bed}.",
+            disable_notification=True,
+        )
+
+    @r.message(Command("ether_status"))
+    async def ether_status(msg: Message) -> None:
+        """Show whether the live WebSDR fetch is actually feeding /ether."""
+        if not await require_admin(msg, rt.settings.admin_ids):
+            return
+        s = radio_fx.live_cache_status()
+        urls: tuple[str, ...] = s["urls"]   # type: ignore[assignment]
+        if not urls:
+            url_block = "  (disabled — RADIO_FX_LIVE_URLS is empty)"
+        else:
+            lines = []
+            for i, u in enumerate(urls, 1):
+                marker = "  ★" if u == s.get("cached_source") else "   "
+                lines.append(f"{marker} {i}. {u}")
+            url_block = "\n".join(lines)
+        cache_state = (
+            f"  cached: {s['cached_seconds']:.1f}s "
+            f"from {s['cached_source']} "
+            f"({_format_age(s['cached_age_seconds'])}, "
+            f"refresh after {int(s['ttl_seconds']/3600)}h)"
+            if s["cached"] else
+            "  cached: (empty — next /ether triggers a fetch)"
+        )
+        bundled = int(s["bundled_count"])
+        bundled_state = (
+            f"  bundled assets: {bundled} shortwave_*.ogg in ipedro/assets/"
+            if bundled else
+            "  bundled assets: (none)"
+        )
+        last = s.get("last_bed_source") or "(no ether broadcast yet)"
+        body = (
+            "📡 Ether interference status\n\n"
+            "Live WebSDR sources (priority 1):\n"
+            f"{url_block}\n"
+            f"{cache_state}\n\n"
+            f"{bundled_state}\n\n"
+            f"Last broadcast used: {last}\n\n"
+            "Priority chain: live cache → bundled → synthetic."
+        )
+        await msg.reply(body, disable_notification=True)
+
+    @r.message(Command("ether_refresh"))
+    async def ether_refresh(msg: Message) -> None:
+        """Drop the live cache so the next /ether refetches."""
+        if not await require_admin(msg, rt.settings.admin_ids):
+            return
+        radio_fx.reset_live_cache()
+        await msg.reply(
+            "Live shortwave cache cleared. The next /ether will refetch "
+            "from the WebSDR failover list (a few seconds slower than usual).",
             disable_notification=True,
         )
 

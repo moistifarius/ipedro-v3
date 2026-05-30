@@ -20,14 +20,13 @@ Pipeline (in order, on the voice):
 
 Then mixed in parallel:
 
-  * Static bed — band-limited white noise that breathes on two LFOs and
-    has sharp word-gap bursts.
-  * Heterodyne whistle — FM-swept ~1 kHz tone with a high floor so it
-    stays present.
+  * Static bed — three-tier priority: a live WebSDR cache when available,
+    a bundled ``shortwave_*.ogg`` if present, else a synthetic pink-noise
+    bed with chaotic density variation, lightning crackles, and faint
+    drifting carrier ghosts.
+  * Heterodyne whistle — FM-swept ~1 kHz tone that genuinely fades in
+    and out.
   * HF squeals — sparse, fast linear chirps near 2 kHz.
-  * Numbers station — the bundled "Swedish Rhapsody" recording, looped
-    with a random entry point, on a high-floor envelope so it's a
-    continuous bleed (range ≈ 0.50–1.00, never to zero).
   * Start AND end squelch clicks.
 
 ``intensity`` ∈ [0, 1] nudges band tightness and bed levels. If ffmpeg
@@ -54,11 +53,6 @@ log = logging.getLogger(__name__)
 
 SR = 8000  # working sample rate (the audio bandwidth is < 3 kHz anyway)
 _FFMPEG_TIMEOUT_SECONDS = 60
-
-# Bundled numbers-station recording ("Swedish Rhapsody") used as one
-# continuous-bleed interference layer. Optional: if the asset is missing,
-# the effect still runs with just the synthetic beds.
-_INTERFERENCE_FILE = Path(__file__).parent / "assets" / "swedish_rhapsody.ogg"
 
 # ---- Live shortwave fetch ---------------------------------------------------
 # Static bed priority chain: live cached recording → bundled
@@ -191,13 +185,64 @@ def reset_live_cache() -> None:
     _live_cache = None
 
 
+# Which bed the last render actually used. ``None`` until something is
+# broadcast. Exposed via ``last_bed_source()`` so the admin can confirm
+# whether the live fetch is actually being applied or it's falling back.
+_last_bed_source: str | None = None
+
+
+def _record_last_bed_source(name: str) -> None:
+    global _last_bed_source
+    _last_bed_source = name
+
+
+def last_bed_source() -> str | None:
+    """Return the bed source used by the most recent radio render —
+    one of ``"live"``, ``"bundled"``, ``"synthetic"``, or ``None`` if
+    nothing has been rendered yet."""
+    return _last_bed_source
+
+
+def live_cache_status() -> dict[str, object]:
+    """Snapshot of the live-fetch state for an admin status command.
+
+    Returns a dict with:
+      * ``urls``: tuple of configured failover URLs (empty when disabled).
+      * ``cached``: True if a PCM chunk is currently cached.
+      * ``cached_source``: which URL the cache came from (or None).
+      * ``cached_seconds``: duration of the cached audio (0 if no cache).
+      * ``cached_age_seconds``: seconds since the cache was filled
+        (None if no cache).
+      * ``ttl_seconds``: how long a cache entry stays valid before the
+        next call triggers a refresh.
+      * ``bundled_count``: number of bundled ``shortwave_*.ogg`` files.
+      * ``last_bed_source``: bed source used by the most recent render.
+    """
+    cached_seconds = 0.0
+    cached_age = None
+    cached_source = None
+    cached = False
+    if _live_cache is not None:
+        pcm, fetched_at, src = _live_cache
+        cached = pcm.size > 0
+        cached_seconds = pcm.size / SR
+        cached_age = time.monotonic() - fetched_at
+        cached_source = src
+    return {
+        "urls": _live_urls(),
+        "cached": cached,
+        "cached_source": cached_source,
+        "cached_seconds": cached_seconds,
+        "cached_age_seconds": cached_age,
+        "ttl_seconds": _LIVE_CACHE_TTL_SECONDS,
+        "bundled_count": len(_shortwave_pool()),
+        "last_bed_source": _last_bed_source,
+    }
+
+
 
 def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
-
-
-def _interference_path() -> Path | None:
-    return _INTERFERENCE_FILE if _INTERFERENCE_FILE.is_file() else None
 
 
 # Bundled shortwave/SSB recordings used as the static bed. Drop one (or
@@ -267,23 +312,6 @@ def _encode_to_ogg(x: np.ndarray) -> bytes:
         log.warning("encode failed rc=%s", proc.returncode)
         return b""
     return proc.stdout
-
-
-# Cache the decoded numbers-station bed; it's ~120 s × 4 B = ~1 MB. Loaded
-# lazily on first use so module import stays fast.
-_STATION_PCM_CACHE: np.ndarray | None = None
-
-
-def _station_pcm() -> np.ndarray:
-    global _STATION_PCM_CACHE
-    if _STATION_PCM_CACHE is not None:
-        return _STATION_PCM_CACHE
-    path = _interference_path()
-    if path is None:
-        _STATION_PCM_CACHE = np.zeros(0, dtype=np.float32)
-        return _STATION_PCM_CACHE
-    _STATION_PCM_CACHE = _decode_file_to_pcm(path)
-    return _STATION_PCM_CACHE
 
 
 # ---------------------------------------------------------------- DSP
@@ -526,26 +554,6 @@ def _squeals(
     return out
 
 
-def _station_layer(
-    n: int, *, level: float, rng: np.random.Generator | None = None,
-) -> np.ndarray:
-    """Numbers-station bleed. Loops the bundled asset from a random offset
-    and rides a HIGH-FLOOR envelope (≈0.50–1.00) so it never cuts to
-    silence — it's a continuous bleed, not an interrupted broadcast."""
-    src = _station_pcm()
-    if len(src) == 0 or n <= 0:
-        return np.zeros(max(0, n), dtype=np.float32)
-    r = rng if rng is not None else np.random.default_rng()
-    offset = int(r.integers(0, len(src)))
-    rolled = np.roll(src, -offset)
-    reps = n // len(rolled) + 2
-    tiled = np.tile(rolled, reps)[:n].astype(np.float32)
-    tiled = _bandpass(tiled, 450, 2400, order=4)
-    t = np.arange(n) / SR
-    env = 0.75 + 0.25 * np.sin(2 * np.pi * 0.045 * t)  # range [0.50, 1.00]
-    return (tiled * env * level).astype(np.float32)
-
-
 def _clicks(
     n: int, *, level: float = 0.55,
     rng: np.random.Generator | None = None,
@@ -609,15 +617,18 @@ def _process_pcm(
     # Bed priority: live-fetched WebSDR cache → bundled shortwave_*.ogg
     # → synthetic (pink + crackles + ghosts). Each layer fails open.
     bed = _live_shortwave_bed(n, level=0.40 + 0.10 * i, rng=r)
+    bed_source = "live"
     if bed is None:
         bed = _shortwave_real_bed(n, level=0.45 + 0.10 * i, rng=r)
+        bed_source = "bundled"
     if bed is None:
         bed = _static_bed(n, level=0.22 + 0.08 * i, burst_amp=0.6, rng=r)
+        bed_source = "synthetic"
+    _record_last_bed_source(bed_source)
     out = (x
            + bed
            + _whistle(n, level=0.09 + 0.04 * i)
            + _squeals(n, level=0.10 + 0.04 * i, rng=r)
-           + _station_layer(n, level=0.30 + 0.05 * i, rng=r)
            + _clicks(n, level=0.55, rng=r))
     # Final hard band + soft brick
     out = _bandpass(out, hp, lp, order=6)

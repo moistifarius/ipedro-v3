@@ -18,12 +18,12 @@ from ipedro import radio_fx
 
 SR = radio_fx.SR
 
-# The station decode needs ffmpeg on PATH. CI environments may not have
-# it; production (Docker) does. Tests that actually pipe through ffmpeg
-# are skipped without it.
+# A handful of tests pipe through ffmpeg (full-pipeline render). Skip
+# them gracefully when ffmpeg isn't on PATH (some CI environments); the
+# production Docker image ships with ffmpeg installed.
 needs_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None,
-    reason="ffmpeg not on PATH (required to decode the numbers-station asset)",
+    reason="ffmpeg not on PATH",
 )
 
 
@@ -169,19 +169,6 @@ def test_squeals_are_sparse_high_frequency_events():
     assert hi > lo * 3
 
 
-@needs_ffmpeg
-def test_station_layer_never_goes_silent_when_asset_present():
-    if radio_fx._interference_path() is None:
-        pytest.skip("numbers-station asset not present")
-    n = SR * 6
-    s = radio_fx._station_layer(n, level=0.3, rng=np.random.default_rng(1))
-    # Sliding-window envelope min should be above zero (continuous bleed).
-    abs_s = np.abs(s)
-    window = SR // 2
-    min_env = float(np.min(np.convolve(abs_s, np.ones(window) / window, mode="valid")))
-    assert min_env > 1e-4
-
-
 def test_clicks_present_at_start_and_end():
     n = SR * 3
     c = radio_fx._clicks(n, level=0.5, rng=np.random.default_rng(0))
@@ -213,12 +200,6 @@ def test_process_pcm_intensity_changes_output():
     high = radio_fx._process_pcm(voice, intensity=0.95, rng=rng_b)
     # Same seed but different intensity → different output.
     assert not np.array_equal(low, high)
-
-
-def test_bundled_numbers_station_asset_present():
-    path = radio_fx._interference_path()
-    assert path is not None and path.is_file()
-    assert path.stat().st_size > 50_000
 
 
 # ---------------------------------------------------------------- live fetch
@@ -303,6 +284,51 @@ def test_live_shortwave_bed_returns_none_when_disabled(monkeypatch):
     radio_fx.reset_live_cache()
     monkeypatch.setenv("RADIO_FX_LIVE_URLS", "")
     assert radio_fx._live_shortwave_bed(SR, level=0.5) is None
+
+
+# ---------------------------------------------------------------- status surface
+def test_live_cache_status_reports_empty_when_disabled(monkeypatch):
+    radio_fx.reset_live_cache()
+    monkeypatch.setenv("RADIO_FX_LIVE_URLS", "")
+    s = radio_fx.live_cache_status()
+    assert s["urls"] == ()
+    assert s["cached"] is False
+    assert s["cached_age_seconds"] is None
+
+
+def test_live_cache_status_reports_cache_after_fetch(monkeypatch):
+    radio_fx.reset_live_cache()
+    monkeypatch.setenv("RADIO_FX_LIVE_URLS", "http://x/")
+    monkeypatch.setattr(radio_fx, "_fetch_live_from_url",
+                        lambda url: np.ones(SR * 3, dtype=np.float32) * 0.1)
+    radio_fx._ensure_live_pcm()
+    s = radio_fx.live_cache_status()
+    assert s["cached"] is True
+    assert s["cached_source"] == "http://x/"
+    assert s["cached_seconds"] == pytest.approx(3.0, abs=0.05)
+    assert s["cached_age_seconds"] is not None and s["cached_age_seconds"] >= 0
+
+
+@needs_ffmpeg
+def test_process_pcm_records_bed_source(monkeypatch):
+    """After a render, ``last_bed_source()`` reports which bed actually ran."""
+    monkeypatch.setenv("RADIO_FX_LIVE_URLS", "http://x/")
+    monkeypatch.setattr(radio_fx, "_fetch_live_from_url",
+                        lambda url: np.ones(SR * 2, dtype=np.float32) * 0.1)
+    radio_fx.reset_live_cache()
+    voice = (0.3 * np.sin(2 * np.pi * 600 * np.arange(SR) / SR)).astype(np.float32)
+    radio_fx._process_pcm(voice, intensity=0.6, rng=np.random.default_rng(0))
+    assert radio_fx.last_bed_source() == "live"
+
+
+def test_last_bed_source_falls_through_to_synthetic(monkeypatch):
+    """No live URL and no bundled assets → synthetic bed used."""
+    monkeypatch.setenv("RADIO_FX_LIVE_URLS", "")
+    monkeypatch.setattr(radio_fx, "_shortwave_pool", lambda: [])
+    radio_fx.reset_live_cache()
+    voice = (0.3 * np.sin(2 * np.pi * 600 * np.arange(SR) / SR)).astype(np.float32)
+    radio_fx._process_pcm(voice, intensity=0.6, rng=np.random.default_rng(0))
+    assert radio_fx.last_bed_source() == "synthetic"
 
 
 # ---------------------------------------------------------------- entry guards
