@@ -1,20 +1,22 @@
-"""Ether: pager-style cross-chat message garbling.
+"""Ether: cross-chat radio transmissions.
 
-Every ~hour, with low probability, picks a recent message from one
-opted-in chat, runs it through a pager-style garble (dropped chars,
-substitutions, ALL CAPS, blackouts, truncation), and broadcasts it
-into a *different* opted-in chat with a spooky wrapper.
+The ``/ether`` command (handler in ``ipedro/handlers/ether.py``) sends a
+voice-note transmission run through the HF/SSB radio effect in
+``radio_fx.py``. Destinations are random other ether-enabled chats
+(``chat_config.ether_enabled``); the sender stays anonymous to the
+receiving chat.
 
-The chats are linked only by their consent — neither side knows who's
-on the other end. From the receiver's POV it's a stray transmission
-they happen to be picking up out of the ether.
+A previous version also ran an *ambient* loop that auto-broadcast pager-
+garbled text into opted-in chats every few hours. That loop was noisy
+and got removed. The pager-garble helpers below (``garble_pager``,
+``_wrap``) remain only as a text fallback for ``manual_broadcast`` when
+TTS / radio FX is unavailable, and ``broadcast_now`` stays around for
+``/debug_ether`` admin testing.
 
-Opt-in: ``chat_config.ether_enabled`` (default off).
-
-Cooldown: receiving chats won't get a transmission more than once per
-4 hours (``chat_state.last_ether_at``). Sending isn't rate-limited
-beyond the loop tick × dice roll — a chatty source chat is fine since
-each broadcast goes to a randomly-chosen receiver anyway.
+Per-receiver 4-hour cooldown still applies to the legacy
+``broadcast_now`` path (``chat_state.last_ether_at``); the manual
+``/ether`` command ignores the cooldown because it's deliberately
+human-triggered.
 """
 
 from __future__ import annotations
@@ -35,8 +37,12 @@ from ipedro.silenced_chats import is_silenced
 
 log = logging.getLogger(__name__)
 
-_TICK_SECONDS = 3600          # 1h
-_DROP_CHANCE = 0.30           # per tick → roughly one broadcast every ~3h
+# The ambient broadcast loop (which used to fire every ~3 h with pager-
+# garbled cross-chat messages) was removed — too noisy. ``broadcast_now``
+# is preserved for ``/debug_ether`` admin testing, and ``manual_broadcast``
+# powers the ``/ether`` command (radio-voice transmissions). The 4-hour
+# receiver cooldown still applies to the loop-style ``broadcast_now``
+# path so debug calls don't hammer the same destination.
 _RECEIVER_COOLDOWN = timedelta(hours=4)
 _SOURCE_LOOKBACK = timedelta(hours=24)
 _MIN_MESSAGE_LEN = 25         # don't pick "k", "lol", etc.
@@ -361,23 +367,3 @@ async def broadcast_now(bot: Bot, db: Database) -> tuple[int, int] | None:
         return None
 
 
-async def _maybe_broadcast(bot: Bot, db: Database) -> None:
-    if random.random() >= _DROP_CHANCE:
-        return
-    await broadcast_now(bot, db)
-
-
-async def run_ether_loop(bot: Bot, db: Database, stop: asyncio.Event) -> None:
-    log.info("Ether loop running.")
-    while not stop.is_set():
-        try:
-            await _maybe_broadcast(bot, db)
-            wait = _TICK_SECONDS
-        except Exception as exc:
-            log.exception("Ether loop iteration failed: %s", exc)
-            wait = _TICK_SECONDS
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=wait)
-        except asyncio.TimeoutError:
-            pass
-    log.info("Ether loop stopped.")

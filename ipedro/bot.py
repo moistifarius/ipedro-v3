@@ -31,7 +31,6 @@ from ipedro.handlers import utility as utility_h
 from ipedro.logging_setup import configure_logging
 from ipedro.celebrations import run_celebrations_loop
 from ipedro.comic import run_comic_loop
-from ipedro.ether import run_ether_loop
 from ipedro.kv import kv_get
 from ipedro.personas import set_master_prompt_override
 from ipedro.memory.store import MemoryStore
@@ -173,10 +172,6 @@ async def run() -> None:
         run_ambient_loops(rt.bot, rt.db, rt.openai, stop),
         name="ambient-loops",
     )
-    ether_task = asyncio.create_task(
-        run_ether_loop(rt.bot, rt.db, stop),
-        name="ether",
-    )
 
     try:
         polling = asyncio.create_task(
@@ -200,7 +195,7 @@ async def run() -> None:
         stop.set()
         for task in (
             spawner_task, share_photo_task, reminders_task,
-            celebrations_task, comic_task, ambient_task, ether_task,
+            celebrations_task, comic_task, ambient_task,
         ):
             task.cancel()
             try:
