@@ -36,6 +36,9 @@ _HELP = (
     "  /debug_clear_challenge [chat_id] — clear stuck bef challenge(s) in a "
     "chat (default: this chat). Unsticks a chat where every message is "
     "judged 'Not quite. Try again.'\n"
+    "  /debug_persona — show the exact system prompt this chat would use, "
+    "and which layer (master_prompt / persona_custom / NEUTRAL) won the "
+    "resolution. Use when '/master_prompt reset' seems to do nothing.\n"
     "  /debug_duck — alias for /duckhunt (force-spawn in this chat)\n"
     "\nFor the others, just type the trigger:\n"
     "  say 'the dude' / 'duder' / 'el duderino' — Dude should reply\n"
@@ -210,6 +213,62 @@ def build_router(rt: Runtime) -> Router:
             f"No pending bef challenges in chat {target}.",
             disable_notification=True,
         )
+
+    @r.message(Command("debug_persona"))
+    async def debug_persona(msg: Message) -> None:
+        """Dump the exact persona prompt the bot would use for this chat.
+
+        Resolution chain:
+          1. chat_config.persona_custom (if set) — WINS over everything
+          2. chat_config.persona == "neutral" → NEUTRAL_PROMPT
+          3. chat_config.persona in {"dude", "pedro"} → /master_prompt
+             override, or DEFAULT_DUDE_PROMPT if no override is set
+          4. anything else → /master_prompt fallback
+        Plus the dynamic ``persona_state`` (mood / word-of-day /
+        stuck-word) appended as a second system message.
+        """
+        if not await require_admin(msg, rt.settings.admin_ids):
+            return
+        from ipedro.personas import (
+            DEFAULT_DUDE_PROMPT, current_master_prompt, resolve_persona,
+        )
+        cfg = await rt.chats.get_config(msg.chat.id)
+        if cfg is None:
+            await msg.reply("No chat config — run /chat_config first.",
+                            disable_notification=True)
+            return
+        resolved = resolve_persona(cfg.persona, cfg.persona_custom)
+        state = await rt.persona_state.current(msg.chat.id)
+        extra = rt.persona_state.to_system_prompt(state)
+        master = current_master_prompt()
+        master_overridden = master != DEFAULT_DUDE_PROMPT
+        custom = (cfg.persona_custom or "").strip()
+        # Which branch of resolve_persona fired?
+        if custom:
+            source = "chat_config.persona_custom (overrides /master_prompt)"
+        elif (cfg.persona or "").lower() == "neutral":
+            source = "built-in NEUTRAL_PROMPT (persona=neutral)"
+        elif (cfg.persona or "dude").lower() in ("dude", "pedro"):
+            source = ("/master_prompt override" if master_overridden
+                      else "DEFAULT_DUDE_PROMPT (no override; /master_prompt reset)")
+        else:
+            source = (f"unknown persona '{cfg.persona}' → fell back to "
+                      f"{'/master_prompt' if master_overridden else 'DEFAULT_DUDE_PROMPT'}")
+        body = (
+            f"📋 Persona resolution for chat {msg.chat.id}\n\n"
+            f"chat_config.persona        = {cfg.persona!r}\n"
+            f"chat_config.persona_custom = "
+            f"{'<set, ' + str(len(custom)) + ' chars>' if custom else 'None'}\n"
+            f"master_prompt override     = "
+            f"{'yes (' + str(len(master)) + ' chars)' if master_overridden else 'no (using default)'}\n"
+            f"persona_state extras       = "
+            f"{'<set, ' + str(len(extra)) + ' chars>' if extra else 'None'}\n\n"
+            f"Resolved persona source: {source}\n\n"
+            f"--- system prompt actually sent (first 1500 chars) ---\n"
+            f"{resolved[:1500]}"
+            + (f"\n\n--- + dynamic extras ---\n{extra[:500]}" if extra else "")
+        )
+        await msg.reply(body[:4000], disable_notification=True)
 
     @r.message(Command("debug_duck"))
     async def debug_duck(msg: Message) -> None:
