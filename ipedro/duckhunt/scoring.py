@@ -47,6 +47,25 @@ RARITY_BY_NAME: dict[str, tuple[float, int]] = {
 # defaults below. Boss bonus is computed off this too.
 FLAT_DUCK_POINTS = 1
 
+# --------------------------------------------------------------- difficulty
+# Tuned for "rare-event-rich" play: bang misses bite, bef refusals are
+# common, and roughly a third of misses snowball into a captcha challenge
+# the user has to clear before they can shoot again.
+BANG_BASE_HIT = 0.65          # was 0.80 — bang misses meaningfully more
+BANG_HIT_CAP = 0.85           # was 0.95 — streaks help, but ceiling lower
+BANG_STREAK_BONUS = 0.02      # per streak point, capped at the streak cap
+BANG_STREAK_CAP = 5
+
+# Probability the AI's verdict gets bypassed in favour of an outright
+# refusal — the duck doesn't even hear you out. 0.0 reproduces the
+# previous behaviour ("dice always passes; AI decides").
+BEF_REFUSE_RATE = 0.35
+
+# When a bang misses, this is the chance the duck "spooks" you into a
+# follow-up captcha/trivia/recipe challenge. The challenge gates further
+# bangs until cleared (same plumbing the bef refusal uses).
+MISS_CHALLENGE_RATE = 0.30
+
 # (month, day) -> (event name, hint flavor used in the quack line)
 HOLIDAYS: dict[tuple[int, int], tuple[str, str]] = {
     (1, 1):   ("New Year",         "🎆 the duck wears tiny party glasses"),
@@ -112,9 +131,11 @@ def base_points(rarity: str) -> int:
 
 def bang_outcome(rarity: str, current_streak: int, rng: random.Random | None = None) -> ActionOutcome:
     """Trying to shoot the duck. Streak gives a small accuracy bonus.
-    Rarity is accepted but ignored — flat 0.80 base hit chance."""
+    Rarity is accepted but ignored — flat ``BANG_BASE_HIT`` base hit chance,
+    rising with streak up to ``BANG_HIT_CAP``."""
     r = rng if rng is not None else random
-    hit_chance = min(0.95, 0.80 + min(current_streak, 5) * 0.02)
+    streak_bonus = min(current_streak, BANG_STREAK_CAP) * BANG_STREAK_BONUS
+    hit_chance = min(BANG_HIT_CAP, BANG_BASE_HIT + streak_bonus)
     if r.random() <= hit_chance:
         pts = FLAT_DUCK_POINTS
         return ActionOutcome(
@@ -148,9 +169,26 @@ BEF_BASE_CHANCE: dict[str, float] = {
 
 
 def bef_dice_passes(rarity: str, rng: random.Random | None = None) -> bool:
-    """Step 1 of the bef flow. With rarity neutralized, the dice always
-    passes and the outcome is decided entirely by the AI verdict."""
-    return True
+    """Step 1 of the bef flow.
+
+    Returns False with probability ``BEF_REFUSE_RATE`` — the duck refuses
+    outright before the AI verdict is even consulted. This is the harder
+    setting: roughly one bef in three is a flat-out "no" regardless of
+    AI mood.
+    """
+    r = rng if rng is not None else random
+    return r.random() >= BEF_REFUSE_RATE
+
+
+def should_challenge_on_miss(rng: random.Random | None = None) -> bool:
+    """True with probability ``MISS_CHALLENGE_RATE``.
+
+    Rolled after a bang miss to decide whether the duck spooks the
+    shooter into a captcha/trivia/recipe challenge that must be cleared
+    before they can bang again.
+    """
+    r = rng if rng is not None else random
+    return r.random() < MISS_CHALLENGE_RATE
 
 
 def bef_success_outcome(rarity: str, ai_line: str | None) -> ActionOutcome:

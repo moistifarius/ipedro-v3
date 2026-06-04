@@ -67,14 +67,18 @@ def _duck(rarity: str) -> ActiveDuck:
     )
 
 
-class AlwaysPassRng:
+class AlwaysLowRng:
+    """random() == 0.0 — always under any threshold. Makes bang_outcome
+    hit and bef_dice_passes refuse (random() < BEF_REFUSE_RATE)."""
     def random(self_inner):
-        return 0.0  # always under any threshold
+        return 0.0
 
 
-class AlwaysFailRng:
+class AlwaysHighRng:
+    """random() == 0.999 — always over any threshold. Makes bef_dice_passes
+    pass (random() >= BEF_REFUSE_RATE) and bang_outcome miss."""
     def random(self_inner):
-        return 0.999  # always over any threshold
+        return 0.999
 
 
 @pytest.mark.asyncio
@@ -90,7 +94,7 @@ async def test_ai_accept_resolves_regardless_of_rng():
         chat_id=42, user_id=1, display_name="alice",
         ai_verdict=True,
         ai_line="i love you",
-        rng=AlwaysFailRng(),
+        rng=AlwaysHighRng(),
     )
     assert outcome is not None
     assert outcome.success is True
@@ -108,7 +112,7 @@ async def test_dice_pass_and_ai_accept_resolves_and_awards():
     outcome, _ = await svc.handle_bef(
         chat_id=42, user_id=1, display_name="alice",
         ai_verdict=True, ai_line="the duck nods",
-        rng=AlwaysPassRng(),
+        rng=AlwaysHighRng(),
     )
     assert outcome is not None
     assert outcome.success is True
@@ -126,7 +130,7 @@ async def test_dice_pass_but_ai_refuse_keeps_duck():
     outcome, _ = await svc.handle_bef(
         chat_id=42, user_id=1, display_name="alice",
         ai_verdict=False, ai_line="duck is too cool for you",
-        rng=AlwaysPassRng(),
+        rng=AlwaysHighRng(),
     )
     assert outcome is not None
     assert outcome.success is False
@@ -145,7 +149,7 @@ async def test_ai_unavailable_falls_back_to_dice_accept():
         chat_id=42, user_id=1, display_name="alice",
         ai_verdict=None,  # AI unavailable
         ai_line=None,
-        rng=AlwaysPassRng(),
+        rng=AlwaysHighRng(),
     )
     assert outcome is not None
     assert outcome.success is True
@@ -162,7 +166,7 @@ async def test_no_duck_returns_none_pair():
     outcome, duck = await svc.handle_bef(
         chat_id=42, user_id=1, display_name="alice",
         ai_verdict=True, ai_line="hi",
-        rng=AlwaysPassRng(),
+        rng=AlwaysHighRng(),
     )
     assert outcome is None and duck is None
 
@@ -192,6 +196,8 @@ async def test_bang_without_duck_replies():
     duckhunt = SimpleNamespace(
         active_duck=AsyncMock(return_value=None),
         cooldown_ok=AsyncMock(return_value=True),
+        # No pending bef/bang-miss challenge for this user.
+        get_bef_challenge=AsyncMock(return_value=None),
         # No active duck → handle_bang returns the (None, None) sentinel.
         handle_bang=AsyncMock(return_value=(None, None)),
         handle_ignore=AsyncMock(return_value=(None, None)),
@@ -232,3 +238,131 @@ async def test_bang_without_duck_replies():
     msg.reply.assert_awaited()
     body = msg.reply.await_args.args[0]
     assert "no duck" in body.lower()
+
+
+# Bang-miss → challenge path -----------------------------------------------
+@pytest.mark.asyncio
+async def test_bang_miss_triggers_challenge_when_dice_says_so(monkeypatch):
+    """After a missed bang, ``should_challenge_on_miss`` decides whether to
+    issue a captcha/trivia/recipe. When it says yes, ``_issue_bef_challenge``
+    fires with a 'spooked' intro."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from ipedro.duckhunt.scoring import ActionOutcome
+    from ipedro.handlers import duckhunt as dh
+
+    cfg = SimpleNamespace(duckhunt_enabled=True)
+    chats = SimpleNamespace(
+        upsert_chat=AsyncMock(),
+        get_config=AsyncMock(return_value=cfg),
+        upsert_default_config=AsyncMock(return_value=cfg),
+    )
+    users = SimpleNamespace(upsert_user=AsyncMock())
+    miss = ActionOutcome(
+        success=False, points_delta=0, streak_delta=0,
+        message="You missed!", resolves_duck=False,
+    )
+    duck = _duck("common")
+    duckhunt = SimpleNamespace(
+        active_duck=AsyncMock(return_value=duck),
+        cooldown_ok=AsyncMock(return_value=True),
+        get_bef_challenge=AsyncMock(return_value=None),
+        handle_bang=AsyncMock(return_value=(miss, duck)),
+        handle_ignore=AsyncMock(return_value=(None, None)),
+    )
+    settings = SimpleNamespace(
+        admin_ids=frozenset(),
+        duckhunt_action_cooldown_seconds=15,
+        duckhunt_duck_lifetime_seconds=86400,
+    )
+    rt = SimpleNamespace(
+        settings=settings, db=SimpleNamespace(), chats=chats, users=users,
+        duckhunt=duckhunt, openai=SimpleNamespace(), bot=SimpleNamespace(),
+    )
+
+    # Force the miss-challenge dice to fire.
+    monkeypatch.setattr(dh, "should_challenge_on_miss", lambda *a, **k: True)
+
+    issued: list[dict] = []
+    async def fake_issue(rt_, msg_, who, *, intro, force_kind=None):
+        issued.append({"intro": intro, "who": who})
+        return True
+    monkeypatch.setattr(dh, "_issue_bef_challenge", fake_issue)
+
+    router = dh.build_router(rt)
+    handler = next(
+        h.callback for h in router.observers["message"].handlers
+        if h.callback.__name__ == "bang_or_ignore"
+    )
+
+    chat = SimpleNamespace(id=42, type="group", title="t")
+    from_user = SimpleNamespace(
+        id=7, is_bot=False, username="u", first_name="U", last_name=None,
+    )
+    msg = SimpleNamespace(
+        chat=chat, from_user=from_user, text="bang", caption=None,
+        message_id=1, reply=AsyncMock(), answer=AsyncMock(),
+    )
+    await handler(msg)
+
+    duckhunt.handle_bang.assert_awaited_once()
+    msg.reply.assert_awaited()
+    assert len(issued) == 1
+    assert "spook" in issued[0]["intro"].lower()
+
+
+@pytest.mark.asyncio
+async def test_bang_blocked_while_challenge_pending():
+    """A user with an outstanding challenge can't bang — they get nudged
+    to solve the challenge first, and handle_bang is never called."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from ipedro.handlers.duckhunt import build_router
+
+    cfg = SimpleNamespace(duckhunt_enabled=True)
+    chats = SimpleNamespace(
+        upsert_chat=AsyncMock(),
+        get_config=AsyncMock(return_value=cfg),
+        upsert_default_config=AsyncMock(return_value=cfg),
+    )
+    users = SimpleNamespace(upsert_user=AsyncMock())
+    duckhunt = SimpleNamespace(
+        active_duck=AsyncMock(),
+        cooldown_ok=AsyncMock(return_value=True),
+        # A pending challenge (any truthy sentinel).
+        get_bef_challenge=AsyncMock(return_value=SimpleNamespace(kind="captcha")),
+        handle_bang=AsyncMock(),
+        handle_ignore=AsyncMock(),
+    )
+    settings = SimpleNamespace(
+        admin_ids=frozenset(),
+        duckhunt_action_cooldown_seconds=15,
+        duckhunt_duck_lifetime_seconds=86400,
+    )
+    rt = SimpleNamespace(
+        settings=settings, db=SimpleNamespace(), chats=chats, users=users,
+        duckhunt=duckhunt, openai=SimpleNamespace(), bot=SimpleNamespace(),
+    )
+
+    router = build_router(rt)
+    handler = next(
+        h.callback for h in router.observers["message"].handlers
+        if h.callback.__name__ == "bang_or_ignore"
+    )
+
+    chat = SimpleNamespace(id=42, type="group", title="t")
+    from_user = SimpleNamespace(
+        id=7, is_bot=False, username="u", first_name="U", last_name=None,
+    )
+    msg = SimpleNamespace(
+        chat=chat, from_user=from_user, text="bang", caption=None,
+        message_id=1, reply=AsyncMock(),
+    )
+    await handler(msg)
+
+    duckhunt.handle_bang.assert_not_called()
+    msg.reply.assert_awaited()
+    body = msg.reply.await_args.args[0].lower()
+    assert "challenge" in body

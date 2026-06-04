@@ -117,17 +117,21 @@ broadcast. Requires another chat to have `ether` enabled.
 
 Reply tokens (case-insensitive): `bang`, `bef`, `ignore`.
 
+#### How `bang` works
+
+Base hit chance is 65 % (a streak adds +2 % per shot, capped at 85 % at
+a 5-streak). Misses reset your streak. Roughly one miss in three
+**spooks** you into a captcha / trivia / recipe **challenge** — same
+mechanic as the `bef`-refusal challenge below. While that challenge is
+pending, further `bang`s are blocked; clear it (reply with the answer
+in plain text, or wait for the 1 h auto-expiry) and you can shoot again.
+
 #### How `bef` works
 
-The AI plays the duck and decides whether it actually wants to be
-friends. It's chaotic — usually agrees, occasionally refuses for absurd
-or trivial reasons.
-
-(Rarity tiers used to bias this decision toward refusal for rarer
-ducks, plus an extra pre-AI dice gate. That whole layer is currently
-disabled — every duck behaves identically. The column is preserved so
-the tiering can be re-enabled later by flipping the helpers in
-`ipedro/duckhunt/scoring.py` back to their lookup forms.)
+The duck refuses outright roughly one bef in three (a flat pre-AI dice
+roll), without the AI even being asked. When the dice does pass, the AI
+plays the duck and decides on its own: usually agrees, occasionally
+refuses for absurd or trivial reasons.
 
 A successful `bef` resolves the duck, awards a befriended point, and
 adds the duck to your friendship roster (`/duckfriends`); the bot

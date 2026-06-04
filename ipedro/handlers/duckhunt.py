@@ -12,6 +12,7 @@ from aiogram.types import BufferedInputFile, Message
 from ipedro.bot_messages import track
 from ipedro.duckhunt.captcha_gen import make_captcha
 from ipedro.duckhunt.debug_toggles import is_on as debug_is_on
+from ipedro.duckhunt.scoring import should_challenge_on_miss
 from ipedro.duckhunt.spawner import build_quack_message_for
 from ipedro.duckhunt.verdicts import parse_verdict
 from ipedro.handlers.common import display_name, get_or_create_chat_config
@@ -261,6 +262,23 @@ def build_router(rt: Runtime) -> Router:
             return
         action = msg.text.strip().lower()
         admin_id = msg.from_user.id
+
+        # Pending challenge gate (matches bef): if the user has an
+        # outstanding captcha / trivia / recipe challenge, both bang and
+        # ignore are blocked until they clear it. Without the gate the
+        # bang handler would fire before the chat-router challenge
+        # intercept gets a look.
+        if action == "bang":
+            pending = await rt.duckhunt.get_bef_challenge(
+                msg.chat.id, msg.from_user.id,
+            )
+            if pending:
+                await msg.reply(
+                    "Solve the challenge first (reply to the prompt above).",
+                    disable_notification=True,
+                )
+                return
+
         # bypass_cooldowns lets an admin re-bang/-bef rapidly while
         # testing. Non-admins (or admins with the toggle off) get the
         # normal 15s cooldown.
@@ -298,6 +316,27 @@ def build_router(rt: Runtime) -> Router:
             )
             return
         await msg.reply(outcome.message, disable_notification=True)
+
+        # Missed bang → roll for a follow-up challenge. The challenge
+        # gates further bangs (via the pending check above) until cleared.
+        # Skipped for the admin always_miss toggle so debug runs stay
+        # predictable, and for any bypass_cooldowns admin since the whole
+        # point of that toggle is rapid-fire testing.
+        if (
+            action == "bang"
+            and not outcome.success
+            and not debug_is_on(admin_id, "always_miss")
+            and not debug_is_on(admin_id, "always_hit")
+            and not debug_is_on(admin_id, "bypass_cooldowns")
+            and should_challenge_on_miss()
+        ):
+            await _issue_bef_challenge(
+                rt, msg, display_name(msg.from_user),
+                intro=(
+                    "The duck spooked you — the next shot has to wait. "
+                    "Clear this first:"
+                ),
+            )
 
     @r.message(F.text.lower() == "bef")
     async def bef_action(msg: Message) -> None:
