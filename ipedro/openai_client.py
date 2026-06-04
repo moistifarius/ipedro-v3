@@ -24,8 +24,20 @@ import inspect
 import logging
 from typing import Any, BinaryIO, Literal, Sequence
 
-from anthropic import APIError as AnthropicAPIError, AsyncAnthropic
-from openai import APIError as OpenAIAPIError, AsyncOpenAI
+from anthropic import (
+    APIConnectionError as AnthropicAPIConnectionError,
+    APIError as AnthropicAPIError,
+    APITimeoutError as AnthropicAPITimeoutError,
+    AsyncAnthropic,
+    InternalServerError as AnthropicInternalServerError,
+)
+from openai import (
+    APIConnectionError as OpenAIAPIConnectionError,
+    APIError as OpenAIAPIError,
+    APITimeoutError as OpenAIAPITimeoutError,
+    AsyncOpenAI,
+    InternalServerError as OpenAIInternalServerError,
+)
 from tenacity import (
     retry, retry_if_exception_type, stop_after_attempt, wait_exponential,
 )
@@ -34,15 +46,25 @@ from ipedro.db.pool import Database
 
 log = logging.getLogger(__name__)
 
+# Only retry TRANSIENT errors (connection drops, timeouts, upstream 5xx).
+# Crucially NOT RateLimitError (429): retrying immediately just slams the
+# limit again and inflates Anthropic's hit counter. A 429 propagates up
+# and the calling feature degrades gracefully (None response).
 _OPENAI_RETRY = dict(
-    retry=retry_if_exception_type(OpenAIAPIError),
+    retry=retry_if_exception_type((
+        OpenAIAPIConnectionError, OpenAIAPITimeoutError,
+        OpenAIInternalServerError,
+    )),
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=8),
     reraise=False,
 )
 
 _CLAUDE_RETRY = dict(
-    retry=retry_if_exception_type(AnthropicAPIError),
+    retry=retry_if_exception_type((
+        AnthropicAPIConnectionError, AnthropicAPITimeoutError,
+        AnthropicInternalServerError,
+    )),
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=8),
     reraise=False,
@@ -139,6 +161,13 @@ class AIClient:
         text_provider: TextProvider | None = None,
         text_model: str = "gpt-4o-mini",
         claude_model: str = "claude-sonnet-4-6",
+        # Low-stakes routing: classifiers, judges, one-liners go through
+        # cheap_chat/cheap_completion, which use these models regardless
+        # of the primary text_provider. ~3x cheaper than Sonnet, with a
+        # separate rate-limit quota — so a spike in /catfact or bef
+        # judging doesn't eat your /a or /tldr capacity.
+        cheap_claude_model: str = "claude-haiku-4-5",
+        cheap_openai_model: str = "gpt-4o-mini",
         image_model: str = "gpt-image-1",
         transcription_model: str = "whisper-1",
         embedding_model: str = "text-embedding-3-small",
@@ -167,6 +196,8 @@ class AIClient:
         self._text_provider: TextProvider = text_provider
         self.text_model = text_model
         self.claude_model = claude_model
+        self.cheap_claude_model = cheap_claude_model
+        self.cheap_openai_model = cheap_openai_model
         self.image_model = image_model
         self.transcription_model = transcription_model
         self.embedding_model = embedding_model
@@ -266,6 +297,54 @@ class AIClient:
             max_tokens=max_tokens, chat_id=chat_id,
         )
 
+    # --------------- cheap routing (classifiers / judges / one-liners)
+    async def cheap_chat(
+        self,
+        messages: Sequence[dict[str, Any]],
+        *,
+        max_tokens: int = 200,
+        temperature: float = 1.0,
+        chat_id: int | None = None,
+    ) -> str | None:
+        """Like ``chat`` but forces the configured cheap model.
+
+        Use for low-stakes calls — classifiers, scoring, judges, short
+        one-liners — where Sonnet quality is overkill. Haiku is ~3x
+        cheaper and has its own rate-limit quota, so a spike in the
+        cheap path can't eat the quota that /a, /tldr, and main chat
+        replies depend on. The cheap provider is decoupled from
+        ``text_provider``: it always runs Claude Haiku when an
+        Anthropic key is configured, else gpt-4o-mini.
+        """
+        try:
+            if self._anthropic is not None:
+                return await self._chat_claude(
+                    messages,
+                    model=self.cheap_claude_model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    chat_id=chat_id,
+                )
+            return await self._chat_openai(
+                messages,
+                model=self.cheap_openai_model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                chat_id=chat_id,
+            )
+        except Exception as exc:
+            log.error("cheap_chat() failure: %s", exc)
+            return None
+
+    async def cheap_completion(
+        self, prompt: str, *, max_tokens: int = 200,
+        chat_id: int | None = None, temperature: float = 1.0,
+    ) -> str | None:
+        return await self.cheap_chat(
+            [{"role": "user", "content": prompt}],
+            max_tokens=max_tokens, temperature=temperature, chat_id=chat_id,
+        )
+
     @retry(**_OPENAI_RETRY)  # type: ignore[arg-type]
     async def _chat_openai(
         self,
@@ -310,6 +389,7 @@ class AIClient:
         self,
         messages: Sequence[dict[str, Any]],
         *,
+        model: str | None = None,
         max_tokens: int,
         temperature: float,
         chat_id: int | None,
@@ -317,7 +397,7 @@ class AIClient:
         if self._anthropic is None:
             log.error("Claude chat requested but no anthropic_api_key.")
             return None
-        m = self.claude_model
+        m = model or self.claude_model
         system, chat_messages = _normalize_for_claude(messages)
         kwargs: dict[str, Any] = {
             "model": m,

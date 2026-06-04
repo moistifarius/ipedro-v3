@@ -269,7 +269,8 @@ def build_router(rt: Runtime) -> Router:
                     verdict = captcha_matches(challenge.challenge, answer)
                     line = None
                 else:
-                    ai_text = await rt.openai.chat(
+                    # PASS/FAIL judge — classification, not creative work.
+                    ai_text = await rt.openai.cheap_chat(
                         [{
                             "role": "user",
                             "content": DUCK_BEF_CHALLENGE_JUDGE_PROMPT.format(
@@ -370,7 +371,7 @@ def build_router(rt: Runtime) -> Router:
         # AI reply so the bot doesn't both fact and chat.
         if _mentions_cat(text):
             await rt.bot.send_chat_action(msg.chat.id, "typing")
-            fact = await rt.openai.short_completion(CAT_FACT_PROMPT, max_tokens=120)
+            fact = await rt.openai.cheap_completion(CAT_FACT_PROMPT, max_tokens=120)
             reply_text = catify(fact or "🐈")
             sent = await msg.reply(reply_text, disable_notification=True)
             track(msg.chat.id, sent.message_id, reply_text)

@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     # live via /ai_provider, persisted in kv_store.
     anthropic_api_key: str | None = None
     claude_text_model: str = "claude-sonnet-4-6"
+    # Cheap models used by `AIClient.cheap_chat / cheap_completion` for
+    # classifiers, judges, and short one-liners (~3x cheaper than Sonnet
+    # with a separate rate-limit quota). Override via env if you want a
+    # different cheap default.
+    claude_cheap_model: str = "claude-haiku-4-5"
+    openai_cheap_model: str = "gpt-4o-mini"
     text_provider: Literal["claude", "openai"] = "claude"
 
     # Database

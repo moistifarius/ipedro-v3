@@ -71,6 +71,8 @@ async def build_runtime(settings: Settings) -> Runtime:
         text_provider=text_provider,
         text_model=saved_openai_model or settings.openai_text_model,
         claude_model=saved_claude_model or settings.claude_text_model,
+        cheap_claude_model=settings.claude_cheap_model,
+        cheap_openai_model=settings.openai_cheap_model,
         image_model=settings.openai_image_model,
         transcription_model=settings.openai_transcription_model,
         embedding_model=settings.openai_embedding_model,

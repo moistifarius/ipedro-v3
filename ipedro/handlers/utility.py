@@ -513,7 +513,7 @@ def build_router(rt: Runtime) -> Router:
             )
             return
         await rt.bot.send_chat_action(msg.chat.id, "typing")
-        out = await rt.openai.short_completion(
+        out = await rt.openai.cheap_completion(
             THIS_OR_THAT_PROMPT.format(a=a, b=b),
             max_tokens=120, chat_id=msg.chat.id,
         )
@@ -547,7 +547,7 @@ def build_router(rt: Runtime) -> Router:
             return
         examples = "\n".join(f"- {r['content']}" for r in rows)
         await rt.bot.send_chat_action(msg.chat.id, "typing")
-        out = await rt.openai.short_completion(
+        out = await rt.openai.cheap_completion(
             ECHO_PROMPT.format(name=name, topic=topic, messages=examples[:4000]),
             max_tokens=200, chat_id=msg.chat.id,
         )
@@ -615,7 +615,7 @@ def build_router(rt: Runtime) -> Router:
             return
         line = parts[1].strip()[:300]
         await rt.bot.send_chat_action(msg.chat.id, "typing")
-        out = await rt.openai.short_completion(
+        out = await rt.openai.cheap_completion(
             MISHEARD_LYRIC_PROMPT.format(line=line),
             max_tokens=120, chat_id=msg.chat.id,
         )
@@ -860,7 +860,7 @@ async def _do_burn(
     )
     examples = "\n".join(f"- {r['content']}" for r in rows) or "(no history)"
     await rt.bot.send_chat_action(msg.chat.id, "typing")
-    out = await rt.openai.short_completion(
+    out = await rt.openai.cheap_completion(
         prompt.format(name=name, messages=examples[:4000]),
         max_tokens=200, chat_id=msg.chat.id,
     )

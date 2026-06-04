@@ -124,7 +124,7 @@ async def _maybe_daily_fortune(
     )
     for c in chats:
         chat_id = c["chat_id"]
-        fortune = await openai.short_completion(
+        fortune = await openai.cheap_completion(
             FORTUNE_PROMPT, max_tokens=60, chat_id=chat_id,
         )
         if not fortune:

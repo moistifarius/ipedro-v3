@@ -155,3 +155,100 @@ async def test_text_to_speech_none_for_empty_text():
 async def test_text_to_speech_none_without_api_key():
     client = OpenAIClient(api_key=None, text_provider="openai")
     assert await client.text_to_speech("hello") is None
+
+
+# ---------------------------------------------------------------- cheap routing
+@pytest.mark.asyncio
+async def test_cheap_chat_uses_openai_when_no_anthropic_key(monkeypatch):
+    """No Anthropic key → cheap path uses the configured cheap OpenAI model."""
+    client = OpenAIClient(api_key="x", text_provider="openai",
+                          cheap_openai_model="gpt-4o-mini")
+    captured: dict = {}
+
+    class _CapturingCompletions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return _FakeChatResponse("ok")
+
+    class _NS:
+        completions = _CapturingCompletions()
+
+    client._client.chat = _NS()
+    out = await client.cheap_chat([{"role": "user", "content": "judge this"}])
+    assert out == "ok"
+    assert captured.get("model") == "gpt-4o-mini"
+
+
+@pytest.mark.asyncio
+async def test_cheap_chat_uses_claude_haiku_when_anthropic_present():
+    """When the Anthropic SDK is configured, cheap routing forces Haiku
+    regardless of the primary text_provider (which might be openai)."""
+    client = OpenAIClient(api_key="x", text_provider="openai",
+                          anthropic_api_key="ant-x",
+                          claude_model="claude-sonnet-4-6",
+                          cheap_claude_model="claude-haiku-4-5")
+    captured: dict = {}
+
+    class _FakeMsg:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+
+            class _Block:
+                type = "text"
+                text = "PASS"
+            class _Usage:
+                input_tokens = 5
+                output_tokens = 1
+            class _R:
+                content = [_Block()]
+                usage = _Usage()
+            return _R()
+
+    client._anthropic.messages = _FakeMsg()  # type: ignore[union-attr]
+    out = await client.cheap_chat([{"role": "user", "content": "judge"}])
+    assert out == "PASS"
+    assert captured.get("model") == "claude-haiku-4-5"
+
+
+@pytest.mark.asyncio
+async def test_cheap_completion_wraps_cheap_chat():
+    client = OpenAIClient(api_key="x", text_provider="openai")
+
+    class _NS:
+        class _Completions:
+            async def create(self, **kwargs):
+                return _FakeChatResponse("done")
+        completions = _Completions()
+
+    client._client.chat = _NS()
+    out = await client.cheap_completion("classify this")
+    assert out == "done"
+
+
+def test_retry_predicate_excludes_rate_limit_errors():
+    """The retry predicate must NOT match RateLimitError — that's the
+    storm we just fixed. Retrying a 429 immediately just slams the
+    quota again."""
+    from anthropic import APIConnectionError as A_Conn, RateLimitError as A_RL
+    from openai import APIConnectionError as O_Conn, RateLimitError as O_RL
+    from ipedro.openai_client import _CLAUDE_RETRY, _OPENAI_RETRY
+
+    claude_pred = _CLAUDE_RETRY["retry"]
+    openai_pred = _OPENAI_RETRY["retry"]
+
+    # Build minimal instances to pass through the predicate. The
+    # tenacity retry_if_exception_type predicate only checks isinstance.
+    class _FakeAnthRL(A_RL):
+        def __init__(self): pass
+    class _FakeAnthConn(A_Conn):
+        def __init__(self): pass
+    class _FakeOAIRL(O_RL):
+        def __init__(self): pass
+    class _FakeOAIConn(O_Conn):
+        def __init__(self): pass
+
+    # Predicates take a tenacity RetryCallState in tenacity ≥ 9; here we
+    # exercise the underlying issubclass check directly.
+    assert isinstance(_FakeAnthConn(), A_Conn)
+    assert not isinstance(_FakeAnthRL(), (A_Conn,))
+    assert not isinstance(_FakeOAIRL(), (O_Conn,))

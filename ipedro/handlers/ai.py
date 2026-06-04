@@ -13,7 +13,7 @@ from ipedro.handlers.common import catify, get_or_create_chat_config
 from ipedro.memory.context_builder import build_context
 from ipedro.memory.summarizer import maybe_summarize
 from ipedro.prompts import (
-    BENEFICIALITY_PROMPT, CAT_FACT_PROMPT, IS_CAT_MENTION_PROMPT,
+    BENEFICIALITY_PROMPT, CAT_FACT_PROMPT,
 )
 from ipedro.runtime import Runtime
 
@@ -95,7 +95,7 @@ def build_router(rt: Runtime) -> Router:
     @r.message(Command("catfact"))
     async def catfact(msg: Message) -> None:
         await msg.bot.send_chat_action(msg.chat.id, "typing")
-        fact = await rt.openai.short_completion(CAT_FACT_PROMPT, max_tokens=120)
+        fact = await rt.openai.cheap_completion(CAT_FACT_PROMPT, max_tokens=120)
         await msg.reply(catify(fact or "🐈"), disable_notification=True)
 
     @r.message(Command("beneficiality"))
@@ -106,7 +106,7 @@ def build_router(rt: Runtime) -> Router:
             await msg.reply("Not enough context yet.", disable_notification=True)
             return
         conv = "\n".join(f"{m.role}: {m.content}" for m in recent)
-        score = await rt.openai.short_completion(
+        score = await rt.openai.cheap_completion(
             BENEFICIALITY_PROMPT.format(conversation=conv), max_tokens=10,
         )
         await msg.reply(

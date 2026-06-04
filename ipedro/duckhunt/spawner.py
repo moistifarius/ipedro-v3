@@ -98,7 +98,7 @@ async def build_quack_message(
     openai: OpenAIClient, rarity: str, *,
     is_boss: bool = False, holiday: tuple[str, str] | None = None,
 ) -> str:
-    msg = await openai.short_completion(DUCK_QUACK_PROMPT, max_tokens=120)
+    msg = await openai.cheap_completion(DUCK_QUACK_PROMPT, max_tokens=120)
     body = (msg or "🦆 quack!").strip()
     extra: list[str] = []
     if holiday:

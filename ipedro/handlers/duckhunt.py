@@ -102,7 +102,8 @@ async def _issue_bef_challenge(
         )
         return True
 
-    challenge_text = await rt.openai.short_completion(
+    # Quick challenge prompt — Haiku quality is plenty here.
+    challenge_text = await rt.openai.cheap_completion(
         DUCK_BEF_CHALLENGE_PROMPT.format(display_name=who, kind=kind),
         max_tokens=200,
     )
@@ -357,7 +358,8 @@ def build_router(rt: Runtime) -> Router:
                 msg.chat.id, msg.from_user.id,
             )
         else:
-            ai_text = await rt.openai.chat(
+            # ACCEPT/REFUSE verdict — quick classification, Haiku is fine.
+            ai_text = await rt.openai.cheap_chat(
                 [
                     {"role": "system", "content": DUCK_BEF_DECIDE_PROMPT.format(
                         display_name=who, friend_count=friend_count,

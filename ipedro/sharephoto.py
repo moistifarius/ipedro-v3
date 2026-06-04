@@ -41,7 +41,9 @@ async def _share_photo_enabled_chat_ids(db: Database) -> list[int]:
 async def _take_and_post_photo(
     chat_id: int, bot: Bot, openai: OpenAIClient,
 ) -> None:
-    scene = await openai.short_completion(PEDRO_PHOTO_SCENE_PROMPT, max_tokens=60)
+    # Short scene-name prompt; Haiku quality is fine and saves Sonnet
+    # quota for the image generation that follows.
+    scene = await openai.cheap_completion(PEDRO_PHOTO_SCENE_PROMPT, max_tokens=60)
     if not scene:
         log.info("Share-photo skipped for chat %s: scene gen unavailable.", chat_id)
         return
@@ -51,7 +53,7 @@ async def _take_and_post_photo(
     if not image:
         log.info("Share-photo skipped for chat %s: image gen unavailable.", chat_id)
         return
-    caption = await openai.short_completion(
+    caption = await openai.cheap_completion(
         PEDRO_PHOTO_CAPTION_PROMPT.format(scene=scene), max_tokens=60,
     )
     caption = (caption or scene).strip()[:1000]
