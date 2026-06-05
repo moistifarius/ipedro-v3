@@ -142,36 +142,41 @@ def _no_duck_line() -> str:
     return random.choice(_NO_DUCK_FLAVOR)
 
 
-# Terse intros for the captcha + trivia challenge prompts — picked per
-# (action, kind). Kept short and dry on purpose: the bot's overall
-# voice carries the personality, the intro just has to set context for
-# the picture or question that follows.
+# Short intros for the captcha + trivia challenge prompts — picked per
+# (action, kind). A little Dude-flavored attitude (man, nope, hold up,
+# yeah, no), but no narrated duck-actions and no telegraphed bits. The
+# captcha image / trivia text carries the content; the intro is one beat
+# of voice. Keep new lines this way: brief, dry, not performing.
 _CAPTCHA_INTROS = {
     "bef": (
-        "Read it:",
-        "Type this first:",
-        "Convince me:",
-        "Prove it:",
-        "Try this:",
+        "Nope. Read this first:",
+        "Yeah, no. Read it back:",
+        "Hmm. Try this first:",
+        "Hold up. Type what you see:",
+        "Slow your roll. Type this:",
+        "Mm. Read this, then we'll talk:",
     ),
     "bang_miss": (
-        "Hang on. Read this:",
-        "Steady. Type this:",
-        "Cool it. Read this:",
-        "Not yet. Type this:",
+        "Whoa. Read this first:",
+        "Hey hey. Type this:",
+        "Cool it. Read this back:",
+        "Ease up. Type this:",
+        "Whoa whoa. Read it:",
     ),
 }
 _TRIVIA_INTROS = {
     "bef": (
-        "Answer this:",
-        "Try this:",
-        "Then this:",
-        "Question:",
+        "Hmm. Answer me this:",
+        "Yeah, no. Quick one:",
+        "Mm. Tell me this:",
+        "Nope. One question first:",
+        "Try this on for size:",
     ),
     "bang_miss": (
-        "First, answer:",
-        "Hang on. Question:",
-        "Steady. Answer:",
+        "Hold up. Question:",
+        "Cool it. Quick one:",
+        "Whoa. Answer me:",
+        "Ease up. Question:",
     ),
 }
 
