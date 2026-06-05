@@ -46,6 +46,7 @@ async def build_context(
     persona_custom: str | None,
     latest_user_text: str,
     extra_system: str | None = None,
+    memory_enabled: bool = True,
 ) -> BuiltContext:
     budget = settings.context_max_tokens
     messages: list[dict[str, Any]] = []
@@ -66,39 +67,60 @@ async def build_context(
     if extra_system:
         _add({"role": "system", "content": extra_system})
 
-    # 2. Running summary
-    summary = await store.latest_summary(chat_id)
-    if summary:
-        _add({
-            "role": "system",
-            "content": f"Conversation summary so far:\n{summary.summary}",
-        })
+    # When memory is disabled, skip every memory-derived layer below
+    # (summary, durable facts, semantic retrieval, recent raw messages).
+    # That's the user-facing semantics of the toggle: each call to the
+    # model is fresh, no chat history influences it. It also stops the
+    # embedding round-trip on semantic_search from churning the OpenAI
+    # quota for chats that have opted out of memory.
+    if memory_enabled:
+        # 2. Running summary
+        summary = await store.latest_summary(chat_id)
+        if summary:
+            _add({
+                "role": "system",
+                "content": f"Conversation summary so far:\n{summary.summary}",
+            })
 
-    # 3. Durable facts (compact)
-    facts = await store.list_facts(chat_id, limit=20)
-    if facts:
-        fact_block = "Known durable facts about this chat:\n" + "\n".join(
-            f"- {f.fact}" for f in facts
-        )
-        _add({"role": "system", "content": fact_block})
-
-    # 4. Semantic retrieval against the latest user input
-    if latest_user_text.strip():
-        hits = await store.semantic_search(
-            chat_id, latest_user_text, k=settings.semantic_retrieval_k,
-        )
-        # Keep only meaningful similarity hits.
-        hits = [h for h in hits if h.get("similarity", 0) >= 0.25]
-        if hits:
-            retrieved = "Potentially relevant prior context:\n" + "\n".join(
-                f"- ({h['ref_kind']}) {h['content'][:300]}" for h in hits
+        # 3. Durable facts (compact)
+        facts = await store.list_facts(chat_id, limit=20)
+        if facts:
+            fact_block = "Known durable facts about this chat:\n" + "\n".join(
+                f"- {f.fact}" for f in facts
             )
-            _add({"role": "system", "content": retrieved})
+            _add({"role": "system", "content": fact_block})
 
-    # 5. Recent raw messages (chronological, last N).
-    recent = await store.recent_messages(chat_id, settings.context_recent_messages)
-    for m in recent:
-        if not _add({"role": _role_for(m), "content": m.content}):
-            break
+        # 4. Semantic retrieval against the latest user input
+        if latest_user_text.strip():
+            hits = await store.semantic_search(
+                chat_id, latest_user_text, k=settings.semantic_retrieval_k,
+            )
+            hits = [h for h in hits if h.get("similarity", 0) >= 0.25]
+            if hits:
+                retrieved = "Potentially relevant prior context:\n" + "\n".join(
+                    f"- ({h['ref_kind']}) {h['content'][:300]}" for h in hits
+                )
+                _add({"role": "system", "content": retrieved})
+
+        # 5. Recent raw messages (chronological, last N).
+        recent = await store.recent_messages(chat_id, settings.context_recent_messages)
+        for m in recent:
+            if not _add({"role": _role_for(m), "content": m.content}):
+                break
+
+    # 6. Ensure the conversation ends with a user message containing the
+    # current input. When memory is enabled the just-recorded user
+    # message lands here via recent_messages and we dedup; when memory is
+    # disabled we'd otherwise end on a stale assistant turn (or nothing),
+    # and Claude returns 400 ("conversation must end with a user message").
+    if latest_user_text.strip():
+        last = messages[-1] if messages else None
+        already_there = (
+            last is not None
+            and last.get("role") == "user"
+            and last.get("content") == latest_user_text
+        )
+        if not already_there:
+            _add({"role": "user", "content": latest_user_text})
 
     return BuiltContext(messages=messages, tokens=used)

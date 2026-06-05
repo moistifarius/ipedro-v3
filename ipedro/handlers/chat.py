@@ -446,6 +446,7 @@ def build_router(rt: Runtime) -> Router:
             persona_custom=cfg.persona_custom,
             latest_user_text=text,
             extra_system=extra,
+            memory_enabled=cfg.memory_enabled,
         )
         reply = await rt.openai.chat(
             ctx.messages, max_tokens=500, chat_id=msg.chat.id,
