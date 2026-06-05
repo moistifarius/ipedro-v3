@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 _HELP = (
     "Debug commands (admin only):\n"
     "  /debug_help — this list\n"
-    "  /debug_sharephoto — force the Dude to generate + post a photo now\n"
+    "  /debug_sharephoto — force Boomhauer to generate + post a photo now\n"
     "  /debug_ether — force one ether broadcast right now (needs ≥ 2 ether-enabled chats)\n"
     "  /ether_status — show which interference source (live WebSDR / bundled / synthetic) the last ether used, and cache state\n"
     "  /ether_refresh — drop the live shortwave cache; next /ether will refetch from the WebSDR list\n"

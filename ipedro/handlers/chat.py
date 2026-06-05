@@ -33,10 +33,14 @@ log = logging.getLogger(__name__)
 # the message flow through as normal conversation.
 _BEF_CHALLENGE_TTL_SECONDS = 3600  # 1h
 
-# Bare "dude" / "man" are way too common, so only the specific Dude
-# aliases trigger a name mention. Legacy "pedro" mentions still trigger.
+# Name-mention triggers — when someone calls the bot by name, it tends
+# to engage. Boomhauer + legacy Dude/Pedro aliases all match so people
+# who learned the bot under earlier personas still get a response.
+# Bare "man" / "dude" are way too common to safely match.
 _DUDE_NAME_RE = re.compile(
-    r"\bthe\s+dude\b"
+    r"\bboomhauer\b"
+    r"|\bboomhaur\b"           # common misspelling
+    r"|\bthe\s+dude\b"
     r"|\bduder(ino)?\b"
     r"|\bel\s+duderino\b"
     r"|\bhis\s+dudeness\b"

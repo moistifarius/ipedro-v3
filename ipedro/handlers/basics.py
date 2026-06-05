@@ -15,8 +15,8 @@ from ipedro.runtime import Runtime
 log = logging.getLogger(__name__)
 
 HELP_TEXT_PUBLIC = (
-    "Hey, man. I'm the Dude. I chat, generate images, transcribe voice, "
-    "hunt ducks, and remember stuff, more or less.\n"
+    "Yeah man, I'm Boomhauer. I chat, generate images, transcribe voice, "
+    "dang ol' duck hunt, and remember stuff, I tell ya what.\n"
     "\n"
     "Basics:\n"
     "/start, /help, /get_chat_id\n"
@@ -148,9 +148,8 @@ def build_router(rt: Runtime) -> Router:
     async def start(msg: Message) -> None:
         await get_or_create_chat_config(rt, msg)
         await msg.reply(
-            "Yeah, hey, man. I'm the Dude. Or, you know, His Dudeness, "
-            "Duder, El Duderino if you're not into the whole brevity thing. "
-            "Type /help for commands."
+            "Yeah man, name's Boomhauer. Dang ol' chat bot right here, "
+            "I tell ya what. Type /help for commands, man."
         )
         await rt.command_log.add(
             msg.chat.id if msg.chat else None,

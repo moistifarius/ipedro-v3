@@ -39,12 +39,12 @@ _RANDOM_CHALLENGE_WEIGHTS: tuple[int, ...] = (3, 1)  # captcha 75% / trivia 25%
 # picked at random so the bot doesn't sound like a stuck record. Rarity
 # is currently neutralized — every duck gets the same flavor.
 _BEF_FOLLOWUP_FLAIR: tuple[str, ...] = (
-    "Welcome to the roster.",
-    "Solid little quacker. Yours now.",
-    "Just a duck. But yours.",
-    "Friendship engaged.",
-    "Another one for the collection.",
-    "The duck nods. You nod. It's a moment.",
+    "Yeah man, that's yours now.",
+    "Mmhmm, dang ol' duck right there, man.",
+    "I tell ya what, man, smooth bef.",
+    "Yeah man, you got the touch.",
+    "Mmhmm, dang ol' friend made, I tell ya what.",
+    "Yeah man, ol' boy's yours now.",
 )
 
 
@@ -120,21 +120,21 @@ async def _is_naming_reply(msg: Message) -> bool:
 
 
 # Said when someone types bang/bef/ignore and there's no active duck.
-# The intent is mild gaslighting — make the trigger-happy user briefly
-# question reality without crossing into hostile. Picked at random.
+# Mild Boomhauer-flavored gaslighting — make the trigger-happy user
+# question reality without crossing into hostile.
 _NO_DUCK_FLAVOR: tuple[str, ...] = (
-    "There's no duck, man. There never was. Are you doing okay?",
-    "Brother. What are you shooting at. There is no duck.",
-    "You just typed that to an empty room. The room noticed.",
-    "Bro. Look around. Where's the duck. Tell me where the duck is.",
-    "You did all that for nothing. There's no duck. Sit down.",
-    "There's no duck right now. Is everything alright at home?",
-    "You're swinging at air. We're worried about you.",
-    "No duck here. None. Zero. Have some water.",
-    "What duck. Show me the duck. I'll wait.",
-    "You shot at a phantom. The Dude is concerned.",
-    "Take a breath. There's no duck. There has never been a duck.",
-    "Quack? More like quiet. There's no duck. Touch grass.",
+    "Yeah man, ain't no duck round here, I tell ya what.",
+    "Mmhmm, dang ol' duck, man, ain't never been one. You alright?",
+    "Yeah man, talkin' to nobody, dang ol' nobody.",
+    "I tell ya what, ain't no duck, ain't never was a duck, man.",
+    "Mmhmm, dang ol' empty room right there, man.",
+    "Yeah man, shootin' at air, you doin' okay?",
+    "Ain't no duck, man. Zero ducks. Drink some water, I tell ya what.",
+    "Mmhmm, dang ol' phantom right there, man.",
+    "Yeah man, what duck? Show me ol' duck, man.",
+    "I tell ya what, take a breath, ain't no duck, man.",
+    "Mmhmm, ol' boy's seein' things, dang ol' things that ain't there.",
+    "Yeah man, dang ol' duck, man... ain't here. Touch grass, I tell ya what.",
 )
 
 
@@ -142,41 +142,40 @@ def _no_duck_line() -> str:
     return random.choice(_NO_DUCK_FLAVOR)
 
 
-# Short intros for the captcha + trivia challenge prompts — picked per
-# (action, kind). A little Dude-flavored attitude (man, nope, hold up,
-# yeah, no), but no narrated duck-actions and no telegraphed bits. The
-# captcha image / trivia text carries the content; the intro is one beat
-# of voice. Keep new lines this way: brief, dry, not performing.
+# Short Boomhauer-flavored intros for the captcha + trivia prompts,
+# picked per (action, kind). One beat of voice — yeah man, hold up,
+# dang ol' — never narrating the duck or telegraphing a bit. The
+# captcha image / trivia text carries the content.
 _CAPTCHA_INTROS = {
     "bef": (
-        "Nope. Read this first:",
-        "Yeah, no. Read it back:",
-        "Hmm. Try this first:",
-        "Hold up. Type what you see:",
-        "Slow your roll. Type this:",
-        "Mm. Read this, then we'll talk:",
+        "Nah man. Type this first:",
+        "Yeah man, read it back:",
+        "Mmhmm, dang ol' captcha, type it:",
+        "Hold up man, type this:",
+        "I tell ya what, type this first:",
+        "Yeah no man, read this:",
     ),
     "bang_miss": (
-        "Whoa. Read this first:",
-        "Hey hey. Type this:",
-        "Cool it. Read this back:",
-        "Ease up. Type this:",
-        "Whoa whoa. Read it:",
+        "Whoa man, hold up. Type this:",
+        "Easy man, read this:",
+        "Yeah man, slow down. Type it:",
+        "Mmhmm, dang ol' captcha first, man:",
+        "I tell ya what, type this first, man:",
     ),
 }
 _TRIVIA_INTROS = {
     "bef": (
-        "Hmm. Answer me this:",
-        "Yeah, no. Quick one:",
-        "Mm. Tell me this:",
-        "Nope. One question first:",
-        "Try this on for size:",
+        "Nah man. Answer me this:",
+        "Yeah man, quick one:",
+        "Mmhmm, tell me this:",
+        "I tell ya what, one question first:",
+        "Hold up man, answer this:",
     ),
     "bang_miss": (
-        "Hold up. Question:",
-        "Cool it. Quick one:",
-        "Whoa. Answer me:",
-        "Ease up. Question:",
+        "Whoa man, hold up. Question:",
+        "Easy man, quick one:",
+        "Yeah man, slow down. Answer:",
+        "Mmhmm, dang ol' question first, man:",
     ),
 }
 
