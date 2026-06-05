@@ -79,8 +79,8 @@ class Settings(BaseSettings):
     # independently rolls P(spawn) = 1 - exp(-tick / mean). This produces
     # naturally bursty behavior — sometimes ducks several times an hour,
     # sometimes none for days. Tune `mean_spawn_interval_seconds` to set the
-    # average rate.
-    duckhunt_mean_spawn_interval_seconds: int = 14_400  # ~4h average
+    # average rate. 9.6 h mean = ~2.5 ducks per chat per day on average.
+    duckhunt_mean_spawn_interval_seconds: int = 34_560  # ~9.6h → ~2.5/day
     duckhunt_spawn_tick_seconds: int = 60
     # Hard cap on duck lifetime. Most ducks depart probabilistically well
     # before this via the spawner's leave-roll.
