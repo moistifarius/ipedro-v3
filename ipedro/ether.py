@@ -246,9 +246,14 @@ class ManualEtherResult:
       * ``"no_dest"`` — no other ether-enabled chat to send to
       * ``"no_audio"``— a voice note was given but ffmpeg couldn't process
                         it (and there's no text to fall back to)
+
+    ``reason`` is set when something degraded the result so the admin
+    can see *why* — one of: ``"tts_failed"``, ``"fx_failed"``,
+    ``"voice_send_failed"``, ``"no_text_to_garble"``, or ``None``.
     """
     mode: str
     dest_id: int | None = None
+    reason: str | None = None
 
 
 async def manual_broadcast(
@@ -276,10 +281,21 @@ async def manual_broadcast(
     # Radio audio leans heavy; the (rare) text fallback stays readable.
     radio_intensity = _roll_radio_intensity()
 
+    # Track *why* the audio path degraded so the caller can surface the
+    # cause in the reply rather than the vague "audio wasn't available."
+    reason: str | None = None
+
     # 1) Obtain the source audio (real recording, or TTS of the text).
     src_audio = voice_bytes
     if src_audio is None and text:
         src_audio = await openai.text_to_speech(text, chat_id=source_chat_id)
+        if not src_audio:
+            reason = "tts_failed"
+            log.warning(
+                "Ether: TTS returned no audio for chat %s "
+                "(quota? auth? model availability? see openai_client logs above).",
+                source_chat_id,
+            )
 
     # 2) Apply the radio effect and send as a voice note.
     if src_audio:
@@ -301,7 +317,15 @@ async def manual_broadcast(
                 )
                 return ManualEtherResult(mode="voice", dest_id=dest_id)
             except Exception as exc:  # pragma: no cover - telegram hiccup
+                reason = "voice_send_failed"
                 log.warning("Ether voice send failed → %s: %s", dest_id, exc)
+        else:
+            reason = "fx_failed"
+            log.warning(
+                "Ether: radio FX returned no audio for chat %s "
+                "(ffmpeg missing? DSP error? input %d bytes; see radio_fx logs above).",
+                source_chat_id, len(src_audio),
+            )
 
     # 3) Fallbacks: text → garbled text broadcast; voice-only → give up.
     if text:
@@ -314,13 +338,21 @@ async def manual_broadcast(
             )
             track(dest_id, sent.message_id, msg_text)
             await _stamp_receiver(db, dest_id)
-            log.info("Ether text fallback: %s → %s.", source_chat_id, dest_id)
-            return ManualEtherResult(mode="text", dest_id=dest_id)
+            log.info(
+                "Ether text fallback: %s → %s (reason=%s).",
+                source_chat_id, dest_id, reason or "no_audio_path",
+            )
+            return ManualEtherResult(mode="text", dest_id=dest_id, reason=reason)
         except Exception as exc:  # pragma: no cover
             log.warning("Ether text send failed → %s: %s", dest_id, exc)
-            return ManualEtherResult(mode="no_audio", dest_id=dest_id)
+            return ManualEtherResult(
+                mode="no_audio", dest_id=dest_id, reason="text_send_failed",
+            )
 
-    return ManualEtherResult(mode="no_audio", dest_id=dest_id)
+    return ManualEtherResult(
+        mode="no_audio", dest_id=dest_id,
+        reason=reason or "no_text_to_garble",
+    )
 
 
 async def broadcast_now(bot: Bot, db: Database) -> tuple[int, int] | None:

@@ -85,14 +85,26 @@ def build_router(rt: Runtime) -> Router:
             text=text or None, voice_bytes=voice_bytes,
         )
 
+        # Translate the structured reason code into something an admin
+        # can act on. Vague "radio audio wasn't available" used to mean
+        # "go grep the logs"; now the user sees the failure point.
+        reason_blurb = {
+            "tts_failed": "OpenAI TTS didn't return audio (quota? auth?)",
+            "fx_failed": "ffmpeg radio FX produced no audio (ffmpeg missing? DSP error?)",
+            "voice_send_failed": "Telegram rejected the voice send",
+            "text_send_failed": "Telegram rejected the text fallback too",
+            "no_text_to_garble": "the recording couldn't be processed and there's no text",
+        }
+
         if result.mode == "voice":
             await msg.reply(
                 "📟 Transmitted into the ether.", disable_notification=True,
             )
         elif result.mode == "text":
+            blurb = reason_blurb.get(result.reason or "", "radio audio path failed")
             await msg.reply(
-                "📟 Transmitted into the ether (as text — radio audio "
-                "wasn't available).",
+                f"📟 Transmitted into the ether (as text — {blurb}). "
+                f"See /logs for details.",
                 disable_notification=True,
             )
         elif result.mode == "no_dest":
@@ -103,8 +115,10 @@ def build_router(rt: Runtime) -> Router:
                 disable_notification=True,
             )
         else:  # no_audio
+            blurb = reason_blurb.get(result.reason or "", "unknown reason")
             await msg.reply(
-                "Couldn't process that for transmission.",
+                f"Couldn't process that for transmission ({blurb}). "
+                f"See /logs for details.",
                 disable_notification=True,
             )
 

@@ -183,7 +183,8 @@ async def test_manual_broadcast_text_uses_tts_then_fx(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_manual_broadcast_falls_back_to_text(monkeypatch):
-    """FX unavailable + we have text → garbled text broadcast."""
+    """FX unavailable + we have text → garbled text broadcast, and the
+    result.reason flags that the FX was what failed (TTS succeeded)."""
     monkeypatch.setattr(ether, "apply_radio_effect",
                         AsyncMock(return_value=None))
     db = _fake_db([100, 200])
@@ -193,6 +194,25 @@ async def test_manual_broadcast_falls_back_to_text(monkeypatch):
         bot, db, openai, source_chat_id=100, text="hello out there",
     )
     assert res.mode == "text"
+    assert res.reason == "fx_failed"
+    bot.send_message.assert_awaited_once()
+    bot.send_voice.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_manual_broadcast_tts_failed_reason_is_distinct(monkeypatch):
+    """When TTS itself returns no audio (quota / auth / model gone), the
+    text-fallback path fires with reason='tts_failed' — distinct from
+    fx_failed — so the admin reply tells them which thing to fix."""
+    monkeypatch.setattr(ether, "apply_radio_effect", AsyncMock())  # never called
+    db = _fake_db([100, 200])
+    bot = _fake_bot()
+    openai = SimpleNamespace(text_to_speech=AsyncMock(return_value=None))
+    res = await manual_broadcast(
+        bot, db, openai, source_chat_id=100, text="anyone hearing this",
+    )
+    assert res.mode == "text"
+    assert res.reason == "tts_failed"
     bot.send_message.assert_awaited_once()
     bot.send_voice.assert_not_called()
 
