@@ -237,7 +237,11 @@ async def test_bang_without_duck_replies():
     duckhunt.handle_bang.assert_awaited_once()
     msg.reply.assert_awaited()
     body = msg.reply.await_args.args[0]
-    assert "no duck" in body.lower()
+    # The no-duck reply is now picked from a randomized flame pool, so
+    # the assertion can't pin a literal phrase. It's enough to confirm
+    # the reply came from that pool (not "Cool it. Cooldown." etc.).
+    from ipedro.handlers.duckhunt import _NO_DUCK_FLAVOR
+    assert body in _NO_DUCK_FLAVOR
 
 
 # Bang-miss → challenge path -----------------------------------------------
@@ -285,8 +289,8 @@ async def test_bang_miss_triggers_challenge_when_dice_says_so(monkeypatch):
     monkeypatch.setattr(dh, "should_challenge_on_miss", lambda *a, **k: True)
 
     issued: list[dict] = []
-    async def fake_issue(rt_, msg_, who, *, intro, force_kind=None):
-        issued.append({"intro": intro, "who": who})
+    async def fake_issue(rt_, msg_, who, *, from_action="bef", force_kind=None):
+        issued.append({"from_action": from_action, "who": who})
         return True
     monkeypatch.setattr(dh, "_issue_bef_challenge", fake_issue)
 
@@ -309,7 +313,10 @@ async def test_bang_miss_triggers_challenge_when_dice_says_so(monkeypatch):
     duckhunt.handle_bang.assert_awaited_once()
     msg.reply.assert_awaited()
     assert len(issued) == 1
-    assert "spook" in issued[0]["intro"].lower()
+    # The bang-miss path now sets from_action="bang_miss" instead of
+    # passing a literal intro string; the helper picks flavor from the
+    # per-action pool.
+    assert issued[0]["from_action"] == "bang_miss"
 
 
 @pytest.mark.asyncio
@@ -390,3 +397,101 @@ def test_random_challenge_kinds_are_biased_toward_captcha():
     assert abs(captcha_share - expected) < 0.03
     # Sanity: bias really did shift the balance away from 50/50.
     assert captcha_share > 0.6
+
+
+# --- spawner cow-guard ---------------------------------------------------
+def test_looks_like_a_duck_rejects_cow_ascii():
+    from ipedro.duckhunt.spawner import _looks_like_a_duck
+
+    cow = "  ^__^\n  (oo)\\_______\n  (__)\\       )\\/\\\n      ||----w |\n      ||     ||\n\n  QUACK! 🦆"
+    duck = "  __\n<('< 🦆 quack!"
+    nope = "hello world"   # no quack at all → rejected
+    assert _looks_like_a_duck(cow) is False
+    assert _looks_like_a_duck(duck) is True
+    assert _looks_like_a_duck(nope) is False
+
+
+# --- reply-to-name handler ------------------------------------------------
+@pytest.mark.asyncio
+async def test_reply_to_celebration_sets_duck_name():
+    """A reply to a 'Want to name them?' celebration sets the duck's
+    name without the user having to type /duckname N <name>."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from ipedro.handlers import duckhunt as dh
+
+    cfg = SimpleNamespace(duckhunt_enabled=True)
+    chats = SimpleNamespace(
+        upsert_chat=AsyncMock(),
+        get_config=AsyncMock(return_value=cfg),
+        upsert_default_config=AsyncMock(return_value=cfg),
+    )
+    users = SimpleNamespace(upsert_user=AsyncMock())
+    duckhunt = SimpleNamespace(
+        name_duck=AsyncMock(return_value=True),
+    )
+    settings = SimpleNamespace(
+        admin_ids=frozenset(),
+        duckhunt_action_cooldown_seconds=15,
+        duckhunt_duck_lifetime_seconds=86400,
+    )
+    rt = SimpleNamespace(
+        settings=settings, db=SimpleNamespace(), chats=chats, users=users,
+        duckhunt=duckhunt, openai=SimpleNamespace(), bot=SimpleNamespace(),
+    )
+
+    # Pretend a celebration message was sent for duck #63 by user 7.
+    dh._PENDING_NAMING.clear()
+    dh._register_pending_name(
+        chat_id=42, prompt_msg_id=100, user_id=7, duck_id=63,
+    )
+
+    router = dh.build_router(rt)
+    handler = next(
+        h.callback for h in router.observers["message"].handlers
+        if h.callback.__name__ == "name_on_reply"
+    )
+
+    chat = SimpleNamespace(id=42, type="group", title="t")
+    from_user = SimpleNamespace(
+        id=7, is_bot=False, username="u", first_name="U", last_name=None,
+    )
+    reply_to = SimpleNamespace(message_id=100)
+    msg = SimpleNamespace(
+        chat=chat, from_user=from_user, text="Grace's Salty Tears",
+        caption=None, message_id=200, reply_to_message=reply_to,
+        reply=AsyncMock(),
+    )
+    await handler(msg)
+
+    duckhunt.name_duck.assert_awaited_once_with(
+        42, 7, 63, "Grace's Salty Tears",
+    )
+    body = msg.reply.await_args.args[0]
+    assert "63" in body and "Grace" in body
+    # Pending state consumed after a successful name.
+    assert (42, 100) not in dh._PENDING_NAMING
+
+
+@pytest.mark.asyncio
+async def test_reply_to_naming_filter_rejects_other_user():
+    """Only the user who befriended the duck can name it via reply —
+    another user's reply to the same prompt is not a match."""
+    from types import SimpleNamespace
+
+    from ipedro.handlers import duckhunt as dh
+
+    dh._PENDING_NAMING.clear()
+    dh._register_pending_name(
+        chat_id=42, prompt_msg_id=100, user_id=7, duck_id=63,
+    )
+
+    msg = SimpleNamespace(
+        chat=SimpleNamespace(id=42),
+        from_user=SimpleNamespace(id=999),       # different user
+        reply_to_message=SimpleNamespace(message_id=100),
+        text="nice try",
+        caption=None,
+    )
+    assert await dh._is_naming_reply(msg) is False

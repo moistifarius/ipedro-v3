@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import random
+import time
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -51,7 +52,9 @@ def _bef_celebration_message(duck_id: int, new_friend_total: int) -> str:
     """Compose the follow-up message sent after a successful bef.
 
     Random neutral flair + a milestone shout for round-number friend
-    counts + a pre-filled /duckname hint with the duck id.
+    counts + an invitation to name the duck by *replying* to this
+    message. The reply-handler is gated on the per-(chat, prompt_id)
+    state registered by the bef handler when this message is sent.
     """
     flair = random.choice(_BEF_FOLLOWUP_FLAIR)
     milestone = ""
@@ -69,12 +72,125 @@ def _bef_celebration_message(duck_id: int, new_friend_total: int) -> str:
         milestone = f" {new_friend_total} and counting."
     return (
         f"🤝 You made a friend! {flair}{milestone}\n"
-        f"Want to name them? Reply: /duckname {duck_id} <name>"
+        f"Want to name them? Reply to this message with the name."
     )
 
 
+# Per-(chat, follow-up message id) state for the reply-to-name flow.
+# When a bef succeeds the handler registers (chat_id, prompt_msg_id) →
+# (user_id, duck_id, registered_at). A reply to that prompt by the same
+# user, within the TTL, sets the duck's name. The legacy
+# /duckname <id> <name> command continues to work alongside this.
+_PENDING_NAMING: dict[tuple[int, int], tuple[int, int, float]] = {}
+_NAMING_TTL_SECONDS = 30 * 60   # 30 min — long enough to AFK then come back
+
+
+def _register_pending_name(
+    chat_id: int, prompt_msg_id: int, user_id: int, duck_id: int,
+) -> None:
+    # Light TTL sweep so the dict doesn't grow forever in long-running bots.
+    now = time.time()
+    if len(_PENDING_NAMING) > 2000:
+        for k, (_, _, ts) in list(_PENDING_NAMING.items()):
+            if now - ts > _NAMING_TTL_SECONDS:
+                _PENDING_NAMING.pop(k, None)
+    _PENDING_NAMING[(chat_id, prompt_msg_id)] = (user_id, duck_id, now)
+
+
+async def _is_naming_reply(msg: Message) -> bool:
+    """aiogram filter — match only replies to a tracked naming prompt
+    by the user who made the friend. Returning False lets the message
+    fall through to other handlers (the catch-all chat router etc.)."""
+    if msg.from_user is None or msg.reply_to_message is None:
+        return False
+    key = (msg.chat.id, msg.reply_to_message.message_id)
+    entry = _PENDING_NAMING.get(key)
+    if entry is None:
+        return False
+    user_id, _duck_id, ts = entry
+    if time.time() - ts > _NAMING_TTL_SECONDS:
+        _PENDING_NAMING.pop(key, None)
+        return False
+    if user_id != msg.from_user.id:
+        return False
+    text = (msg.text or msg.caption or "").strip()
+    # Slash-commands are never names — let them route normally so the
+    # user can still do /duckname etc. without us swallowing it.
+    return bool(text) and not text.startswith("/")
+
+
+# Said when someone types bang/bef/ignore and there's no active duck.
+# The intent is mild gaslighting — make the trigger-happy user briefly
+# question reality without crossing into hostile. Picked at random.
+_NO_DUCK_FLAVOR: tuple[str, ...] = (
+    "There's no duck, man. There never was. Are you doing okay?",
+    "Brother. What are you shooting at. There is no duck.",
+    "You just typed that to an empty room. The room noticed.",
+    "Bro. Look around. Where's the duck. Tell me where the duck is.",
+    "You did all that for nothing. There's no duck. Sit down.",
+    "There's no duck right now. Is everything alright at home?",
+    "You're swinging at air. We're worried about you.",
+    "No duck here. None. Zero. Have some water.",
+    "What duck. Show me the duck. I'll wait.",
+    "You shot at a phantom. The Dude is concerned.",
+    "Take a breath. There's no duck. There has never been a duck.",
+    "Quack? More like quiet. There's no duck. Touch grass.",
+)
+
+
+def _no_duck_line() -> str:
+    return random.choice(_NO_DUCK_FLAVOR)
+
+
+# Casual / playful intros for the captcha + trivia challenge prompts.
+# Picked per (action, kind) so the duck's refusal flavor and the spook
+# flavor read differently. The captcha image already speaks for itself —
+# the caption just sets the mood. No more "Looks like the duck doesn't
+# want to be friends right now. Try again later." formalism.
+_CAPTCHA_INTROS = {
+    "bef": (
+        "The duck side-eyes you. Prove you're not a bot:",
+        "Nope. Read this back to it first:",
+        "Duck wants ID. What does this say?",
+        "The duck's playing hard to get. Read the squiggle:",
+        "Try again, but you have to read the duck's secret password first:",
+        "Duck says: type what you see and we'll talk.",
+    ),
+    "bang_miss": (
+        "Whiffed it. The duck wrote you a note — read it back:",
+        "The duck saw you flinch. Prove you've got your eye in:",
+        "Spooked. Read the duck's challenge before you can shoot again:",
+        "Easy, cowboy. Read this first:",
+        "The duck filed a complaint. Sign here:",
+    ),
+}
+_TRIVIA_INTROS = {
+    "bef": (
+        "Duck refuses. Answer this and try again:",
+        "Duck wants to know:",
+        "Duck has a question for you, smart guy:",
+        "Duck side-eyes you and asks:",
+        "Get this right and the duck might reconsider:",
+    ),
+    "bang_miss": (
+        "Spooked. Quick — answer this before you can shoot again:",
+        "The duck wants to test you first:",
+        "Steady. The duck has a question:",
+    ),
+}
+
+
+def _challenge_intro(action: str, kind: str) -> str:
+    """Pick a playful intro line for a (bef / bang_miss) × (captcha / trivia)
+    combination. Falls back gracefully if a pool is missing."""
+    pool_map = _CAPTCHA_INTROS if kind == "captcha" else _TRIVIA_INTROS
+    pool = pool_map.get(action) or pool_map.get("bef") or ("Try again:",)
+    return random.choice(pool)
+
+
 async def _issue_bef_challenge(
-    rt: Runtime, msg: Message, who: str, *, intro: str,
+    rt: Runtime, msg: Message, who: str, *,
+    from_action: str = "bef",
     force_kind: str | None = None,
 ) -> bool:
     """Generate a captcha/trivia/recipe challenge and store it as pending.
@@ -82,6 +198,9 @@ async def _issue_bef_challenge(
     Captcha is a real image captcha rendered server-side; the stored
     `challenge` text IS the answer (judged by exact match later). Trivia
     and recipe are AI-generated text challenges judged by an AI prompt.
+    The intro is picked from a per-(action, kind) flavor pool so the
+    bef-refusal challenge reads differently from a bang-miss spook
+    without callers needing to compose anything.
     Returns True if the challenge was issued; False otherwise.
     """
     kind = (
@@ -90,15 +209,13 @@ async def _issue_bef_challenge(
             _RANDOM_CHALLENGE_KINDS, weights=_RANDOM_CHALLENGE_WEIGHTS,
         )[0]
     )
+    intro = _challenge_intro(from_action, kind)
     if kind == "captcha":
         answer, png = make_captcha()
         try:
             prompt_msg = await msg.answer_photo(
                 BufferedInputFile(png, filename="captcha.png"),
-                caption=(
-                    f"{intro} Solve this captcha to try again — reply to "
-                    f"this message with the text in the image."
-                ),
+                caption=intro,
                 disable_notification=True,
             )
         except Exception as exc:
@@ -121,8 +238,7 @@ async def _issue_bef_challenge(
         )
         return False
     prompt_msg = await msg.answer(
-        f"{intro} Reply to this message with the answer to try again:\n\n"
-        f"{challenge_text}",
+        f"{intro}\n\n{challenge_text}",
         disable_notification=True,
     )
     await rt.duckhunt.set_bef_challenge(
@@ -367,7 +483,7 @@ def build_router(rt: Runtime) -> Router:
             # No active duck. Reply briefly instead of silent return so the
             # user gets feedback when a stale /quackflag misled them.
             await msg.reply(
-                "🦆 There's no ducks around right now, are you feeling okay?",
+                _no_duck_line(),
                 disable_notification=True,
             )
             return
@@ -388,10 +504,7 @@ def build_router(rt: Runtime) -> Router:
         ):
             await _issue_bef_challenge(
                 rt, msg, display_name(msg.from_user),
-                intro=(
-                    "The duck spooked you — the next shot has to wait. "
-                    "Clear this first:"
-                ),
+                from_action="bang_miss",
             )
 
     @r.message(F.text.lower() == "bef")
@@ -419,10 +532,9 @@ def build_router(rt: Runtime) -> Router:
             rt.settings.duckhunt_action_cooldown_seconds,
         ):
             who = display_name(msg.from_user)
-            issued = await _issue_bef_challenge(
-                rt, msg, who,
-                intro="Hang on — you just did something. Cool off a sec.",
-            )
+            # Cooldown branch — reuse the bef flavor pool, not the
+            # bang_miss one (still a bef attempt the user fired).
+            issued = await _issue_bef_challenge(rt, msg, who, from_action="bef")
             if not issued:
                 await msg.reply("Cool it. Cooldown.", disable_notification=True)
             return
@@ -430,7 +542,7 @@ def build_router(rt: Runtime) -> Router:
         duck = await rt.duckhunt.active_duck(msg.chat.id)
         if not duck:
             await msg.reply(
-                "🦆 There's no ducks around right now, are you feeling okay?",
+                _no_duck_line(),
                 disable_notification=True,
             )
             return
@@ -479,9 +591,18 @@ def build_router(rt: Runtime) -> Router:
         if outcome is None:
             return
 
-        await msg.reply(outcome.message, disable_notification=True)
+        # On refusal we used to send the duck's "no thanks" line AND
+        # then a challenge intro that said the same thing — two
+        # near-identical lines back-to-back. The challenge intro now
+        # carries the refusal flavor, so on a refusal skip the duplicate
+        # outcome.message reply entirely. (Successes still echo so the
+        # AI accept line lands.)
+        if outcome.success:
+            await msg.reply(outcome.message, disable_notification=True)
 
-        # On success: follow up with a celebration + /duckname hint.
+        # On success: follow up with a celebration. The user can then
+        # reply to the follow-up with a name (reply-to-name handler) or
+        # use /duckname N <name> the old way.
         if outcome.success and duck_after is not None:
             follow_up = _bef_celebration_message(
                 duck_after.id, friend_count + 1,
@@ -489,17 +610,53 @@ def build_router(rt: Runtime) -> Router:
             try:
                 sent = await msg.answer(follow_up, disable_notification=True)
                 track(msg.chat.id, sent.message_id, follow_up)
+                _register_pending_name(
+                    msg.chat.id, sent.message_id,
+                    msg.from_user.id, duck_after.id,
+                )
             except Exception as exc:
                 log.debug("bef follow-up send failed: %s", exc)
 
-        # On refusal: post a challenge the user must solve before retrying.
+        # On refusal: post a challenge the user must solve before
+        # retrying. The challenge's own intro carries the refusal flavor
+        # (we suppressed outcome.message above to avoid the duplicate).
         if not outcome.success:
-            await _issue_bef_challenge(
-                rt, msg, who,
-                intro=(
-                    "Looks like the duck doesn't want to be friends right "
-                    "now. Try again later."
-                ),
+            await _issue_bef_challenge(rt, msg, who, from_action="bef")
+
+    @r.message(_is_naming_reply)
+    async def name_on_reply(msg: Message) -> None:
+        """Reply to a 'Want to name them?' celebration → set the duck's name.
+
+        Filter ensures we only see legitimate replies to a tracked,
+        unexpired prompt from the user who befriended the duck — other
+        replies (including challenge answers, which target a different
+        prompt id) fall through to the normal routers."""
+        if msg.from_user is None or msg.reply_to_message is None:
+            return  # belt-and-suspenders (filter already covers this)
+        key = (msg.chat.id, msg.reply_to_message.message_id)
+        entry = _PENDING_NAMING.pop(key, None)
+        if entry is None:
+            return  # raced with another reply; safe to drop
+        _user_id, duck_id, _ts = entry
+        name = (msg.text or msg.caption or "").strip()[:60]
+        ok = await rt.duckhunt.name_duck(
+            msg.chat.id, msg.from_user.id, duck_id, name,
+        )
+        if ok:
+            await msg.reply(
+                f"🦆 Duck #{duck_id} is now \"{name}\".",
+                disable_notification=True,
+            )
+        else:
+            # Re-register so a follow-up retry still works.
+            _register_pending_name(
+                msg.chat.id, msg.reply_to_message.message_id,
+                msg.from_user.id, duck_id,
+            )
+            await msg.reply(
+                "Couldn't set that name. Try /duckname "
+                f"{duck_id} <name>.",
+                disable_notification=True,
             )
 
     return r

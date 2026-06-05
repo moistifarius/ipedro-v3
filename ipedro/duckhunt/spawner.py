@@ -94,12 +94,51 @@ def rarity_hint(rarity: str) -> str:
     return ""
 
 
+# Telltales that the model handed us a cow / dog / other-animal mistake.
+# We catch the common shapes and fall back to a hardcoded duck rather
+# than spawn a "🐮 QUACK!" embarrassment in chat.
+_NOT_A_DUCK_PATTERNS: tuple[str, ...] = (
+    "(oo)",     # cow eyes
+    "----w",    # cow muzzle/horn
+    "/\\/\\",   # cow horns
+    "moo",      # cow says moo
+    "woof",     # dog says woof
+    "meow",     # cat says meow
+    "hoot",     # owl
+)
+
+# Tiny pool of pre-vetted duck art, used as the fallback whenever the
+# AI output fails sanity-check, and rotated occasionally so it doesn't
+# always look the same.
+_FALLBACK_DUCKS: tuple[str, ...] = (
+    "  __\n<('< 🦆 quack!",
+    "  _\n>(.)__ quack!\n (___/",
+    " __\n<°)))< quack",
+    "🦆 quack!",
+)
+
+
+def _looks_like_a_duck(body: str) -> bool:
+    """True if the AI output plausibly shows a duck.
+
+    Requires the word 'quack' somewhere (case-insensitive) AND no obvious
+    other-animal tells. Cheap heuristic; rejecting a real duck is fine
+    (we just fall back to the hardcoded pool)."""
+    lower = body.lower()
+    if "quack" not in lower:
+        return False
+    return not any(pat in lower for pat in _NOT_A_DUCK_PATTERNS)
+
+
 async def build_quack_message(
     openai: OpenAIClient, rarity: str, *,
     is_boss: bool = False, holiday: tuple[str, str] | None = None,
 ) -> str:
+    import random as _random
     msg = await openai.cheap_completion(DUCK_QUACK_PROMPT, max_tokens=120)
-    body = (msg or "🦆 quack!").strip()
+    body = (msg or "").strip()
+    if not _looks_like_a_duck(body):
+        body = _random.choice(_FALLBACK_DUCKS)
     extra: list[str] = []
     if holiday:
         extra.append(f"\n[{holiday[0]} duck — {holiday[1]}]")

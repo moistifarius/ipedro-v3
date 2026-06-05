@@ -20,8 +20,13 @@ BENEFICIALITY_PROMPT = (
 )
 
 DUCK_QUACK_PROMPT = (
-    "Generate a short Telegram-friendly ASCII/emoji art of a happy little duck "
-    "saying 'quack'. Output ONLY the art - no preface, no explanation."
+    "Generate a short Telegram-friendly ASCII art of a DUCK saying 'quack'. "
+    "It MUST be a duck — not a cow, dog, cat, owl, fish, or any other "
+    "animal. Ducks have a round body, a small head, and a flat bill. "
+    "Use only basic characters (letters, parens, hyphens, underscores, "
+    "slashes, dots, quotes, the < character for the bill). End the art with "
+    "the word 'quack' (with optional emoji). 5 lines or fewer. Output ONLY "
+    "the art — no preface, no explanation, no commentary."
 )
 
 # Bef decision: the AI gates a successful dice roll. It MUST reply with one
