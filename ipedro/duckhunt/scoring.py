@@ -48,23 +48,24 @@ RARITY_BY_NAME: dict[str, tuple[float, int]] = {
 FLAT_DUCK_POINTS = 1
 
 # --------------------------------------------------------------- difficulty
-# Tuned for "rare-event-rich" play: bang misses bite, bef refusals are
-# common, and roughly a third of misses snowball into a captcha challenge
-# the user has to clear before they can shoot again.
-BANG_BASE_HIT = 0.65          # was 0.80 — bang misses meaningfully more
-BANG_HIT_CAP = 0.85           # was 0.95 — streaks help, but ceiling lower
-BANG_STREAK_BONUS = 0.02      # per streak point, capped at the streak cap
-BANG_STREAK_CAP = 5
+# Tuned hard — bang misses bite, bef refuses outright more often than
+# not, and most misses snowball into a captcha that the user must clear
+# before they can shoot again. Streak still meaningfully lifts the hit
+# chance so chaining good shots feels rewarding.
+BANG_BASE_HIT = 0.40          # 60% miss rate at streak 0
+BANG_HIT_CAP = 0.70           # max effective hit chance
+BANG_STREAK_BONUS = 0.04      # per streak point, capped at the streak cap
+BANG_STREAK_CAP = 5           # max effective hit at full streak: 0.60
 
 # Probability the AI's verdict gets bypassed in favour of an outright
-# refusal — the duck doesn't even hear you out. 0.0 reproduces the
-# previous behaviour ("dice always passes; AI decides").
-BEF_REFUSE_RATE = 0.35
+# refusal — the duck doesn't even hear you out. The AI can still refuse
+# on top of this, so real bef success rate sits lower.
+BEF_REFUSE_RATE = 0.55
 
-# When a bang misses, this is the chance the duck "spooks" you into a
-# follow-up captcha/trivia/recipe challenge. The challenge gates further
-# bangs until cleared (same plumbing the bef refusal uses).
-MISS_CHALLENGE_RATE = 0.30
+# When a bang misses, the chance the duck "spooks" you into a follow-up
+# captcha/trivia/recipe challenge. The challenge gates further bangs
+# until cleared (same plumbing the bef refusal uses).
+MISS_CHALLENGE_RATE = 0.65
 
 # (month, day) -> (event name, hint flavor used in the quack line)
 HOLIDAYS: dict[tuple[int, int], tuple[str, str]] = {

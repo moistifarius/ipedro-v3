@@ -123,19 +123,20 @@ Reply tokens (case-insensitive): `bang`, `bef`, `ignore`.
 
 #### How `bang` works
 
-Base hit chance is 65 % (a streak adds +2 % per shot, capped at 85 % at
-a 5-streak). Misses reset your streak. Roughly one miss in three
-**spooks** you into a captcha / trivia / recipe **challenge** — same
-mechanic as the `bef`-refusal challenge below. While that challenge is
-pending, further `bang`s are blocked; clear it (reply with the answer
-in plain text, or wait for the 1 h auto-expiry) and you can shoot again.
+Base hit chance is **40 %**; each shot in a streak adds +4 %, capped at
+**70 %** (so a 5-streak tops out around 60 %). Misses reset your
+streak. About **two misses in three** **spook** you into a captcha /
+trivia / recipe **challenge** — same mechanic as the `bef`-refusal
+challenge below. While that challenge is pending, further `bang`s are
+blocked; clear it (reply with the answer in plain text, or wait for the
+1 h auto-expiry) and you can shoot again.
 
 #### How `bef` works
 
-The duck refuses outright roughly one bef in three (a flat pre-AI dice
-roll), without the AI even being asked. When the dice does pass, the AI
-plays the duck and decides on its own: usually agrees, occasionally
-refuses for absurd or trivial reasons.
+The duck refuses outright **just over half the time** (a flat pre-AI
+dice roll), without the AI even being asked. When the dice does pass,
+the AI plays the duck and decides on its own: usually agrees,
+occasionally refuses for absurd or trivial reasons.
 
 A successful `bef` resolves the duck, awards a befriended point, and
 adds the duck to your friendship roster (`/duckfriends`); the bot
