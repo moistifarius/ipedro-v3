@@ -27,6 +27,7 @@ class ChatConfig:
     comic_enabled: bool = False
     fortune_enabled: bool = False
     ether_enabled: bool = False
+    duck_names_public: bool = True
 
 
 class ChatRepo:
@@ -71,6 +72,7 @@ class ChatRepo:
             comic_enabled=bool(row["comic_enabled"]),
             fortune_enabled=bool(row["fortune_enabled"]),
             ether_enabled=bool(row["ether_enabled"]),
+            duck_names_public=bool(row["duck_names_public"]),
         )
 
     async def upsert_default_config(
@@ -108,6 +110,7 @@ class ChatRepo:
             comic_enabled=bool(row["comic_enabled"]),
             fortune_enabled=bool(row["fortune_enabled"]),
             ether_enabled=bool(row["ether_enabled"]),
+            duck_names_public=bool(row["duck_names_public"]),
         )
 
     async def update_config(self, chat_id: int, **fields: Any) -> None:
@@ -115,7 +118,7 @@ class ChatRepo:
             "response_policy", "ambient_probability", "persona", "persona_custom",
             "duckhunt_enabled", "voice_transcribe", "memory_enabled",
             "share_photo_enabled", "comic_enabled", "fortune_enabled",
-            "ether_enabled",
+            "ether_enabled", "duck_names_public",
         }
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:

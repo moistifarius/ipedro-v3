@@ -130,7 +130,8 @@ def build_router(rt: Runtime) -> Router:
                 f"Fortune enabled: {cfg.fortune_enabled}\n"
                 f"Voice transcribe: {cfg.voice_transcribe}\n"
                 f"Memory enabled: {cfg.memory_enabled}\n"
-                f"Ether enabled: {cfg.ether_enabled}\n\n"
+                f"Ether enabled: {cfg.ether_enabled}\n"
+                f"Duck names public: {cfg.duck_names_public}\n\n"
                 "Set a field: /chat_config <field> <value>\n"
                 "  policy     commands|mention|reply|ambient|always\n"
                 "  ambient    <0.0-1.0>\n"
@@ -141,7 +142,8 @@ def build_router(rt: Runtime) -> Router:
                 "  fortune    on|off\n"
                 "  voice      on|off\n"
                 "  memory     on|off\n"
-                "  ether      on|off",
+                "  ether      on|off\n"
+                "  ducknames  on|off — share this chat's named ducks in /ducknames",
                 disable_notification=True,
             )
             return
@@ -195,6 +197,8 @@ def build_router(rt: Runtime) -> Router:
             updates["memory_enabled"] = raw.lower() in ("on", "true", "1", "yes")
         elif field == "ether":
             updates["ether_enabled"] = raw.lower() in ("on", "true", "1", "yes")
+        elif field in ("ducknames", "duck_names", "duck_names_public"):
+            updates["duck_names_public"] = raw.lower() in ("on", "true", "1", "yes")
         else:
             await msg.reply("Unknown field.", disable_notification=True)
             return

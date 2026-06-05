@@ -737,6 +737,7 @@ def build_router(rt: Runtime) -> Router:
             "voice": ("voice_transcribe", not cfg.voice_transcribe),
             "memory": ("memory_enabled", not cfg.memory_enabled),
             "ether": ("ether_enabled", not cfg.ether_enabled),
+            "ducknames": ("duck_names_public", not cfg.duck_names_public),
         }
         if field in toggles:
             col, new_val = toggles[field]
@@ -816,6 +817,8 @@ def _config_keyboard(cfg, *, target_chat_id: int) -> InlineKeyboardMarkup:
         ],
         [
             b(f"📟 Ether: {on if cfg.ether_enabled else off}", "ether"),
+            b(f"🦆 Duck names public: {on if cfg.duck_names_public else off}",
+              "ducknames"),
         ],
         [
             noop_btn(f"Policy: {cfg.response_policy}"),

@@ -203,6 +203,56 @@ def build_router(rt: Runtime) -> Router:
             )
         await msg.reply("\n".join(lines), disable_notification=True)
 
+    @r.message(Command("ducknames"))
+    async def ducknames(msg: Message) -> None:
+        """Show every named duck across every chat the bot's in.
+
+        ``/ducknames``       → page 1 (newest 100 names)
+        ``/ducknames <N>``   → page N
+
+        Chats can opt out of being included in this global view by
+        setting ``duck_names_public off`` in their chat config; their
+        own /duckfriends and /duckstats still work normally.
+        """
+        page = 1
+        parts = (msg.text or "").split()
+        if len(parts) >= 2:
+            try:
+                page = max(1, int(parts[1]))
+            except ValueError:
+                pass
+        per_page = 100
+        offset = (page - 1) * per_page
+        rows, total = await rt.duckhunt.list_named_ducks_global(
+            limit=per_page, offset=offset,
+        )
+        if not rows and page == 1:
+            await msg.reply(
+                "No named ducks anywhere yet. (Set one with "
+                "`/duckname <id> <name>` after a successful bef.)",
+                disable_notification=True,
+            )
+            return
+        if not rows:
+            await msg.reply(
+                f"Page {page} is past the end — {total} named ducks total.",
+                disable_notification=True,
+            )
+            return
+        last_pos = offset + len(rows)
+        header = (
+            f"🦆 Named ducks across the ether ({total} total, "
+            f"showing {offset + 1}–{last_pos}):"
+        )
+        lines = [header]
+        for d in rows:
+            lines.append(f"  • {d['name']} — {d['owner']}")
+        if last_pos < total:
+            lines.append(f"\n+ {total - last_pos} more. "
+                         f"Try `/ducknames {page + 1}`.")
+        # Telegram caps outbound at 4096 chars; truncate defensively.
+        await msg.reply("\n".join(lines)[:4000], disable_notification=True)
+
     @r.message(Command("duckfriends"))
     async def duckfriends(msg: Message) -> None:
         """Show the calling user's roster of befriended ducks in this chat."""

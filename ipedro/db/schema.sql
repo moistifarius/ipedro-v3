@@ -164,6 +164,14 @@ CREATE INDEX IF NOT EXISTS duck_stats_leaderboard_idx
 ALTER TABLE duck_events
     ADD COLUMN IF NOT EXISTS name TEXT;
 
+-- When TRUE (the default), this chat's named ducks are surfaced by the
+-- global `/ducknames` command. Flip OFF in chats that want their roster
+-- private — those ducks become invisible to any chat that runs the
+-- command. Doesn't affect /duckfriends, /duckstats, or anything inside
+-- the chat itself.
+ALTER TABLE chat_config
+    ADD COLUMN IF NOT EXISTS duck_names_public BOOLEAN NOT NULL DEFAULT TRUE;
+
 -- Reminders --------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS reminders (
     id          BIGSERIAL PRIMARY KEY,

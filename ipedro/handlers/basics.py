@@ -53,6 +53,7 @@ HELP_TEXT_PUBLIC = (
     "/duckstats - leaderboard for this chat\n"
     "/duckfriends - your roster of befriended ducks here\n"
     "/duckname <id> <name> - name one of your befriended ducks\n"
+    "/ducknames [page] - every named duck across every chat (paginated)\n"
     "/global_leaderboard - duck leaderboard across all chats\n"
     "\n"
     "Quotes & lore:\n"

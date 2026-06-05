@@ -49,6 +49,7 @@ bot's admin user. Fields:
 | `voice` | `on` / `off` — transcribe inbound voice notes |
 | `memory` | `on` / `off` — store messages and build context from history |
 | `ether` | `on` / `off` — make this chat reachable as a destination for `/ether` radio transmissions sent from other ether-enabled chats. Off by default. Needs ≥ 2 chats opted in for a transmission to have anywhere to land. |
+| `ducknames` | `on` / `off` — include this chat's named befriended ducks in the global `/ducknames` listing. Default `on`. Turn off if you want your roster private (your in-chat `/duckfriends` and `/duckstats` still work either way). |
 
 ### `/ether <text>` (and on voice notes)
 
@@ -113,6 +114,9 @@ broadcast. Requires another chat to have `ether` enabled.
 - `/duckhunt` — force-spawn a duck (requires duckhunt enabled for this chat).
 - `/duckstats` — leaderboard for this chat.
 - `/duckfriends` — your roster of ducks you've befriended in this chat.
+- `/ducknames [page]` — every named duck across every chat (100/page,
+  newest first). Skips chats that have opted out via `/chat_config
+  ducknames off` (default is on).
 - `/quackflag` — is there an active duck right now?
 
 Reply tokens (case-insensitive): `bang`, `bef`, `ignore`.

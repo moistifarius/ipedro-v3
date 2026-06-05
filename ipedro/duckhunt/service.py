@@ -433,6 +433,49 @@ class DuckhuntService:
         )
         return [dict(r) for r in rows]
 
+    async def list_named_ducks_global(
+        self, *, limit: int = 100, offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """All named, befriended ducks across every opted-in chat.
+
+        Skips ducks whose home chat has ``duck_names_public = FALSE`` —
+        chats can opt their roster out of this global view without
+        affecting their own ``/duckfriends`` or ``/duckstats``. Ordered
+        newest-named-first (descending duck_events.id is "good enough":
+        ``name`` is set well after the row was inserted, but no chat
+        renames frequently). Returns ``(rows, total_count)`` so the
+        handler can show "showing N of M" + paginate.
+        """
+        total = int(await self.db.fetchval(
+            """
+            SELECT COUNT(*)
+              FROM duck_events de
+              JOIN chat_config cfg ON cfg.chat_id = de.chat_id
+             WHERE de.resolved = TRUE
+               AND de.resolved_action = 'bef'
+               AND de.name IS NOT NULL
+               AND cfg.duck_names_public = TRUE
+            """
+        ) or 0)
+        rows = await self.db.fetch(
+            """
+            SELECT de.id, de.name, de.resolved_by,
+                   COALESCE(u.first_name, u.username,
+                            CAST(de.resolved_by AS TEXT)) AS owner
+              FROM duck_events de
+              JOIN chat_config cfg ON cfg.chat_id = de.chat_id
+              LEFT JOIN users u ON u.user_id = de.resolved_by
+             WHERE de.resolved = TRUE
+               AND de.resolved_action = 'bef'
+               AND de.name IS NOT NULL
+               AND cfg.duck_names_public = TRUE
+             ORDER BY de.id DESC
+             LIMIT $1 OFFSET $2
+            """,
+            limit, offset,
+        )
+        return [dict(r) for r in rows], total
+
     async def global_leaderboard(self, limit: int = 15) -> list[dict[str, Any]]:
         rows = await self.db.fetch(
             """

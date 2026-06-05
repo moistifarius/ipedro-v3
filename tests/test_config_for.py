@@ -18,7 +18,7 @@ class _FakeCfg:
             duckhunt_enabled=False, share_photo_enabled=False,
             comic_enabled=False, fortune_enabled=False,
             voice_transcribe=True, memory_enabled=True,
-            ether_enabled=False,
+            ether_enabled=False, duck_names_public=True,
             response_policy="mention", persona="dude",
         )
         defaults.update(kw)
