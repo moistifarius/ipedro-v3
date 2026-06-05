@@ -142,40 +142,36 @@ def _no_duck_line() -> str:
     return random.choice(_NO_DUCK_FLAVOR)
 
 
-# Casual / playful intros for the captcha + trivia challenge prompts.
-# Picked per (action, kind) so the duck's refusal flavor and the spook
-# flavor read differently. The captcha image already speaks for itself —
-# the caption just sets the mood. No more "Looks like the duck doesn't
-# want to be friends right now. Try again later." formalism.
+# Terse intros for the captcha + trivia challenge prompts — picked per
+# (action, kind). Kept short and dry on purpose: the bot's overall
+# voice carries the personality, the intro just has to set context for
+# the picture or question that follows.
 _CAPTCHA_INTROS = {
     "bef": (
-        "The duck side-eyes you. Prove you're not a bot:",
-        "Nope. Read this back to it first:",
-        "Duck wants ID. What does this say?",
-        "The duck's playing hard to get. Read the squiggle:",
-        "Try again, but you have to read the duck's secret password first:",
-        "Duck says: type what you see and we'll talk.",
+        "Read it:",
+        "Type this first:",
+        "Convince me:",
+        "Prove it:",
+        "Try this:",
     ),
     "bang_miss": (
-        "Whiffed it. The duck wrote you a note — read it back:",
-        "The duck saw you flinch. Prove you've got your eye in:",
-        "Spooked. Read the duck's challenge before you can shoot again:",
-        "Easy, cowboy. Read this first:",
-        "The duck filed a complaint. Sign here:",
+        "Hang on. Read this:",
+        "Steady. Type this:",
+        "Cool it. Read this:",
+        "Not yet. Type this:",
     ),
 }
 _TRIVIA_INTROS = {
     "bef": (
-        "Duck refuses. Answer this and try again:",
-        "Duck wants to know:",
-        "Duck has a question for you, smart guy:",
-        "Duck side-eyes you and asks:",
-        "Get this right and the duck might reconsider:",
+        "Answer this:",
+        "Try this:",
+        "Then this:",
+        "Question:",
     ),
     "bang_miss": (
-        "Spooked. Quick — answer this before you can shoot again:",
-        "The duck wants to test you first:",
-        "Steady. The duck has a question:",
+        "First, answer:",
+        "Hang on. Question:",
+        "Steady. Answer:",
     ),
 }
 
