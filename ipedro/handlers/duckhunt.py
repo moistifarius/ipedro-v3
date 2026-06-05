@@ -25,10 +25,14 @@ log = logging.getLogger(__name__)
 
 _CHALLENGE_KINDS = ("captcha", "trivia", "recipe")
 
-# Subset eligible for *random* selection on a bef refusal. Recipe is
-# currently disabled here while we tune it; `/debug_recipe` still works
-# because force_kind paths validate against the full _CHALLENGE_KINDS.
+# Subset eligible for *random* selection on a bef refusal / bang-miss
+# spook. Recipe is currently disabled here while we tune it;
+# `/debug_recipe` still works because force_kind paths validate against
+# the full _CHALLENGE_KINDS. The weights bias toward captcha — it's the
+# fastest to solve (no AI judge round-trip) and the user wanted them
+# more frequent.
 _RANDOM_CHALLENGE_KINDS: tuple[str, ...] = ("captcha", "trivia")
+_RANDOM_CHALLENGE_WEIGHTS: tuple[int, ...] = (3, 1)  # captcha 75% / trivia 25%
 
 # A small pool of neutral celebration lines for a successful bef; one is
 # picked at random so the bot doesn't sound like a stuck record. Rarity
@@ -82,7 +86,9 @@ async def _issue_bef_challenge(
     """
     kind = (
         force_kind if force_kind in _CHALLENGE_KINDS
-        else random.choice(_RANDOM_CHALLENGE_KINDS)
+        else random.choices(
+            _RANDOM_CHALLENGE_KINDS, weights=_RANDOM_CHALLENGE_WEIGHTS,
+        )[0]
     )
     if kind == "captcha":
         answer, png = make_captcha()

@@ -366,3 +366,27 @@ async def test_bang_blocked_while_challenge_pending():
     msg.reply.assert_awaited()
     body = msg.reply.await_args.args[0].lower()
     assert "challenge" in body
+
+
+def test_random_challenge_kinds_are_biased_toward_captcha():
+    """The random-kind picker uses weighted choice; over many draws the
+    captcha share should sit close to the configured weight ratio."""
+    import random
+    from ipedro.handlers.duckhunt import (
+        _RANDOM_CHALLENGE_KINDS, _RANDOM_CHALLENGE_WEIGHTS,
+    )
+
+    rng = random.Random(0)
+    n = 4000
+    counts = {"captcha": 0, "trivia": 0}
+    for _ in range(n):
+        kind = rng.choices(_RANDOM_CHALLENGE_KINDS,
+                           weights=_RANDOM_CHALLENGE_WEIGHTS)[0]
+        counts[kind] += 1
+
+    captcha_share = counts["captcha"] / n
+    expected = (_RANDOM_CHALLENGE_WEIGHTS[0]
+                / sum(_RANDOM_CHALLENGE_WEIGHTS))
+    assert abs(captcha_share - expected) < 0.03
+    # Sanity: bias really did shift the balance away from 50/50.
+    assert captcha_share > 0.6
