@@ -62,10 +62,13 @@ DUCK_BEF_CHALLENGE_PROMPT = (
     "- Address the user directly. Keep it under 280 characters.\n\n"
     "Type-specific rules:\n"
     "- trivia: One weird, off-the-wall, obscure trivia question with a real "
-    "  answer. Do not hint at or reveal the answer.\n"
+    "  answer. Pick from any field — history, science, geography, language, "
+    "  pop culture, animals, mythology, food, music — wide variety. Do not "
+    "  hint at or reveal the answer.\n"
     "- recipe: Ask for a brief recipe for something specific and absurd "
     "  (e.g. 'a duck-themed sandwich', 'soup that tastes like Tuesday'). "
-    "  Do not list ingredients or steps yourself."
+    "  Do not list ingredients or steps yourself.\n\n"
+    "{avoid_block}"
 )
 
 DUCK_BEF_CHALLENGE_JUDGE_PROMPT = (

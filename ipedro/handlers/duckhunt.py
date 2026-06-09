@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import random
 import time
+from collections import deque
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -33,7 +34,7 @@ _CHALLENGE_KINDS = ("captcha", "trivia", "recipe")
 # fastest to solve (no AI judge round-trip) and the user wanted them
 # more frequent.
 _RANDOM_CHALLENGE_KINDS: tuple[str, ...] = ("captcha", "trivia")
-_RANDOM_CHALLENGE_WEIGHTS: tuple[int, ...] = (3, 1)  # captcha 75% / trivia 25%
+_RANDOM_CHALLENGE_WEIGHTS: tuple[int, ...] = (1, 3)  # captcha 25% / trivia 75%
 
 # A small pool of neutral celebration lines for a successful bef; one is
 # picked at random so the bot doesn't sound like a stuck record. Rarity
@@ -142,40 +143,95 @@ def _no_duck_line() -> str:
     return random.choice(_NO_DUCK_FLAVOR)
 
 
-# Short Boomhauer-flavored intros for the captcha + trivia prompts,
-# picked per (action, kind). One beat of voice — yeah man, hold up,
-# dang ol' — never narrating the duck or telegraphing a bit. The
-# captcha image / trivia text carries the content.
+# Said when someone tries to bang/bef/ignore inside the 15s
+# per-user cooldown. Boomhauer-flavored, varied so it's not the same
+# "Cool it. Cooldown." every time.
+_COOLDOWN_FLAVOR: tuple[str, ...] = (
+    "Yeah man, hang on a tick.",
+    "Mmhmm, gimme a second, man.",
+    "I tell ya what, easy now, man.",
+    "Whoa man, slow down a touch.",
+    "Yeah man, dang ol' cooldown, just a sec.",
+    "Mmhmm, hold up a beat, man.",
+    "Easy man, give it a minute.",
+    "Yeah man, you doin' a lot, take a breath.",
+)
+
+
+def _cooldown_line() -> str:
+    return random.choice(_COOLDOWN_FLAVOR)
+
+
+# Per-chat ring buffer of recent trivia questions, so the AI doesn't
+# loop the same "what is the only mammal that cannot jump" three days
+# in a row. We send these into the prompt as an explicit avoid-list.
+# In-memory only — fine for a chat-game gate. Cap at 12 entries/chat.
+_RECENT_TRIVIA: dict[int, deque[str]] = {}
+_RECENT_TRIVIA_PER_CHAT = 12
+
+
+def _recent_trivia_for(chat_id: int) -> deque[str]:
+    buf = _RECENT_TRIVIA.get(chat_id)
+    if buf is None:
+        buf = deque(maxlen=_RECENT_TRIVIA_PER_CHAT)
+        _RECENT_TRIVIA[chat_id] = buf
+    return buf
+
+
+def _build_avoid_block(chat_id: int, kind: str) -> str:
+    """Return the AVOID-list snippet to splice into DUCK_BEF_CHALLENGE_PROMPT.
+
+    Only meaningful for trivia — captcha is image-rendered and recipe
+    is single-shot. Returns an empty string for those so the prompt
+    behavior is unchanged."""
+    if kind != "trivia":
+        return ""
+    buf = _RECENT_TRIVIA.get(chat_id)
+    if not buf:
+        return ""
+    listed = "\n".join(f"- {q}" for q in buf)
+    return (
+        "AVOID these recent questions in this chat — pick something "
+        "from a completely different topic and angle:\n"
+        f"{listed}"
+    )
+
+
+# Boomhauer-flavored intros, framed as the DUCK testing the user — turns
+# the challenge into part of the game lore instead of a generic gate.
+# Per (action, kind) so bef-refusal and bang-miss spook read differently.
+# The captcha image / trivia text carries the actual content.
 _CAPTCHA_INTROS = {
     "bef": (
-        "Nah man. Type this first:",
-        "Yeah man, read it back:",
-        "Mmhmm, dang ol' captcha, type it:",
-        "Hold up man, type this:",
-        "I tell ya what, type this first:",
-        "Yeah no man, read this:",
+        "Yeah man, duck says read this back first:",
+        "Mmhmm, duck only friends with folks who can read, man:",
+        "I tell ya what, duck wants you to type this:",
+        "Yeah man, ol' duck's got a riddle. Type it:",
+        "Mmhmm, duck says prove ya ain't a bot, man:",
+        "Duck's testin' ya, man. Type this:",
     ),
     "bang_miss": (
-        "Whoa man, hold up. Type this:",
-        "Easy man, read this:",
-        "Yeah man, slow down. Type it:",
-        "Mmhmm, dang ol' captcha first, man:",
-        "I tell ya what, type this first, man:",
+        "Whoa man, duck spooked. Type this:",
+        "Yeah man, duck wants you to read this first:",
+        "Mmhmm, ol' duck flinched. Type this back:",
+        "I tell ya what, duck wants ID, man:",
+        "Duck says prove ya can read, man:",
     ),
 }
 _TRIVIA_INTROS = {
     "bef": (
-        "Nah man. Answer me this:",
-        "Yeah man, quick one:",
-        "Mmhmm, tell me this:",
-        "I tell ya what, one question first:",
-        "Hold up man, answer this:",
+        "Yeah man, duck only friends with folks who can answer this:",
+        "Mmhmm, duck's got a question for ya, man:",
+        "I tell ya what, duck wants to know:",
+        "Duck's testin' ya, man. Try this:",
+        "Yeah man, duck won't be friends 'less ya answer this:",
+        "Mmhmm, ol' duck says answer this and we'll talk:",
     ),
     "bang_miss": (
-        "Whoa man, hold up. Question:",
-        "Easy man, quick one:",
-        "Yeah man, slow down. Answer:",
-        "Mmhmm, dang ol' question first, man:",
+        "Whoa man, duck wants you to answer this first:",
+        "Yeah man, ol' duck's testin' ya. Question:",
+        "Mmhmm, duck won't let ya shoot 'til you answer:",
+        "I tell ya what, duck's got a question, man:",
     ),
 }
 
@@ -226,9 +282,14 @@ async def _issue_bef_challenge(
         )
         return True
 
-    # Quick challenge prompt — Haiku quality is plenty here.
+    # Quick challenge prompt — Haiku quality is plenty here. For trivia,
+    # splice in the per-chat recent-trivia list so it picks a fresh
+    # topic each time instead of looping the same handful of questions.
+    avoid_block = _build_avoid_block(msg.chat.id, kind)
     challenge_text = await rt.openai.cheap_completion(
-        DUCK_BEF_CHALLENGE_PROMPT.format(display_name=who, kind=kind),
+        DUCK_BEF_CHALLENGE_PROMPT.format(
+            display_name=who, kind=kind, avoid_block=avoid_block,
+        ),
         max_tokens=200,
     )
     if not challenge_text:
@@ -237,6 +298,8 @@ async def _issue_bef_challenge(
             msg.chat.id, msg.from_user.id if msg.from_user else None,
         )
         return False
+    if kind == "trivia":
+        _recent_trivia_for(msg.chat.id).append(challenge_text)
     prompt_msg = await msg.answer(
         f"{intro}\n\n{challenge_text}",
         disable_notification=True,
@@ -458,7 +521,7 @@ def build_router(rt: Runtime) -> Router:
             msg.chat.id, msg.from_user.id,
             rt.settings.duckhunt_action_cooldown_seconds,
         ):
-            await msg.reply("Cool it. Cooldown.", disable_notification=True)
+            await msg.reply(_cooldown_line(), disable_notification=True)
             return
 
         if action == "bang":
@@ -536,7 +599,7 @@ def build_router(rt: Runtime) -> Router:
             # bang_miss one (still a bef attempt the user fired).
             issued = await _issue_bef_challenge(rt, msg, who, from_action="bef")
             if not issued:
-                await msg.reply("Cool it. Cooldown.", disable_notification=True)
+                await msg.reply(_cooldown_line(), disable_notification=True)
             return
 
         duck = await rt.duckhunt.active_duck(msg.chat.id)

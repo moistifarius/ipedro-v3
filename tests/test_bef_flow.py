@@ -375,9 +375,11 @@ async def test_bang_blocked_while_challenge_pending():
     assert "challenge" in body
 
 
-def test_random_challenge_kinds_are_biased_toward_captcha():
+def test_random_challenge_kinds_match_configured_weights():
     """The random-kind picker uses weighted choice; over many draws the
-    captcha share should sit close to the configured weight ratio."""
+    distribution should sit close to the configured weight ratio. The
+    bias direction is intentionally driven by the constants so future
+    tuning (toward captcha or trivia) doesn't require a test edit."""
     import random
     from ipedro.handlers.duckhunt import (
         _RANDOM_CHALLENGE_KINDS, _RANDOM_CHALLENGE_WEIGHTS,
@@ -385,18 +387,17 @@ def test_random_challenge_kinds_are_biased_toward_captcha():
 
     rng = random.Random(0)
     n = 4000
-    counts = {"captcha": 0, "trivia": 0}
+    counts = {k: 0 for k in _RANDOM_CHALLENGE_KINDS}
     for _ in range(n):
         kind = rng.choices(_RANDOM_CHALLENGE_KINDS,
                            weights=_RANDOM_CHALLENGE_WEIGHTS)[0]
         counts[kind] += 1
 
-    captcha_share = counts["captcha"] / n
-    expected = (_RANDOM_CHALLENGE_WEIGHTS[0]
-                / sum(_RANDOM_CHALLENGE_WEIGHTS))
-    assert abs(captcha_share - expected) < 0.03
-    # Sanity: bias really did shift the balance away from 50/50.
-    assert captcha_share > 0.6
+    total_weight = sum(_RANDOM_CHALLENGE_WEIGHTS)
+    for k, w in zip(_RANDOM_CHALLENGE_KINDS, _RANDOM_CHALLENGE_WEIGHTS):
+        observed = counts[k] / n
+        expected = w / total_weight
+        assert abs(observed - expected) < 0.03
 
 
 # --- spawner cow-guard ---------------------------------------------------
@@ -495,3 +496,46 @@ async def test_reply_to_naming_filter_rejects_other_user():
         caption=None,
     )
     assert await dh._is_naming_reply(msg) is False
+
+
+def test_build_avoid_block_lists_recent_trivia_only_for_trivia_kind():
+    """The avoid-list is sent into the AI prompt so it picks a fresh
+    topic. Empty for captcha/recipe (those don't need it)."""
+    from ipedro.handlers.duckhunt import (
+        _RECENT_TRIVIA, _build_avoid_block, _recent_trivia_for,
+    )
+
+    _RECENT_TRIVIA.clear()
+    chat_id = 42
+    # No history yet → empty avoid block for both kinds.
+    assert _build_avoid_block(chat_id, "trivia") == ""
+    assert _build_avoid_block(chat_id, "captcha") == ""
+
+    # Record three trivia questions.
+    buf = _recent_trivia_for(chat_id)
+    buf.append("What is the only mammal that cannot jump?")
+    buf.append("Which planet has the longest day?")
+    buf.append("Who wrote the Stanford prison study report?")
+
+    block = _build_avoid_block(chat_id, "trivia")
+    assert "What is the only mammal that cannot jump?" in block
+    assert "AVOID" in block
+    # Captcha still doesn't get an avoid list (no AI gen for those).
+    assert _build_avoid_block(chat_id, "captcha") == ""
+
+
+def test_recent_trivia_deque_caps_at_per_chat_size():
+    """The deque silently drops oldest entries past the cap, so the
+    avoid block never grows past a sensible size."""
+    from ipedro.handlers.duckhunt import (
+        _RECENT_TRIVIA, _RECENT_TRIVIA_PER_CHAT, _recent_trivia_for,
+    )
+
+    _RECENT_TRIVIA.clear()
+    buf = _recent_trivia_for(99)
+    for i in range(_RECENT_TRIVIA_PER_CHAT + 5):
+        buf.append(f"q{i}")
+    assert len(buf) == _RECENT_TRIVIA_PER_CHAT
+    # Oldest dropped, newest preserved.
+    assert "q0" not in buf
+    assert f"q{_RECENT_TRIVIA_PER_CHAT + 4}" in buf
