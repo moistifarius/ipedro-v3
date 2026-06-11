@@ -2497,6 +2497,55 @@ def build_router(rt: Runtime) -> Router:
         await rt.memory.delete_fact(fid)
         await msg.reply(f"Deleted fact {fid}.", disable_notification=True)
 
+    @r.message(Command("memory_wipe"))
+    async def memory_wipe(msg: Message) -> None:
+        """Erase a chat's stored conversation so a new persona takes hold.
+
+        The bot's own past replies (stored as assistant messages), the
+        running summary, and the semantic-search embeddings all feed back
+        into the context window — so an old persona keeps leaking through
+        even after /master_prompt is changed. This wipes that precedent.
+
+        Usage:
+          /memory_wipe                 → wipe THIS chat's conversation memory
+          /memory_wipe <chat_id>       → wipe that chat's memory
+          /memory_wipe <chat_id> facts → also delete durable facts
+          /memory_wipe facts           → this chat, including facts
+
+        Durable facts are kept by default (they're usually about people,
+        not the bot's voice). Add 'facts' to nuke those too. Does NOT
+        touch duck stats, quotes, or chat config.
+        """
+        if not await require_admin(msg, admin_ids):
+            return
+        args = (msg.text or "").split()[1:]
+        include_facts = False
+        target = msg.chat.id
+        for a in args:
+            if a.lower() == "facts":
+                include_facts = True
+            else:
+                try:
+                    target = int(a)
+                except ValueError:
+                    await msg.reply(
+                        "Usage: /memory_wipe [chat_id] [facts]",
+                        disable_notification=True,
+                    )
+                    return
+        counts = await rt.memory.wipe_conversation(
+            target, include_facts=include_facts,
+        )
+        parts = [f"{v} {k}" for k, v in counts.items()]
+        await msg.reply(
+            f"🧹 Wiped chat {target}'s conversation memory: "
+            f"{', '.join(parts)}.\n"
+            "The next reply starts fresh on the current persona. "
+            + ("(Durable facts were cleared too.)" if include_facts else
+               "(Durable facts kept — add 'facts' to clear those too.)"),
+            disable_notification=True,
+        )
+
     # ---------------------------------------------------------------- duckstats reset
     async def _render_chat_user_resetter(target: int) -> tuple[str, InlineKeyboardMarkup | None]:
         """Build the leaderboard-style picker used to choose a user (or

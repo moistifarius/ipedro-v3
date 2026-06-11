@@ -95,3 +95,46 @@ class MemoryStore:
 
     async def delete_fact(self, fact_id: int) -> None:
         await self.facts.delete(fact_id)
+
+    async def wipe_conversation(
+        self, chat_id: int, *, include_facts: bool = False,
+    ) -> dict[str, int]:
+        """Erase a chat's stored conversation so a new persona isn't
+        fighting old precedent.
+
+        Deletes, for ``chat_id``:
+          * every stored message (both roles — the bot's old-voice
+            assistant replies are what the model mimics, and orphaned
+            user turns aren't worth keeping),
+          * the running summaries (written in/about the old persona),
+          * the embeddings (so semantic retrieval can't resurface old
+            voice), and
+          * optionally the durable facts (off by default — facts are
+            usually about *people*, not the bot's voice).
+
+        Returns a dict of {table: rows_deleted}. Idempotent; safe to run
+        on a chat with no memory.
+        """
+        def _count(status: str) -> int:
+            # asyncpg returns e.g. "DELETE 42"
+            try:
+                return int(status.split()[-1])
+            except (AttributeError, ValueError, IndexError):
+                return 0
+
+        results: dict[str, int] = {}
+        # Embeddings first (no FK dependency either way, but tidy).
+        results["embeddings"] = _count(await self.db.execute(
+            "DELETE FROM embeddings WHERE chat_id = $1", chat_id,
+        ))
+        results["summaries"] = _count(await self.db.execute(
+            "DELETE FROM summaries WHERE chat_id = $1", chat_id,
+        ))
+        results["messages"] = _count(await self.db.execute(
+            "DELETE FROM messages WHERE chat_id = $1", chat_id,
+        ))
+        if include_facts:
+            results["facts"] = _count(await self.db.execute(
+                "DELETE FROM facts WHERE chat_id = $1", chat_id,
+            ))
+        return results
