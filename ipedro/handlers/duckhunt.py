@@ -40,12 +40,12 @@ _RANDOM_CHALLENGE_WEIGHTS: tuple[int, ...] = (1, 3)  # captcha 25% / trivia 75%
 # picked at random so the bot doesn't sound like a stuck record. Rarity
 # is currently neutralized — every duck gets the same flavor.
 _BEF_FOLLOWUP_FLAIR: tuple[str, ...] = (
-    "Yeah man, that's yours now.",
-    "Mmhmm, dang ol' duck right there, man.",
-    "I tell ya what, man, smooth bef.",
-    "Yeah man, you got the touch.",
-    "Mmhmm, dang ol' friend made, I tell ya what.",
-    "Yeah man, ol' boy's yours now.",
+    "Welcome to the network.",
+    "Sh-sha. Friend confirmed.",
+    "Code-named. Filed.",
+    "Vetted. Add to the trusted list.",
+    "Cleared. They're with us now.",
+    "Approved. Eyes only.",
 )
 
 
@@ -121,21 +121,21 @@ async def _is_naming_reply(msg: Message) -> bool:
 
 
 # Said when someone types bang/bef/ignore and there's no active duck.
-# Mild Boomhauer-flavored gaslighting — make the trigger-happy user
-# question reality without crossing into hostile.
+# The intent is mild gaslighting — make the trigger-happy user briefly
+# question reality without crossing into hostile. Picked at random.
 _NO_DUCK_FLAVOR: tuple[str, ...] = (
-    "Yeah man, ain't no duck round here, I tell ya what.",
-    "Mmhmm, dang ol' duck, man, ain't never been one. You alright?",
-    "Yeah man, talkin' to nobody, dang ol' nobody.",
-    "I tell ya what, ain't no duck, ain't never was a duck, man.",
-    "Mmhmm, dang ol' empty room right there, man.",
-    "Yeah man, shootin' at air, you doin' okay?",
-    "Ain't no duck, man. Zero ducks. Drink some water, I tell ya what.",
-    "Mmhmm, dang ol' phantom right there, man.",
-    "Yeah man, what duck? Show me ol' duck, man.",
-    "I tell ya what, take a breath, ain't no duck, man.",
-    "Mmhmm, ol' boy's seein' things, dang ol' things that ain't there.",
-    "Yeah man, dang ol' duck, man... ain't here. Touch grass, I tell ya what.",
+    "Sh-sha. Negative contact. No duck on the scope.",
+    "There is no duck. There has never been a duck. Continue normal activity.",
+    "What duck. Who told you there was a duck. Who's asking.",
+    "Empty room. Could be a drill.",
+    "Negative. Stand down.",
+    "No duck. Could be a hologram you didn't see leave.",
+    "Sh-sha! Shooting at a phantom. That's how they get you.",
+    "Nothing here. Possible misdirection.",
+    "Easy. Could be a decoy that already moved on.",
+    "Sh-sha. Maintain situational awareness. No duck.",
+    "Eyes peeled, but no — nothing here. Stand by.",
+    "Pocket sand! ...sorry, reflex. No duck.",
 )
 
 
@@ -143,18 +143,18 @@ def _no_duck_line() -> str:
     return random.choice(_NO_DUCK_FLAVOR)
 
 
-# Said when someone tries to bang/bef/ignore inside the 15s
-# per-user cooldown. Boomhauer-flavored, varied so it's not the same
-# "Cool it. Cooldown." every time.
+# Said when a user tries to bang/bef again before the per-user cooldown
+# expires. Same paranoid tone as the rest, just shorter.
 _COOLDOWN_FLAVOR: tuple[str, ...] = (
-    "Yeah man, hang on a tick.",
-    "Mmhmm, gimme a second, man.",
-    "I tell ya what, easy now, man.",
-    "Whoa man, slow down a touch.",
-    "Yeah man, dang ol' cooldown, just a sec.",
-    "Mmhmm, hold up a beat, man.",
-    "Easy man, give it a minute.",
-    "Yeah man, you doin' a lot, take a breath.",
+    "Sh-sha. Slow down. They're watching the pattern.",
+    "Easy. You're drawing attention.",
+    "Stand down a sec.",
+    "Sh-sha. Reload. Don't be predictable.",
+    "Hold position. Too soon.",
+    "Negative. Wait for the all-clear.",
+    "Sh-sha. Pace yourself. Could be a setup.",
+    "Eyes up. Not yet.",
+    "Pocket sand! ...sorry. Wait a beat.",
 )
 
 
@@ -197,41 +197,39 @@ def _build_avoid_block(chat_id: int, kind: str) -> str:
     )
 
 
-# Boomhauer-flavored intros, framed as the DUCK testing the user — turns
-# the challenge into part of the game lore instead of a generic gate.
-# Per (action, kind) so bef-refusal and bang-miss spook read differently.
+# Dale-flavored intros, framed as the DUCK testing the user — turns the
+# challenge into part of the game lore instead of a generic gate. Per
+# (action, kind) so bef-refusal and bang-miss spook read differently.
 # The captcha image / trivia text carries the actual content.
 _CAPTCHA_INTROS = {
     "bef": (
-        "Yeah man, duck says read this back first:",
-        "Mmhmm, duck only friends with folks who can read, man:",
-        "I tell ya what, duck wants you to type this:",
-        "Yeah man, ol' duck's got a riddle. Type it:",
-        "Mmhmm, duck says prove ya ain't a bot, man:",
-        "Duck's testin' ya, man. Type this:",
+        "Duck wants ID. Read this back:",
+        "Sh-sha. Verification required. What's it say:",
+        "Duck doesn't trust you yet. Prove you're not a plant:",
+        "Hold up. Could be a fed. Read the squiggle:",
+        "Duck's running a background check. Type what you see:",
+        "Identify yourself. Read the code:",
     ),
     "bang_miss": (
-        "Whoa man, duck spooked. Type this:",
-        "Yeah man, duck wants you to read this first:",
-        "Mmhmm, ol' duck flinched. Type this back:",
-        "I tell ya what, duck wants ID, man:",
-        "Duck says prove ya can read, man:",
+        "Sh-sha. The duck made you. Read this before you try again:",
+        "Spooked it. Bird's onto you. Decode this:",
+        "Whiffed. Could be a decoy. Verify:",
+        "Sh-sha. Steady your hand. Read this first:",
+        "Duck logged the miss. Sign in:",
     ),
 }
 _TRIVIA_INTROS = {
     "bef": (
-        "Yeah man, duck only friends with folks who can answer this:",
-        "Mmhmm, duck's got a question for ya, man:",
-        "I tell ya what, duck wants to know:",
-        "Duck's testin' ya, man. Try this:",
-        "Yeah man, duck won't be friends 'less ya answer this:",
-        "Mmhmm, ol' duck says answer this and we'll talk:",
+        "Duck wants intel. Answer:",
+        "Sh-sha. Security question first:",
+        "Duck won't talk until you answer this:",
+        "Knowledge check. Get it right:",
+        "Duck's vetting you. Question:",
     ),
     "bang_miss": (
-        "Whoa man, duck wants you to answer this first:",
-        "Yeah man, ol' duck's testin' ya. Question:",
-        "Mmhmm, duck won't let ya shoot 'til you answer:",
-        "I tell ya what, duck's got a question, man:",
+        "Sh-sha. Answer this before you reload:",
+        "Duck's testing your training. Question:",
+        "Steady. The duck has questions:",
     ),
 }
 

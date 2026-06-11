@@ -1749,7 +1749,7 @@ def build_router(rt: Runtime) -> Router:
         if sub == "show":
             current = current_master_prompt()
             is_default = current == DEFAULT_DUDE_PROMPT
-            tag = "(default Dude)" if is_default else "(override active)"
+            tag = "(default Dale)" if is_default else "(override active)"
             tokens = count_tokens(current)
             head = (
                 f"Master persona prompt {tag} "
@@ -1766,7 +1766,7 @@ def build_router(rt: Runtime) -> Router:
             await kv_delete(rt.db, "pedro_master_prompt")  # legacy key
             set_master_prompt_override(None)
             await msg.reply(
-                "Reset to default Dude prompt.", disable_notification=True,
+                "Reset to default Dale prompt.", disable_notification=True,
             )
             return
         if sub == "set":

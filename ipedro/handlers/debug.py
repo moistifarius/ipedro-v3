@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 _HELP = (
     "Debug commands (admin only):\n"
     "  /debug_help — this list\n"
-    "  /debug_sharephoto — force Boomhauer to generate + post a photo now\n"
+    "  /debug_sharephoto — force Dale to generate + post a photo now\n"
     "  /debug_ether — force one ether broadcast right now (needs ≥ 2 ether-enabled chats)\n"
     "  /ether_status — show which interference source (live WebSDR / bundled / synthetic) the last ether used, and cache state\n"
     "  /ether_refresh — drop the live shortwave cache; next /ether will refetch from the WebSDR list\n"
@@ -41,8 +41,8 @@ _HELP = (
     "resolution. Use when '/master_prompt reset' seems to do nothing.\n"
     "  /debug_duck — alias for /duckhunt (force-spawn in this chat)\n"
     "\nFor the others, just type the trigger:\n"
-    "  say 'the dude' / 'duder' / 'el duderino' — Dude should reply\n"
-    "  say 'cat' / 'kitty' / 🐈 — Dude drops a dubious cat fact\n"
+    "  say 'dale' / 'dale gribble' / 'rusty shackleford' / 'idale' — Dale should reply\n"
+    "  say 'cat' / 'kitty' / 🐈 — Dale drops a dubious cat fact\n"
     "  type 'bang' twice within 15s — second one trips the cooldown challenge"
 )
 

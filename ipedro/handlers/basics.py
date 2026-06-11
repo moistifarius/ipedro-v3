@@ -15,8 +15,9 @@ from ipedro.runtime import Runtime
 log = logging.getLogger(__name__)
 
 HELP_TEXT_PUBLIC = (
-    "Yeah man, I'm Boomhauer. I chat, generate images, transcribe voice, "
-    "dang ol' duck hunt, and remember stuff, I tell ya what.\n"
+    "Sh-sha. Name's Dale. Also Rusty Shackleford, when I'm being watched. "
+    "I chat, generate images, transcribe voice, hunt ducks, and remember "
+    "stuff — more or less.\n"
     "\n"
     "Basics:\n"
     "/start, /help, /get_chat_id\n"
@@ -85,7 +86,7 @@ HELP_TEXT_PUBLIC = (
     "\n"
     "Ambient: reply to ducks with bang, bef, ignore. Bef may be refused — "
     "the duck decides. If refused, you'll get a small challenge to solve "
-    "before you can try bef again. Say 'bad bot' or 'bad dude' as a reply "
+    "before you can try bef again. Say 'bad bot' or 'bad dale' as a reply "
     "to one of my messages to delete it."
 )
 
@@ -151,8 +152,8 @@ def build_router(rt: Runtime) -> Router:
     async def start(msg: Message) -> None:
         await get_or_create_chat_config(rt, msg)
         await msg.reply(
-            "Yeah man, name's Boomhauer. Dang ol' chat bot right here, "
-            "I tell ya what. Type /help for commands, man."
+            "Sh-sha. Dale Gribble. Pest control. Conspiracy buff. "
+            "Also goes by Rusty Shackleford. Type /help for commands."
         )
         await rt.command_log.add(
             msg.chat.id if msg.chat else None,

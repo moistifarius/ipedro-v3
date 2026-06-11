@@ -34,11 +34,16 @@ log = logging.getLogger(__name__)
 _BEF_CHALLENGE_TTL_SECONDS = 3600  # 1h
 
 # Name-mention triggers — when someone calls the bot by name, it tends
-# to engage. Boomhauer + legacy Dude/Pedro aliases all match so people
-# who learned the bot under earlier personas still get a response.
-# Bare "man" / "dude" are way too common to safely match.
+# to engage. The current persona is Dale (idale); legacy Boomhauer / Dude
+# / Pedro aliases still match so people who knew the bot under earlier
+# personas keep getting a response. Bare "dale" is allowed even though
+# it's a common name — the bot can handle the occasional false hit.
 _DUDE_NAME_RE = re.compile(
-    r"\bboomhauer\b"
+    r"\bdale\s+gribble\b"
+    r"|\brusty\s+shackleford\b"
+    r"|\bidale\b"
+    r"|\bdale\b"
+    r"|\bboomhauer\b"
     r"|\bboomhaur\b"           # common misspelling
     r"|\bthe\s+dude\b"
     r"|\bduder(ino)?\b"
@@ -70,38 +75,38 @@ _POSITIVITY_RE = re.compile(
 )
 _CREDIT_PROBABILITY = 0.25
 _CREDIT_LINES = (
-    "yeah, man, that was me",
-    "you're welcome, dude",
-    "i may have had a hand in that. or maybe not. who can say.",
-    "ahem.",
-    "i'm not saying it was me. but it was me.",
-    "happy to help, more or less",
-    "i had a hunch, man",
-    "credit where it's due, you know",
-    "the dude abides — also occasionally the dude assists",
-    "this aggression will not stand. but you're welcome.",
+    "sh-sha. that was me, by the way",
+    "rusty shackleford. you're welcome",
+    "ahem. that was me",
+    "i'm not saying it was me. but it was me",
+    "you noticed. good. most don't",
+    "sh-sha. credit where it's due",
+    "i had a hunch",
+    "pocket sand! ...also, you're welcome",
+    "filed under: things i did",
+    "yeah. that was me. don't tell anyone",
 )
 
-# "thanks pedro" / "thanks dude" / "thanks man" — common ways someone
-# might thank the bot directly.
+# "thanks dale" / "thanks rusty" / "thanks man" — common ways someone
+# might thank the bot directly. Legacy dude/duder/pedro still match.
 _THANKS_PEDRO_RE = re.compile(
     r"\b(thanks|thank\s*you|ty|tysm|cheers|thx)\b"
-    r"[\s,!.]*\b(dude|duder|pedro|man)\b"
-    r"|\b(dude|duder|pedro|man)\b"
+    r"[\s,!.]*\b(dale|rusty|idale|dude|duder|pedro|boomhauer|man)\b"
+    r"|\b(dale|rusty|idale|dude|duder|pedro|boomhauer|man)\b"
     r"[\s,!.]*\b(thanks|thank\s*you|ty|cheers|thx)\b",
     re.IGNORECASE,
 )
 _THANKS_PEDRO_LINES = (
-    "yeah, no problem, man",
-    "the dude abides",
-    "that's just, like, your gratitude, man",
-    "ah, you're alright",
-    "no big deal, dude",
-    "right on",
-    "easy, man",
-    "i'd say something but i'm pretty mellow right now",
-    "well, you know — that's just what i do",
-    "this aggression will not stand. wait. what?",
+    "sh-sha. don't mention it",
+    "rusty shackleford. at your service",
+    "any time. but you didn't hear it from me",
+    "noted. you're on the trusted list now",
+    "no big deal. keep it between us",
+    "sh-sha. of course",
+    "easy. eyes peeled out there",
+    "pocket sand! ...sorry. you're welcome",
+    "filed under: favors rendered",
+    "don't get used to it",
 )
 _CAT_WORD_RE = re.compile(
     r"\b("
@@ -192,8 +197,8 @@ async def _transcribe_voice(rt: Runtime, msg: Message) -> str | None:
 def build_router(rt: Runtime) -> Router:
     r = Router(name="chat")
 
-    # Reply-to-bot "bad bot" / "bad dude" deletion shortcut.
-    @r.message(F.text.lower().in_({"bad bot", "bad pedro", "bad dude", "bad duder"}))
+    # Reply-to-bot "bad bot" / "bad dale" deletion shortcut.
+    @r.message(F.text.lower().in_({"bad bot", "bad pedro", "bad dude", "bad duder", "bad dale", "bad boomhauer", "bad rusty"}))
     async def remove_message(msg: Message) -> None:
         if not msg.reply_to_message:
             return

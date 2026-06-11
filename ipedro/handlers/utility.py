@@ -496,7 +496,7 @@ def build_router(rt: Runtime) -> Router:
 
     @r.message(Command("this_or_that"))
     async def this_or_that(msg: Message) -> None:
-        """/this_or_that A | B — Boomhauer decides, dramatically."""
+        """/this_or_that A | B — Dale decides, dramatically."""
         await get_or_create_chat_config(rt, msg)
         raw = (msg.text or "").split(None, 1)
         if len(raw) < 2 or "|" not in raw[1]:
@@ -521,7 +521,7 @@ def build_router(rt: Runtime) -> Router:
 
     @r.message(Command("echo"))
     async def echo(msg: Message) -> None:
-        """/echo @user [topic] — Boomhauer mimics that user's style."""
+        """/echo @user [topic] — Dale mimics that user's style."""
         await get_or_create_chat_config(rt, msg)
         user_id, name = await _resolve_target_user(rt, msg)
         if user_id is None:
@@ -604,7 +604,7 @@ def build_router(rt: Runtime) -> Router:
 
     @r.message(Command("lyric"))
     async def lyric(msg: Message) -> None:
-        """/lyric <line> — Boomhauer confidently mishears the lyric."""
+        """/lyric <line> — Dale confidently mishears the lyric."""
         await get_or_create_chat_config(rt, msg)
         parts = (msg.text or "").split(None, 1)
         if len(parts) < 2:
