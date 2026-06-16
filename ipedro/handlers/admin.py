@@ -1034,10 +1034,13 @@ def build_router(rt: Runtime) -> Router:
         body = _config_wizard_header(cfg, target_chat_id, is_dm_scoped=True)
         kb = _config_keyboard(cfg, target_chat_id=target_chat_id)
         if reply_to:
-            await reply_to.reply(body, reply_markup=kb, disable_notification=True)
+            await reply_to.reply(
+                body, reply_markup=kb, disable_notification=True,
+                parse_mode="HTML",
+            )
         elif edit_in:
             try:
-                await edit_in.edit_text(body, reply_markup=kb)
+                await edit_in.edit_text(body, reply_markup=kb, parse_mode="HTML")
             except TelegramBadRequest:
                 pass
 

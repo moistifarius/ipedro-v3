@@ -702,6 +702,7 @@ def build_router(rt: Runtime) -> Router:
             _config_wizard_header(cfg, msg.chat.id, is_dm_scoped=False),
             reply_markup=_config_keyboard(cfg, target_chat_id=msg.chat.id),
             disable_notification=True,
+            parse_mode="HTML",
         )
 
     @r.callback_query(F.data.startswith("cfg:"))
@@ -748,20 +749,37 @@ def build_router(rt: Runtime) -> Router:
                 await rt.chats.update_config(
                     target_chat_id, response_policy=new_policy,
                 )
+        elif field.startswith("ambient:"):
+            try:
+                new_ambient = float(field.split(":", 1)[1])
+            except ValueError:
+                await cb.answer("Bad ambient value.", show_alert=True)
+                return
+            new_ambient = max(0.0, min(1.0, new_ambient))
+            await rt.chats.update_config(
+                target_chat_id, ambient_probability=new_ambient,
+            )
         elif field.startswith("persona:"):
             new_persona = field.split(":", 1)[1]
             if new_persona in ("dude", "pedro", "neutral"):
                 await rt.chats.update_config(
                     target_chat_id, persona=new_persona, persona_custom=None,
                 )
+        elif field == "custompersona:clear":
+            await rt.chats.update_config(target_chat_id, persona_custom=None)
         new_cfg = await rt.chats.get_config(target_chat_id)
         # DM-scoped means the cb.message.chat.id (where the wizard is shown)
         # differs from the target_chat_id (whose config we're editing).
         is_dm_scoped = cb.message.chat.id != target_chat_id
         try:
             await cb.message.edit_text(
-                _config_wizard_header(new_cfg, target_chat_id, is_dm_scoped=is_dm_scoped),
-                reply_markup=_config_keyboard(new_cfg, target_chat_id=target_chat_id),
+                _config_wizard_header(
+                    new_cfg, target_chat_id, is_dm_scoped=is_dm_scoped,
+                ),
+                reply_markup=_config_keyboard(
+                    new_cfg, target_chat_id=target_chat_id,
+                ),
+                parse_mode="HTML",
             )
         except Exception:
             pass
@@ -771,22 +789,94 @@ def build_router(rt: Runtime) -> Router:
 
 
 def _config_wizard_header(cfg, target_chat_id: int, *, is_dm_scoped: bool) -> str:
-    """Build the header line shown above the wizard keyboard.
+    """Build the multi-line status panel shown above the wizard keyboard.
 
-    DM-scoped renders surface the target chat id so the admin can see at a
-    glance which chat they're editing. In-group renders keep the original
-    short label.
+    Displays every field on a ChatConfig row so the admin can see the full
+    state of a chat in one glance. The format below is paired with the
+    keyboard so a button-press → row refresh shows the new value in-line.
+    DM-scoped renders include the target chat id in the title.
     """
-    if is_dm_scoped:
-        return f"⚙️ Settings for chat {target_chat_id}:"
-    return "⚙️ Chat settings:"
+    on, off = "✅", "⛔️"
+    title = (
+        f"⚙️ <b>Settings for chat <code>{target_chat_id}</code></b>"
+        if is_dm_scoped else "⚙️ <b>Chat settings</b>"
+    )
+
+    custom = (cfg.persona_custom or "").strip()
+    custom_line = (
+        f"   custom override: <i>{_truncate(custom, 80)}</i>"
+        if custom else "   custom override: <i>(none)</i>"
+    )
+
+    # 'g' trims trailing zeros so 0.03→'3%', 0.075→'7.5%', 0.00→'0%'.
+    ambient_pct = f"{cfg.ambient_probability * 100:g}%"
+
+    return (
+        f"{title}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📡 <b>Response policy:</b> <code>{cfg.response_policy}</code>\n"
+        f"   ambient probability: <code>{ambient_pct}</code> "
+        f"(<code>{cfg.ambient_probability:.2f}</code>)\n"
+        f"🎭 <b>Persona:</b> <code>{cfg.persona}</code>\n"
+        f"{custom_line}\n"
+        f"\n"
+        f"<b>Features</b>\n"
+        f"   {on if cfg.duckhunt_enabled else off} duckhunt"
+        f"   {on if cfg.share_photo_enabled else off} sharephoto\n"
+        f"   {on if cfg.comic_enabled else off} comic"
+        f"   {on if cfg.fortune_enabled else off} fortune\n"
+        f"   {on if cfg.voice_transcribe else off} voice"
+        f"   {on if cfg.memory_enabled else off} memory\n"
+        f"   {on if cfg.ether_enabled else off} ether"
+        f"   {on if cfg.duck_names_public else off} duck-names public\n"
+    )
+
+
+def _truncate(text: str, limit: int) -> str:
+    """Shorten text to ``limit`` chars with an ellipsis when it overflows.
+    Used by the wizard header for persona_custom previews."""
+    text = text.replace("\n", " ").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+# Ambient probability presets exposed in the wizard. Tuned so an admin can
+# hit any reasonable spot (effectively-off → talkative) without having to
+# drop to the /chat_config slash for a precise number; the slash command is
+# still the way to set an arbitrary value like 0.07.
+_AMBIENT_PRESETS: tuple[tuple[str, float], ...] = (
+    ("0%",   0.00),
+    ("1%",   0.01),
+    ("3%",   0.03),
+    ("10%",  0.10),
+    ("25%",  0.25),
+    ("50%",  0.50),
+    ("100%", 1.00),
+)
+
+
+def _ambient_label(label: str, current: float, target: float) -> str:
+    """Mark the currently-active ambient preset with a leading dot so the
+    admin can see at a glance which preset (if any) matches the live value."""
+    return f"• {label}" if abs(current - target) < 1e-6 else label
 
 
 def _config_keyboard(cfg, *, target_chat_id: int) -> InlineKeyboardMarkup:
-    """Build the /config wizard keyboard. Mirrors fields editable via /chat_config.
+    """Build the /config wizard keyboard.
 
-    target_chat_id is encoded into every callback so the handler can edit the
-    config row of an arbitrary chat (used by the DM-scoped /config_for flow).
+    Every chat_config field is reachable from this keyboard:
+      - All 8 feature booleans (duckhunt, sharephoto, comic, fortune,
+        voice, memory, ether, ducknames public).
+      - response_policy (5 named options).
+      - ambient_probability (preset row from 0% to 100%; slash command
+        still owns the in-between values).
+      - persona (built-in choices) + clear-custom button so a stale
+        persona_custom override can be wiped in one tap.
+
+    target_chat_id is encoded into every callback so the handler can edit
+    the config row of an arbitrary chat (used by the DM-scoped
+    /config_for flow).
     """
 
     def b(label: str, data: str) -> InlineKeyboardButton:
@@ -794,18 +884,14 @@ def _config_keyboard(cfg, *, target_chat_id: int) -> InlineKeyboardMarkup:
             text=label, callback_data=f"cfg:{target_chat_id}:{data}",
         )
 
-    def noop_btn(label: str) -> InlineKeyboardButton:
-        return InlineKeyboardButton(
-            text=label, callback_data=f"cfg:{target_chat_id}:noop",
-        )
-
     on = "ON"
     off = "off"
 
-    rows = [
+    rows: list[list[InlineKeyboardButton]] = [
         [
             b(f"Duckhunt: {on if cfg.duckhunt_enabled else off}", "duckhunt"),
-            b(f"Sharephoto: {on if cfg.share_photo_enabled else off}", "sharephoto"),
+            b(f"Sharephoto: {on if cfg.share_photo_enabled else off}",
+              "sharephoto"),
         ],
         [
             b(f"Comic: {on if cfg.comic_enabled else off}", "comic"),
@@ -821,9 +907,6 @@ def _config_keyboard(cfg, *, target_chat_id: int) -> InlineKeyboardMarkup:
               "ducknames"),
         ],
         [
-            noop_btn(f"Policy: {cfg.response_policy}"),
-        ],
-        [
             b("commands", "policy:commands"),
             b("mention", "policy:mention"),
             b("reply", "policy:reply"),
@@ -832,14 +915,23 @@ def _config_keyboard(cfg, *, target_chat_id: int) -> InlineKeyboardMarkup:
             b("ambient", "policy:ambient"),
             b("always", "policy:always"),
         ],
-        [
-            noop_btn(f"Persona: {cfg.persona}"),
-        ],
-        [
-            b("dude", "persona:dude"),
-            b("neutral", "persona:neutral"),
-        ],
     ]
+    # Ambient probability presets: split into two rows of 4 + 3 so labels
+    # stay readable on a narrow mobile screen.
+    ambient_buttons = [
+        b(_ambient_label(label, cfg.ambient_probability, target),
+          f"ambient:{target:.2f}")
+        for label, target in _AMBIENT_PRESETS
+    ]
+    rows.append(ambient_buttons[:4])
+    rows.append(ambient_buttons[4:])
+    # Persona row + clear-custom (only useful when an override is set, but
+    # we show it always so the keyboard shape is stable).
+    rows.append([
+        b("dude", "persona:dude"),
+        b("neutral", "persona:neutral"),
+        b("🧹 clear custom", "custompersona:clear"),
+    ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
