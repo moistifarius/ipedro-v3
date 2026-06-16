@@ -275,11 +275,7 @@ def _clock_caption(kind: str) -> str:
     """The 'you're on the clock' line appended to a challenge message, so
     the player knows there's a time limit before they wander off to Google."""
     secs = challenge_time_limit_seconds(kind)
-    if kind == "trivia":
-        return f"⏱ {secs} seconds on the clock — no Googling, no lifelines."
-    if kind == "recipe":
-        return f"⏱ {secs} seconds. Cook fast."
-    return f"⏱ {secs} seconds."
+    return f"⏱ {secs} seconds on the clock."
 
 
 async def _issue_bef_challenge(

@@ -575,5 +575,6 @@ def test_clock_caption_states_the_time_limit():
         cap = _clock_caption(kind)
         assert str(secs) in cap
         assert "⏱" in cap
-    # Trivia spells out the no-Googling intent.
-    assert "Googling" in _clock_caption("trivia")
+        assert "on the clock" in cap
+    # Trivia's clock is the headline 30s.
+    assert _clock_caption("trivia") == "⏱ 30 seconds on the clock."
