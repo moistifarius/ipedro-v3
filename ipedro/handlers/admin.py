@@ -23,6 +23,12 @@ from ipedro.duckhunt.debug_toggles import (
 from ipedro.duckhunt.spawner import (
     build_quack_message, duckhunt_enabled_chat_ids, duckhunt_enabled_chats,
 )
+from ipedro.handlers.command_catalog import (
+    CATEGORIES, COMMANDS,
+    Command as CatalogCommand,
+    categories_in_order, category_by_key, command_by_slug,
+    commands_in_category,
+)
 from ipedro.handlers.common import require_admin
 from ipedro.kv import kv_delete, kv_get, kv_set
 from ipedro.logging_setup import recent_log_lines
@@ -317,84 +323,138 @@ def _aip_keyboard() -> InlineKeyboardMarkup:
 
 
 # ----- /manage hub keyboards -------------------------------------------------
+# The /manage hub is generated from ipedro.handlers.command_catalog.COMMANDS.
+# Top menu = one button per Category in declaration order. Each category
+# submenu lists every command tagged that category, generated below.
+# Tapping a command-leaf with a wired ``action`` routes to that existing
+# mgm:<…> leaf; tapping a card-leaf shows a description + usage hint.
+#
+# The leaf manifest ``_MGM_LEAVES`` is derived from the catalog so adding a
+# new command (or wiring an existing action) updates the manifest
+# automatically — no parallel list to keep in sync.
+
+# Category-key → menu callback for the top-level grid. Stable shape so old
+# tests that reach for ``mgm:memory`` / ``mgm:duck`` / etc. still resolve;
+# the new categories (basics, ai, quotes, …) extend the set.
+def _mgm_cat_data(category_key: str) -> str:
+    """Callback data for a top-level category button.
+
+    For backwards compatibility, the original five admin categories keep
+    their short callback names (mgm:memory, mgm:duck, mgm:ai, mgm:chats,
+    mgm:debug). New categories use the generic ``mgm:cat:<key>`` form.
+    """
+    legacy = {
+        "memory":   "mgm:memory",
+        "duckhunt": "mgm:duck",
+        "ai_admin": "mgm:ai",
+        "chats":    "mgm:chats",
+        "debug":    "mgm:debug",
+    }
+    return legacy.get(category_key, f"mgm:cat:{category_key}")
+
+
 def _mgm_top_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💾 Memory",          callback_data="mgm:memory")],
-        [InlineKeyboardButton(text="🦆 Duckhunt",        callback_data="mgm:duck")],
-        [InlineKeyboardButton(text="🤖 AI providers",    callback_data="mgm:ai")],
-        [InlineKeyboardButton(text="💬 Chats",           callback_data="mgm:chats")],
-        [InlineKeyboardButton(text="🛠 Debug & status",  callback_data="mgm:debug")],
+    """Top-of-hub keyboard — one row per category, in catalog order."""
+    rows = [
+        [InlineKeyboardButton(
+            text=cat.label, callback_data=_mgm_cat_data(cat.key),
+        )]
+        for cat in categories_in_order()
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _mgm_category_submenu(category_key: str) -> InlineKeyboardMarkup:
+    """Submenu for one category: a button per command + a 'back' row.
+
+    Wired commands (action != None) route to their existing mgm: leaf;
+    card commands show a usage-hint screen at mgm:cmd:<slug>.
+    """
+    cat_back = _mgm_cat_data(category_key)
+    # The back row links back to the hub. The category-specific submenu
+    # IS the second-level screen, so 'back' from here goes to the top.
+    rows: list[list[InlineKeyboardButton]] = []
+    for cmd in commands_in_category(category_key):
+        data = cmd.action or f"mgm:cmd:{cmd.slug}"
+        rows.append([InlineKeyboardButton(text=cmd.name, callback_data=data)])
+    rows.append([
+        InlineKeyboardButton(text="← back", callback_data="mgm:top"),
     ])
+    # ``cat_back`` is captured here purely for future use (e.g. nested
+    # subsections); intentionally unused at this depth.
+    _ = cat_back
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+# Backwards-compatible aliases for the original five admin submenus. Tests
+# (and the legacy dispatcher path) reach for these names — keeping them
+# avoids churn.
 def _mgm_memory_submenu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Facts (per chat)",        callback_data="mgm:memory:facts")],
-        [InlineKeyboardButton(text="Stats (per chat)",        callback_data="mgm:memory:stats")],
-        [InlineKeyboardButton(text="Summary (per chat)",      callback_data="mgm:memory:summary")],
-        [InlineKeyboardButton(text="Force summarize",         callback_data="mgm:memory:force")],
-        [InlineKeyboardButton(text="← back",                  callback_data="mgm:top")],
-    ])
+    return _mgm_category_submenu("memory")
 
 
 def _mgm_duck_submenu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Edit user's stats",       callback_data="mgm:duck:edit")],
-        [InlineKeyboardButton(text="Reset stats",             callback_data="mgm:duck:reset")],
-        [InlineKeyboardButton(text="Spawn in one chat",       callback_data="mgm:duck:spawn")],
-        [InlineKeyboardButton(text="Spawn in all chats",      callback_data="mgm:duck:spawnall")],
-        [InlineKeyboardButton(text="← back",                  callback_data="mgm:top")],
-    ])
+    """Duckhunt admin submenu (chat-spawn + stats editing).
+
+    The catalog also includes the public /duckhunt /quackflag /duckstats
+    rows under the same 'duckhunt' category; admins see all of them here,
+    which is the whole point of the unified hub.
+    """
+    return _mgm_category_submenu("duckhunt")
 
 
 def _mgm_ai_submenu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Show provider",           callback_data="mgm:ai:show")],
-        [InlineKeyboardButton(text="→ Claude",                callback_data="aip:switch:claude")],
-        [InlineKeyboardButton(text="→ OpenAI",                callback_data="aip:switch:openai")],
-        [InlineKeyboardButton(text="Claude models",           callback_data="aip:list:claude")],
-        [InlineKeyboardButton(text="OpenAI models",           callback_data="aip:list:openai")],
-        [InlineKeyboardButton(text="← back",                  callback_data="mgm:top")],
-    ])
+    """AI-provider admin submenu plus cross-links into the aip:* picker."""
+    base_rows = list(_mgm_category_submenu("ai_admin").inline_keyboard)
+    # Insert provider/model cross-links above the 'back' row so the
+    # existing aip:* dispatcher (lives in admin.py's /ai_provider section)
+    # remains directly tappable from /manage.
+    cross_links = [
+        [InlineKeyboardButton(text="→ Claude", callback_data="aip:switch:claude")],
+        [InlineKeyboardButton(text="→ OpenAI", callback_data="aip:switch:openai")],
+        [InlineKeyboardButton(text="Claude models", callback_data="aip:list:claude")],
+        [InlineKeyboardButton(text="OpenAI models", callback_data="aip:list:openai")],
+    ]
+    base_rows[-1:-1] = cross_links
+    return InlineKeyboardMarkup(inline_keyboard=base_rows)
 
 
 def _mgm_chats_submenu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="List chat ids",           callback_data="mgm:chats:list")],
-        [InlineKeyboardButton(text="Pick chat (copy id)",     callback_data="mgm:chats:pick")],
-        [InlineKeyboardButton(text="Configure a chat",        callback_data="mgm:chats:config")],
-        [InlineKeyboardButton(text="🤫 Silenced chats",        callback_data="mgm:chats:silenced")],
-        [InlineKeyboardButton(text="← back",                  callback_data="mgm:top")],
-    ])
+    return _mgm_category_submenu("chats")
 
 
 def _mgm_debug_submenu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Status",                  callback_data="mgm:debug:status")],
-        [InlineKeyboardButton(text="Recent logs",             callback_data="mgm:debug:logs")],
-        [InlineKeyboardButton(text="Cost (7d)",               callback_data="mgm:debug:cost")],
-        [InlineKeyboardButton(text="Command log",             callback_data="mgm:debug:cmdlog")],
-        [InlineKeyboardButton(text="Toggles (/debug_toggle)", callback_data="mgm:debug:toggles")],
-        [InlineKeyboardButton(text="Clear duck (/debug_clear_duck)", callback_data="mgm:debug:cleard")],
-        [InlineKeyboardButton(text="← back",                  callback_data="mgm:top")],
-    ])
+    return _mgm_category_submenu("debug")
 
 
-# Manifest of valid mgm:* leaves used by the dispatcher and the
-# completeness test. Keep this in sync with the submenu builders above.
-_MGM_LEAVES: tuple[str, ...] = (
+def _all_catalog_leaves() -> tuple[str, ...]:
+    """Every mgm: callback the catalog can emit."""
+    cmd_card_leaves = tuple(f"mgm:cmd:{c.slug}" for c in COMMANDS)
+    cat_leaves = tuple(_mgm_cat_data(cat.key) for cat in CATEGORIES)
+    return cmd_card_leaves + cat_leaves
+
+
+# Static action leaves wired to dedicated handlers below the catalog (chat
+# pickers, status panels, the silent-chat add flow). Pair with
+# _all_catalog_leaves() to get the complete manifest.
+_STATIC_MGM_LEAVES: tuple[str, ...] = (
     "mgm:top",
-    "mgm:memory", "mgm:memory:facts", "mgm:memory:stats",
+    "mgm:memory:facts", "mgm:memory:stats",
     "mgm:memory:summary", "mgm:memory:force",
-    "mgm:duck", "mgm:duck:edit", "mgm:duck:reset",
+    "mgm:duck:edit", "mgm:duck:reset",
     "mgm:duck:spawn", "mgm:duck:spawnall",
-    "mgm:ai", "mgm:ai:show",
-    "mgm:chats", "mgm:chats:list", "mgm:chats:pick", "mgm:chats:config",
+    "mgm:ai:show",
+    "mgm:chats:list", "mgm:chats:pick", "mgm:chats:config",
     "mgm:chats:silenced", "mgm:chats:silenced:add",
-    "mgm:debug", "mgm:debug:status", "mgm:debug:logs",
+    "mgm:debug:status", "mgm:debug:logs",
     "mgm:debug:cost", "mgm:debug:cmdlog",
     "mgm:debug:toggles", "mgm:debug:cleard",
 )
+
+
+_MGM_LEAVES: tuple[str, ...] = tuple(sorted(set(
+    _STATIC_MGM_LEAVES + _all_catalog_leaves()
+)))
 
 
 # Known text models for /ai_model and aip:list pickers. Promotes the
@@ -3180,6 +3240,42 @@ def build_router(rt: Runtime) -> Router:
             disable_notification=True,
         )
 
+    async def _mgm_render_command_card(edit_in: Message, cmd: CatalogCommand) -> None:
+        """Render the generic command card.
+
+        The catalog row's usage line is wrapped in <code> so Telegram
+        renders a tap-to-copy block — perfect for free-text commands
+        that an inline keyboard can't gather arguments for.
+        """
+        # Escape only & < > so user-supplied catalog text can't break HTML;
+        # the catalog is all admin-controlled but defensive escaping is
+        # cheap.
+        def esc(s: str) -> str:
+            return (
+                s.replace("&", "&amp;")
+                 .replace("<", "&lt;")
+                 .replace(">", "&gt;")
+            )
+
+        body = (
+            f"<b>{esc(cmd.name)}</b>\n"
+            f"{esc(cmd.desc)}\n"
+            f"\n"
+            f"<b>Usage</b> (tap to copy):\n"
+            f"<code>{esc(cmd.usage)}</code>"
+        )
+        # Resolve which parent submenu to surface in the back row so the
+        # admin lands one screen up instead of all the way at the hub.
+        back_data = _mgm_cat_data(cmd.category)
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="← back", callback_data=back_data),
+            _home_button(),
+        ]])
+        try:
+            await edit_in.edit_text(body, reply_markup=kb, parse_mode="HTML")
+        except TelegramBadRequest:
+            pass
+
     async def _mgm_render_status(edit_in: Message) -> None:
         """Render the Debug → Status panel."""
         # Memory diagnostics via existing repo APIs.
@@ -3419,6 +3515,33 @@ def build_router(rt: Runtime) -> Router:
                     )
                 except TelegramBadRequest:
                     pass
+            await cb.answer()
+            return
+        # New top-level categories (basics, ai, quotes, reminders, dm,
+        # mod) and any future ones — the legacy five above use shorter
+        # callback names for backwards compat.
+        if data.startswith("mgm:cat:"):
+            cat_key = data.split(":", 2)[2]
+            cat = category_by_key(cat_key)
+            if msg and cat:
+                try:
+                    await msg.edit_text(
+                        f"{cat.label}\n{cat.blurb}",
+                        reply_markup=_mgm_category_submenu(cat_key),
+                    )
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        # Command card — generic renderer for any catalog row WITHOUT a
+        # wired action. Shows the description plus a copyable
+        # <code>/usage</code> hint so the admin can grab the form,
+        # paste it, and fill in args.
+        if data.startswith("mgm:cmd:"):
+            slug = data.split(":", 2)[2]
+            cmd = command_by_slug(slug)
+            if msg and cmd:
+                await _mgm_render_command_card(msg, cmd)
             await cb.answer()
             return
 
