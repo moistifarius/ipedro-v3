@@ -15,6 +15,7 @@ from ipedro.bot_messages import track
 from ipedro.chat_policy import IncomingMessage, should_respond
 from ipedro.duckhunt.captcha_gen import matches as captcha_matches
 from ipedro.duckhunt.debug_toggles import is_on as debug_is_on
+from ipedro.duckhunt.scoring import challenge_is_over_time, over_time_line
 from ipedro.duckhunt.verdicts import parse_verdict
 from ipedro.handlers.common import catify, get_or_create_chat_config
 from ipedro.memory.context_builder import build_context
@@ -268,6 +269,26 @@ def build_router(rt: Runtime) -> Router:
                 # Debug toggles let an admin short-circuit the judge so they
                 # can rapidly walk both branches of the challenge flow.
                 admin_id = msg.from_user.id
+                # Time limit: a late answer fails fast (no AI judge spend)
+                # and clears the challenge, so the next bef earns a fresh,
+                # different question — looking the old one up is useless.
+                # Admins driving the pass/fail toggles bypass the clock.
+                _debug_challenge = (
+                    debug_is_on(admin_id, "always_pass_challenge")
+                    or debug_is_on(admin_id, "always_fail_challenge")
+                )
+                if not _debug_challenge and challenge_is_over_time(
+                    challenge.kind, challenge.created_at,
+                ):
+                    await rt.duckhunt.clear_bef_challenge(
+                        msg.chat.id, msg.from_user.id,
+                    )
+                    log.info(
+                        "bef challenge timed out: chat=%s user=%s kind=%s",
+                        msg.chat.id, msg.from_user.id, challenge.kind,
+                    )
+                    await msg.reply(over_time_line(), disable_notification=True)
+                    return
                 if debug_is_on(admin_id, "always_pass_challenge"):
                     verdict = True
                     line = "Passed. [debug: always_pass_challenge]"

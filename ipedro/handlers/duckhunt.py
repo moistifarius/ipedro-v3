@@ -14,7 +14,9 @@ from aiogram.types import BufferedInputFile, Message
 from ipedro.bot_messages import track
 from ipedro.duckhunt.captcha_gen import make_captcha
 from ipedro.duckhunt.debug_toggles import is_on as debug_is_on
-from ipedro.duckhunt.scoring import should_challenge_on_miss
+from ipedro.duckhunt.scoring import (
+    challenge_time_limit_seconds, should_challenge_on_miss,
+)
 from ipedro.duckhunt.spawner import build_quack_message_for
 from ipedro.duckhunt.verdicts import parse_verdict
 from ipedro.handlers.common import display_name, get_or_create_chat_config
@@ -242,6 +244,44 @@ def _challenge_intro(action: str, kind: str) -> str:
     return random.choice(pool)
 
 
+# Game-show framings for trivia questions. One is picked at random per
+# trivia challenge and spliced into the generation prompt so the duck's
+# pop quiz reads like a real game show. Kept here (not in prompts.py) so
+# the rotation is easy to tune from user feedback.
+_TRIVIA_GAME_SHOW_STYLES: tuple[str, ...] = (
+    "Family Feud — open with 'Survey says!' or 'We asked 100 people' and "
+    "ask them to name something from a category. Several answers are "
+    "acceptable; they only need to name one plausible one.",
+
+    "Trivial Pursuit — a single-fact question with exactly one correct "
+    "answer, like a trivia card. You may name a colored category wedge "
+    "(history=brown, geography=blue, arts=pink, science=green, "
+    "sports=orange, entertainment=yellow).",
+
+    "Jeopardy — state the answer as a clue/fact and require the player to "
+    "respond in the form of a question. You may give it a CATEGORY and a "
+    "dollar value (e.g. 'WORLD CAPITALS for $400').",
+)
+
+
+def _trivia_style_block() -> str:
+    """Pick a random game-show style and format it as a sub-bullet for
+    DUCK_BEF_CHALLENGE_PROMPT. Only used for trivia kind."""
+    style = random.choice(_TRIVIA_GAME_SHOW_STYLES)
+    return f"  GAME-SHOW STYLE for this one — {style}\n"
+
+
+def _clock_caption(kind: str) -> str:
+    """The 'you're on the clock' line appended to a challenge message, so
+    the player knows there's a time limit before they wander off to Google."""
+    secs = challenge_time_limit_seconds(kind)
+    if kind == "trivia":
+        return f"⏱ {secs} seconds on the clock — no Googling, no lifelines."
+    if kind == "recipe":
+        return f"⏱ {secs} seconds. Cook fast."
+    return f"⏱ {secs} seconds."
+
+
 async def _issue_bef_challenge(
     rt: Runtime, msg: Message, who: str, *,
     from_action: str = "bef",
@@ -264,12 +304,13 @@ async def _issue_bef_challenge(
         )[0]
     )
     intro = _challenge_intro(from_action, kind)
+    clock = _clock_caption(kind)
     if kind == "captcha":
         answer, png = make_captcha()
         try:
             prompt_msg = await msg.answer_photo(
                 BufferedInputFile(png, filename="captcha.png"),
-                caption=intro,
+                caption=f"{intro}\n{clock}",
                 disable_notification=True,
             )
         except Exception as exc:
@@ -282,11 +323,13 @@ async def _issue_bef_challenge(
 
     # Quick challenge prompt — Haiku quality is plenty here. For trivia,
     # splice in the per-chat recent-trivia list so it picks a fresh
-    # topic each time instead of looping the same handful of questions.
+    # topic each time, plus a random game-show style framing.
     avoid_block = _build_avoid_block(msg.chat.id, kind)
+    style_block = _trivia_style_block() if kind == "trivia" else ""
     challenge_text = await rt.openai.cheap_completion(
         DUCK_BEF_CHALLENGE_PROMPT.format(
-            display_name=who, kind=kind, avoid_block=avoid_block,
+            display_name=who, kind=kind,
+            avoid_block=avoid_block, style_block=style_block,
         ),
         max_tokens=200,
     )
@@ -299,7 +342,7 @@ async def _issue_bef_challenge(
     if kind == "trivia":
         _recent_trivia_for(msg.chat.id).append(challenge_text)
     prompt_msg = await msg.answer(
-        f"{intro}\n\n{challenge_text}",
+        f"{intro}\n\n{challenge_text}\n\n{clock}",
         disable_notification=True,
     )
     await rt.duckhunt.set_bef_challenge(

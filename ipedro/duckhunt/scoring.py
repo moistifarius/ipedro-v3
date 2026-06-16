@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 
 # Tiers preserved for historical compatibility. Not consulted by gameplay
 # anymore; new spawns always tag as "common" via roll_rarity().
@@ -252,3 +252,67 @@ def ignore_outcome(rarity: str, rng: random.Random | None = None) -> ActionOutco
         message=r.choice(_IGNORE_WANDER_FLAVOR),
         resolves_duck=True,
     )
+
+
+# ----------------------------------------------------------- challenge clock
+# How long a player has to answer each challenge kind before the clock runs
+# out. Tight on trivia so they can't open a tab and Google it — the trivia
+# generator is tuned to ask game-show questions a knowledgeable person can
+# recall in seconds, so if you actually know it you have plenty of time, and
+# if you're searching for it you don't. Captcha (Googling doesn't help) and
+# recipe (creative typing takes longer) get more room.
+CHALLENGE_TIME_LIMITS: dict[str, int] = {
+    "trivia": 30,
+    "captcha": 45,
+    "recipe": 75,
+}
+_DEFAULT_CHALLENGE_TIME_LIMIT = 45
+
+
+def challenge_time_limit_seconds(kind: str) -> int:
+    """Seconds allowed to answer a challenge of this kind."""
+    return CHALLENGE_TIME_LIMITS.get(kind, _DEFAULT_CHALLENGE_TIME_LIMIT)
+
+
+def challenge_seconds_elapsed(
+    created_at: datetime | None, now: datetime | None = None,
+) -> float:
+    """Seconds between when the challenge was issued and ``now`` (default:
+    current UTC). Tolerant of a naive ``created_at`` (assumes UTC) and of a
+    missing one (returns 0.0 so a clockless challenge never times out)."""
+    if created_at is None:
+        return 0.0
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return (current - created_at).total_seconds()
+
+
+def challenge_is_over_time(
+    kind: str, created_at: datetime | None, now: datetime | None = None,
+) -> bool:
+    """True if the answer arrived after this kind's clock expired."""
+    return (
+        challenge_seconds_elapsed(created_at, now)
+        > challenge_time_limit_seconds(kind)
+    )
+
+
+# Said when a challenge answer lands after the clock ran out. Paranoid
+# voice — the duck assumes you were stalling / looking it up, because of
+# course you were. Picked at random.
+_OVER_TIME_FLAVOR: tuple[str, ...] = (
+    "⏱ Time. Too slow — a real answer comes faster than a search bar. Try again.",
+    "⏱ Clock's out. Hesitation like that goes in the file.",
+    "⏱ Buzzer. You stalled, the duck noticed, no deal.",
+    "⏱ Too slow. Sh-sha. You were looking that up, weren't you. Weren't you.",
+    "⏱ Time's up. Civilians answer on instinct. That was a stall.",
+    "⏱ Too late. Whatever you were typing into that other tab — forget it.",
+)
+
+
+def over_time_line(rng: random.Random | None = None) -> str:
+    r = rng if rng is not None else random
+    return r.choice(_OVER_TIME_FLAVOR)

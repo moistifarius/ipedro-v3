@@ -539,3 +539,41 @@ def test_recent_trivia_deque_caps_at_per_chat_size():
     # Oldest dropped, newest preserved.
     assert "q0" not in buf
     assert f"q{_RECENT_TRIVIA_PER_CHAT + 4}" in buf
+
+
+def test_trivia_style_block_picks_a_game_show_framing():
+    """Every trivia question is framed as one of the game-show styles, and
+    the block is spliceable into DUCK_BEF_CHALLENGE_PROMPT's {style_block}."""
+    from ipedro.handlers.duckhunt import (
+        _TRIVIA_GAME_SHOW_STYLES, _trivia_style_block,
+    )
+    from ipedro.prompts import DUCK_BEF_CHALLENGE_PROMPT
+
+    seen = {_trivia_style_block() for _ in range(60)}
+    assert seen, "style block should never be empty for trivia"
+    for block in seen:
+        assert block.startswith("  GAME-SHOW STYLE for this one — ")
+        assert any(s in block for s in _TRIVIA_GAME_SHOW_STYLES)
+
+    # The prompt must accept style_block alongside the existing kwargs
+    # (a missing key would KeyError at issue time).
+    rendered = DUCK_BEF_CHALLENGE_PROMPT.format(
+        display_name="Matt", kind="trivia",
+        avoid_block="", style_block=_trivia_style_block(),
+    )
+    assert "GAME-SHOW STYLE" in rendered
+
+
+def test_clock_caption_states_the_time_limit():
+    """The challenge message tells the player they're on the clock, using
+    the kind's configured limit."""
+    from ipedro.duckhunt.scoring import challenge_time_limit_seconds
+    from ipedro.handlers.duckhunt import _clock_caption
+
+    for kind in ("trivia", "captcha", "recipe"):
+        secs = challenge_time_limit_seconds(kind)
+        cap = _clock_caption(kind)
+        assert str(secs) in cap
+        assert "⏱" in cap
+    # Trivia spells out the no-Googling intent.
+    assert "Googling" in _clock_caption("trivia")
