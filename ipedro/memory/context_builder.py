@@ -37,6 +37,28 @@ def _role_for(stored: StoredMessage) -> str:
     return "user"
 
 
+_NAME_PREFIX_SYSTEM = (
+    "This is a group chat with multiple users. Each user message is "
+    "prefixed with the speaker's display name and a colon "
+    "(e.g. 'Matt: ...'). Use those names to keep track of who said what, "
+    "and address people by name when it's natural to do so. Your own "
+    "replies are NOT prefixed — never write your own name as a prefix."
+)
+
+
+def _label_user_content(content: str, author_name: str | None) -> str:
+    """Prefix a user-role message with its speaker name (one-time;
+    don't double-prefix something that already starts with the same
+    label, e.g. on re-record paths)."""
+    name = (author_name or "").strip()
+    if not name:
+        return content
+    expected = f"{name}: "
+    if content.startswith(expected):
+        return content
+    return f"{expected}{content}"
+
+
 async def build_context(
     *,
     store: MemoryStore,
@@ -45,6 +67,7 @@ async def build_context(
     persona: str,
     persona_custom: str | None,
     latest_user_text: str,
+    latest_user_name: str | None = None,
     extra_system: str | None = None,
     memory_enabled: bool = True,
 ) -> BuiltContext:
@@ -64,6 +87,10 @@ async def build_context(
     # 1. Persona
     persona_text = resolve_persona(persona, persona_custom)
     _add({"role": "system", "content": persona_text})
+    # 1b. Tell the model the user-name labeling convention so it can
+    # distinguish speakers and address people properly. Kept compact so
+    # the budget hit is small.
+    _add({"role": "system", "content": _NAME_PREFIX_SYSTEM})
     if extra_system:
         _add({"role": "system", "content": extra_system})
 
@@ -102,10 +129,17 @@ async def build_context(
                 )
                 _add({"role": "system", "content": retrieved})
 
-        # 5. Recent raw messages (chronological, last N).
+        # 5. Recent raw messages (chronological, last N). User-role turns
+        # get their speaker's display name prefixed so the model can tell
+        # who said what.
         recent = await store.recent_messages(chat_id, settings.context_recent_messages)
         for m in recent:
-            if not _add({"role": _role_for(m), "content": m.content}):
+            role = _role_for(m)
+            content = (
+                _label_user_content(m.content, m.author_name)
+                if role == "user" else m.content
+            )
+            if not _add({"role": role, "content": content}):
                 break
 
     # 6. Ensure the conversation ends with a user message containing the
@@ -114,13 +148,14 @@ async def build_context(
     # disabled we'd otherwise end on a stale assistant turn (or nothing),
     # and Claude returns 400 ("conversation must end with a user message").
     if latest_user_text.strip():
+        labeled_latest = _label_user_content(latest_user_text, latest_user_name)
         last = messages[-1] if messages else None
         already_there = (
             last is not None
             and last.get("role") == "user"
-            and last.get("content") == latest_user_text
+            and last.get("content") == labeled_latest
         )
         if not already_there:
-            _add({"role": "user", "content": latest_user_text})
+            _add({"role": "user", "content": labeled_latest})
 
     return BuiltContext(messages=messages, tokens=used)

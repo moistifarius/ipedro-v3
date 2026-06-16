@@ -17,7 +17,7 @@ from ipedro.duckhunt.captcha_gen import matches as captcha_matches
 from ipedro.duckhunt.debug_toggles import is_on as debug_is_on
 from ipedro.duckhunt.scoring import challenge_is_over_time, over_time_line
 from ipedro.duckhunt.verdicts import parse_verdict
-from ipedro.handlers.common import catify, get_or_create_chat_config
+from ipedro.handlers.common import catify, display_name, get_or_create_chat_config
 from ipedro.memory.context_builder import build_context
 from ipedro.memory.summarizer import maybe_summarize
 from ipedro.prompts import CAT_FACT_PROMPT, DUCK_BEF_CHALLENGE_JUDGE_PROMPT
@@ -475,6 +475,9 @@ def build_router(rt: Runtime) -> Router:
             persona=cfg.persona,
             persona_custom=cfg.persona_custom,
             latest_user_text=text,
+            latest_user_name=(
+                display_name(msg.from_user) if msg.from_user else None
+            ),
             extra_system=extra,
             memory_enabled=cfg.memory_enabled,
         )

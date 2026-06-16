@@ -168,6 +168,29 @@ class StoredMessage:
     content: str
     tokens: int | None
     created_at: datetime
+    # Display name of the speaker, joined from the users table when the
+    # message is fetched via MessageRepo.recent / .range_for_summary.
+    # None for the bot's own assistant turns and for rows fetched through
+    # paths that don't perform the join. Callers that need to label a
+    # message in the AI context / summary use this directly.
+    author_name: str | None = None
+
+
+# SQL fragment used by every SELECT that wants a speaker-labeled row.
+# COALESCE picks the best name available: first_name+last_name → username
+# → a stable 'user<id>' fallback. Kept here so the format never drifts.
+_MESSAGE_WITH_NAME_SELECT = """
+    SELECT m.id, m.chat_id, m.message_id, m.user_id, m.role, m.content,
+           m.tokens, m.created_at,
+           COALESCE(
+               NULLIF(TRIM(CONCAT_WS(' ', u.first_name, u.last_name)), ''),
+               u.username,
+               CASE WHEN m.user_id IS NOT NULL
+                    THEN 'user' || m.user_id::text END
+           ) AS author_name
+      FROM messages m
+      LEFT JOIN users u ON u.user_id = m.user_id
+"""
 
 
 class MessageRepo:
@@ -198,13 +221,8 @@ class MessageRepo:
 
     async def recent(self, chat_id: int, limit: int) -> list[StoredMessage]:
         rows = await self.db.fetch(
-            """
-            SELECT id, chat_id, message_id, user_id, role, content, tokens, created_at
-              FROM messages
-             WHERE chat_id = $1
-             ORDER BY id DESC
-             LIMIT $2
-            """,
+            _MESSAGE_WITH_NAME_SELECT
+            + " WHERE m.chat_id = $1 ORDER BY m.id DESC LIMIT $2",
             chat_id, limit,
         )
         return [StoredMessage(**dict(r)) for r in reversed(rows)]
@@ -220,13 +238,8 @@ class MessageRepo:
         self, chat_id: int, after_id: int, limit: int
     ) -> list[StoredMessage]:
         rows = await self.db.fetch(
-            """
-            SELECT id, chat_id, message_id, user_id, role, content, tokens, created_at
-              FROM messages
-             WHERE chat_id = $1 AND id > $2
-             ORDER BY id ASC
-             LIMIT $3
-            """,
+            _MESSAGE_WITH_NAME_SELECT
+            + " WHERE m.chat_id = $1 AND m.id > $2 ORDER BY m.id ASC LIMIT $3",
             chat_id, after_id, limit,
         )
         return [StoredMessage(**dict(r)) for r in rows]

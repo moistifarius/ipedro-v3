@@ -44,10 +44,11 @@ class FakeStore:
         return self._semantic
 
 
-def _msg(content, role="user", mid=1):
+def _msg(content, role="user", mid=1, author_name="Matt"):
     return StoredMessage(
         id=mid, chat_id=1, message_id=mid, user_id=42, role=role,
         content=content, tokens=None, created_at=datetime.now(timezone.utc),
+        author_name=author_name if role == "user" else None,
     )
 
 
@@ -165,15 +166,18 @@ async def test_messages_always_end_with_user_when_text_is_set():
 async def test_messages_do_not_duplicate_existing_user_turn():
     """When memory is on, the just-recorded user message already lives at
     the tail of recent_messages — appending it again would inflate the
-    context and double-bill tokens."""
-    store = FakeStore(recent=[_msg("yo")])
+    context and double-bill tokens. Dedup compares the LABELED forms so
+    the recent-message label matches the final-turn label."""
+    store = FakeStore(recent=[_msg("yo", author_name="Matt")])
     built = await build_context(
         store=store, settings=_settings(), chat_id=1,
         persona="dude", persona_custom=None,
-        latest_user_text="yo",
+        latest_user_text="yo", latest_user_name="Matt",
     )
     user_turns = [m for m in built.messages if m["role"] == "user"]
     assert len(user_turns) == 1
+    # The single user turn is labeled.
+    assert user_turns[0]["content"] == "Matt: yo"
 
 
 @pytest.mark.asyncio
@@ -187,7 +191,7 @@ async def test_memory_disabled_skips_all_history_layers_and_ends_with_user():
     built = await build_context(
         store=store, settings=_settings(), chat_id=1,
         persona="dude", persona_custom=None,
-        latest_user_text="hello",
+        latest_user_text="hello", latest_user_name="Matt",
         memory_enabled=False,
     )
     # No semantic_search / list_facts / latest_summary call should fire.
@@ -195,7 +199,70 @@ async def test_memory_disabled_skips_all_history_layers_and_ends_with_user():
     assert store.facts_calls == 0
     assert store.summary_calls == 0
     assert store.recent_calls == 0
-    assert built.messages[-1] == {"role": "user", "content": "hello"}
+    assert built.messages[-1] == {"role": "user", "content": "Matt: hello"}
     # No history bled into the messages array.
     assert all(m.get("content") != "stale assistant turn"
                for m in built.messages)
+
+
+# ---------------------------- speaker-name labeling --------------------------
+@pytest.mark.asyncio
+async def test_user_turns_are_prefixed_with_speaker_name():
+    """When multiple users have been talking, each of their messages must
+    carry a name prefix so the model can tell them apart."""
+    store = FakeStore(recent=[
+        _msg("hey", role="user", mid=1, author_name="Matt"),
+        _msg("hello", role="user", mid=2, author_name="Sarah"),
+        _msg("welcome", role="assistant", mid=3),
+    ])
+    built = await build_context(
+        store=store, settings=_settings(), chat_id=1,
+        persona="dude", persona_custom=None,
+        latest_user_text="who's here", latest_user_name="Matt",
+    )
+    # Every user-role message now starts with '<Name>: '.
+    user_turns = [m for m in built.messages if m["role"] == "user"]
+    assert all(":" in m["content"].split(" ", 1)[0]
+               or m["content"].split(":", 1)[0].strip()
+               for m in user_turns)
+    contents = [m["content"] for m in user_turns]
+    assert "Matt: hey" in contents
+    assert "Sarah: hello" in contents
+    # Assistant turns are NOT prefixed (the bot doesn't quote its own name).
+    asst_turns = [m for m in built.messages if m["role"] == "assistant"]
+    assert all(not c["content"].startswith("Matt:") for c in asst_turns)
+    assert all(not c["content"].startswith("Sarah:") for c in asst_turns)
+
+
+@pytest.mark.asyncio
+async def test_user_turn_without_author_name_falls_through_unlabeled():
+    """Old rows that pre-date the JOIN won't have an author_name. They
+    should still appear (just unlabeled) — not crash and not get a stray
+    colon."""
+    store = FakeStore(recent=[_msg("legacy line", author_name=None)])
+    built = await build_context(
+        store=store, settings=_settings(), chat_id=1,
+        persona="dude", persona_custom=None,
+        latest_user_text="now", latest_user_name=None,
+    )
+    contents = [m["content"] for m in built.messages if m["role"] == "user"]
+    assert "legacy line" in contents
+    assert "now" in contents
+
+
+@pytest.mark.asyncio
+async def test_persona_system_explains_name_prefix_convention():
+    """The model needs to know WHY user messages are prefixed so it
+    understands the labels are speaker IDs, not part of the message
+    content."""
+    store = FakeStore(recent=[])
+    built = await build_context(
+        store=store, settings=_settings(), chat_id=1,
+        persona="dude", persona_custom=None,
+        latest_user_text="ping", latest_user_name="Matt",
+    )
+    system_blob = "\n".join(
+        m["content"] for m in built.messages if m["role"] == "system"
+    )
+    # The system prompt set explains the convention to the model.
+    assert "display name" in system_blob.lower() or "prefixed" in system_blob.lower()
