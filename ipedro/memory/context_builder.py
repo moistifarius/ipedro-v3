@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from ipedro.config import Settings
@@ -23,6 +24,11 @@ from ipedro.memory.tokens import count_tokens
 from ipedro.personas import resolve_persona
 
 log = logging.getLogger(__name__)
+
+# Gaps shorter than this between consecutive messages are part of a normal
+# back-and-forth and aren't worth annotating. At or above it, the bot gets
+# an inline "[… later]" marker so it perceives the passage of time.
+_GAP_MARK_THRESHOLD_SECONDS = 3600  # 1 hour
 
 
 @dataclass
@@ -59,6 +65,70 @@ def _label_user_content(content: str, author_name: str | None) -> str:
     return f"{expected}{content}"
 
 
+def _aware(dt: datetime | None) -> datetime | None:
+    """Coerce a possibly-naive datetime to UTC-aware (asyncpg gives us
+    aware datetimes, but tests/legacy rows may be naive)."""
+    if dt is None:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def _humanize_span(seconds: float, *, suffix: str) -> str:
+    """Render an elapsed span as a coarse human label, e.g.
+    '3 hours', '2 days', '5 weeks'. ``suffix`` is appended (' later' for
+    an inter-message marker, ' ago' for the silence-before-now note)."""
+    seconds = max(0.0, seconds)
+    minutes = seconds / 60
+    hours = seconds / 3600
+    days = seconds / 86400
+    if hours < 1:
+        n = max(1, round(minutes))
+        unit = "minute"
+        val = n
+    elif days < 1:
+        val = max(1, round(hours))
+        unit = "hour"
+    elif days < 14:
+        val = max(1, round(days))
+        unit = "day"
+    elif days < 60:
+        val = max(1, round(days / 7))
+        unit = "week"
+    elif days < 730:
+        val = max(1, round(days / 30))
+        unit = "month"
+    else:
+        val = max(1, round(days / 365))
+        unit = "year"
+    plural = "s" if val != 1 else ""
+    return f"about {val} {unit}{plural}{suffix}"
+
+
+def _gap_marker(prev: datetime | None, cur: datetime | None) -> str | None:
+    """An inline '[⏳ … later]' marker when two consecutive messages are
+    far enough apart to be worth flagging, else None."""
+    prev, cur = _aware(prev), _aware(cur)
+    if prev is None or cur is None:
+        return None
+    gap = (cur - prev).total_seconds()
+    if gap < _GAP_MARK_THRESHOLD_SECONDS:
+        return None
+    return f"[⏳ {_humanize_span(gap, suffix=' later')}]"
+
+
+def _format_now(now: datetime, tz) -> str:
+    """The 'right now it is …' system line, localized to the bot's tz."""
+    local = now.astimezone(tz)
+    # e.g. "Saturday, 21 June 2026, 2:47 PM PDT"
+    stamp = local.strftime("%A, %-d %B %Y, %-I:%M %p %Z").strip()
+    return (
+        f"Right now it is {stamp}. Use this to judge the time of day, the "
+        f"date, and how long ago earlier messages were sent. Inline markers "
+        f"like '[⏳ about 3 days later]' show silences between messages. "
+        f"Only mention the time or date when it's actually relevant."
+    )
+
+
 async def build_context(
     *,
     store: MemoryStore,
@@ -70,10 +140,12 @@ async def build_context(
     latest_user_name: str | None = None,
     extra_system: str | None = None,
     memory_enabled: bool = True,
+    now: datetime | None = None,
 ) -> BuiltContext:
     budget = settings.context_max_tokens
     messages: list[dict[str, Any]] = []
     used = 0
+    now = _aware(now) or datetime.now(timezone.utc)
 
     def _add(msg: dict[str, Any]) -> bool:
         nonlocal used
@@ -87,6 +159,10 @@ async def build_context(
     # 1. Persona
     persona_text = resolve_persona(persona, persona_custom)
     _add({"role": "system", "content": persona_text})
+    # 1a. Current time — gives the model temporal awareness (time of day,
+    # date, how long ago things happened). Always present, independent of
+    # memory: knowing "now" isn't conversation history.
+    _add({"role": "system", "content": _format_now(now, settings.tzinfo)})
     # 1b. Tell the model the user-name labeling convention so it can
     # distinguish speakers and address people properly. Kept compact so
     # the budget hit is small.
@@ -131,14 +207,22 @@ async def build_context(
 
         # 5. Recent raw messages (chronological, last N). User-role turns
         # get their speaker's display name prefixed so the model can tell
-        # who said what.
+        # who said what; a long silence before a message gets an inline
+        # '[⏳ … later]' marker folded into its content (a system message
+        # can't carry positional meaning — the Claude normalizer hoists
+        # all system turns out of order — so it must live in the content).
         recent = await store.recent_messages(chat_id, settings.context_recent_messages)
+        prev_ts: datetime | None = None
         for m in recent:
             role = _role_for(m)
             content = (
                 _label_user_content(m.content, m.author_name)
                 if role == "user" else m.content
             )
+            marker = _gap_marker(prev_ts, m.created_at)
+            if marker:
+                content = f"{marker}\n{content}"
+            prev_ts = _aware(m.created_at)
             if not _add({"role": role, "content": content}):
                 break
 
@@ -150,10 +234,13 @@ async def build_context(
     if latest_user_text.strip():
         labeled_latest = _label_user_content(latest_user_text, latest_user_name)
         last = messages[-1] if messages else None
+        # The recorded current turn (when memory is on) sits at the tail of
+        # `recent` and may have picked up an inline '[⏳ … later]' prefix, so
+        # match on suffix rather than exact equality to avoid double-adding.
         already_there = (
             last is not None
             and last.get("role") == "user"
-            and last.get("content") == labeled_latest
+            and last.get("content", "").endswith(labeled_latest)
         )
         if not already_there:
             _add({"role": "user", "content": labeled_latest})

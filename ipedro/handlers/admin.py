@@ -3283,12 +3283,20 @@ def build_router(rt: Runtime) -> Router:
         msg_total = await rt.db.fetchval("SELECT COUNT(*) FROM messages")
         fact_total = await rt.db.fetchval("SELECT COUNT(*) FROM facts")
         summary_total = await rt.db.fetchval("SELECT COUNT(*) FROM summaries")
+        # Surface the clock the bot reasons with, so it's obvious when
+        # BOT_TIMEZONE needs setting (default UTC shows wall-clock drift).
+        from datetime import datetime, timezone
+        tz = rt.settings.tzinfo
+        local_now = datetime.now(timezone.utc).astimezone(tz)
         lines = [
             "🛠 Status",
             "",
             f"text provider: {rt.openai.text_provider}",
             f"  claude model: {rt.openai.claude_model}",
             f"  openai model: {rt.openai.text_model}",
+            "",
+            f"timezone: {rt.settings.bot_timezone}",
+            f"bot clock: {local_now.strftime('%a %d %b %Y, %H:%M %Z')}",
             "",
             f"chats known: {chat_count}",
             f"messages: {msg_total}",

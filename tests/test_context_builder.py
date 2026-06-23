@@ -266,3 +266,129 @@ async def test_persona_system_explains_name_prefix_convention():
     )
     # The system prompt set explains the convention to the model.
     assert "display name" in system_blob.lower() or "prefixed" in system_blob.lower()
+
+
+# --------------------------------- temporal awareness ------------------------
+def test_settings_tzinfo_resolves_and_falls_back():
+    from datetime import timezone
+
+    from zoneinfo import ZoneInfo
+
+    s = _settings()
+    s.bot_timezone = "America/New_York"
+    assert s.tzinfo == ZoneInfo("America/New_York")
+    # Garbage zone name falls back to UTC instead of raising.
+    s.bot_timezone = "Mars/Olympus_Mons"
+    assert s.tzinfo == timezone.utc
+
+
+def test_humanize_span_units():
+    from ipedro.memory.context_builder import _humanize_span
+
+    assert _humanize_span(90, suffix=" ago") == "about 2 minutes ago"
+    assert _humanize_span(3600, suffix=" later") == "about 1 hour later"
+    assert _humanize_span(3 * 3600, suffix=" later") == "about 3 hours later"
+    assert _humanize_span(86400, suffix=" ago") == "about 1 day ago"
+    assert _humanize_span(3 * 86400, suffix=" later") == "about 3 days later"
+    assert _humanize_span(21 * 86400, suffix=" later") == "about 3 weeks later"
+    assert _humanize_span(90 * 86400, suffix=" later") == "about 3 months later"
+    assert _humanize_span(800 * 86400, suffix=" ago") == "about 2 years ago"
+
+
+def test_gap_marker_threshold_and_none_handling():
+    from datetime import datetime, timezone
+
+    from ipedro.memory.context_builder import _gap_marker
+
+    base = datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc)
+    # < 1h → no marker (normal back-and-forth).
+    assert _gap_marker(base, base.replace(minute=30)) is None
+    # ≥ 1h → marker.
+    marker = _gap_marker(base, base.replace(hour=15))
+    assert marker is not None and "later" in marker and "⏳" in marker
+    # Missing timestamps never crash.
+    assert _gap_marker(None, base) is None
+    assert _gap_marker(base, None) is None
+
+
+@pytest.mark.asyncio
+async def test_current_time_system_message_is_always_present():
+    """Even with memory OFF, the model is told the current time — that's
+    situational awareness, not conversation history."""
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 6, 21, 14, 47, tzinfo=timezone.utc)
+    store = FakeStore(recent=[])
+    built = await build_context(
+        store=store, settings=_settings(), chat_id=1,
+        persona="dude", persona_custom=None,
+        latest_user_text="hi", latest_user_name="Matt",
+        memory_enabled=False, now=now,
+    )
+    blob = "\n".join(m["content"] for m in built.messages if m["role"] == "system")
+    assert "Right now it is" in blob
+    # UTC default → the formatted stamp carries the year.
+    assert "2026" in blob
+
+
+@pytest.mark.asyncio
+async def test_long_silence_is_marked_inline_on_the_next_message():
+    """A multi-day gap between stored messages surfaces as an inline
+    '[⏳ … later]' marker folded into the following message's content, so
+    the bot perceives the silence."""
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc)
+
+    def at(mins_ago, content, name="Matt", role="user"):
+        return StoredMessage(
+            id=mins_ago, chat_id=1, message_id=mins_ago, user_id=42,
+            role=role, content=content, tokens=None,
+            created_at=now - timedelta(minutes=mins_ago),
+            author_name=name if role == "user" else None,
+        )
+
+    store = FakeStore(recent=[
+        at(4320, "night all"),       # 3 days ago
+        at(1, "morning, you up?"),   # now-ish
+    ])
+    built = await build_context(
+        store=store, settings=_settings(), chat_id=1,
+        persona="dude", persona_custom=None,
+        latest_user_text="morning, you up?", latest_user_name="Matt",
+        now=now,
+    )
+    user_turns = [m["content"] for m in built.messages if m["role"] == "user"]
+    # The current turn appears exactly once (the marker prefix must not
+    # defeat the dedup).
+    morning = [c for c in user_turns if c.endswith("morning, you up?")]
+    assert len(morning) == 1
+    # …and it carries the silence marker.
+    assert "⏳" in morning[0]
+    assert "day" in morning[0]
+
+
+@pytest.mark.asyncio
+async def test_no_marker_for_rapid_back_and_forth():
+    """Messages seconds apart don't get cluttered with time markers."""
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc)
+
+    def at(secs_ago, content, name="Matt"):
+        return StoredMessage(
+            id=secs_ago, chat_id=1, message_id=secs_ago, user_id=42,
+            role="user", content=content, tokens=None,
+            created_at=now - timedelta(seconds=secs_ago), author_name=name,
+        )
+
+    store = FakeStore(recent=[at(20, "yo"), at(10, "you there"), at(2, "hello?")])
+    built = await build_context(
+        store=store, settings=_settings(), chat_id=1,
+        persona="dude", persona_custom=None,
+        latest_user_text="hello?", latest_user_name="Matt", now=now,
+    )
+    # No marker on the actual conversation turns (the system 'current time'
+    # note legitimately contains an example marker, so exclude it).
+    convo = [m for m in built.messages if m["role"] != "system"]
+    assert all("⏳" not in m["content"] for m in convo)

@@ -67,6 +67,13 @@ class Settings(BaseSettings):
     summary_keep_recent: int = 20
     semantic_retrieval_k: int = 6
 
+    # Temporal awareness — the bot injects "right now it is …" into the AI
+    # context and marks long silences between messages so it can reason
+    # about time of day, dates, and how long ago things happened. The
+    # timezone is an IANA name (e.g. "America/New_York"); invalid values
+    # fall back to UTC at resolution time.
+    bot_timezone: str = "UTC"
+
     # Per-chat defaults
     default_response_policy_private: ResponsePolicy = "always"
     default_response_policy_group: ResponsePolicy = "mention"
@@ -103,6 +110,18 @@ class Settings(BaseSettings):
     @classmethod
     def _strip_whitespace(cls, v: str) -> str:
         return v.strip()
+
+    @property
+    def tzinfo(self):
+        """Resolve bot_timezone to a tzinfo, falling back to UTC if the
+        configured name isn't a valid IANA zone (or zoneinfo's database
+        isn't installed)."""
+        from datetime import timezone
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        try:
+            return ZoneInfo(self.bot_timezone)
+        except (ZoneInfoNotFoundError, ValueError, ModuleNotFoundError):
+            return timezone.utc
 
     @property
     def admin_ids(self) -> frozenset[int]:
