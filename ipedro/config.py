@@ -71,8 +71,10 @@ class Settings(BaseSettings):
     # context and marks long silences between messages so it can reason
     # about time of day, dates, and how long ago things happened. The
     # timezone is an IANA name (e.g. "America/New_York"); invalid values
-    # fall back to UTC at resolution time.
-    bot_timezone: str = "UTC"
+    # fall back to UTC at resolution time. Default is San Diego / Pacific
+    # since that's where the operator is — override with BOT_TIMEZONE for
+    # a different location.
+    bot_timezone: str = "America/Los_Angeles"
 
     # Per-chat defaults
     default_response_policy_private: ResponsePolicy = "always"

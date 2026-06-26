@@ -3284,7 +3284,7 @@ def build_router(rt: Runtime) -> Router:
         fact_total = await rt.db.fetchval("SELECT COUNT(*) FROM facts")
         summary_total = await rt.db.fetchval("SELECT COUNT(*) FROM summaries")
         # Surface the clock the bot reasons with, so it's obvious when
-        # BOT_TIMEZONE needs setting (default UTC shows wall-clock drift).
+        # BOT_TIMEZONE needs adjusting (defaults to America/Los_Angeles).
         from datetime import datetime, timezone
         tz = rt.settings.tzinfo
         local_now = datetime.now(timezone.utc).astimezone(tz)
