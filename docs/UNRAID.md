@@ -29,6 +29,14 @@ contents of this repo there (or clone it).
 `POSTGRES_*` and `DATABASE_URL` in `.env` should refer to the compose service
 name `postgres`. The example `.env.example` already does the right thing.
 
+Postgres data is stored in a **host bind-mount** at
+`/mnt/user/appdata/ipedro/pgdata` (override with `PGDATA_HOST_PATH` in
+`.env`). This is on purpose: the Unraid **Appdata Backup** plugin only backs
+up host paths under `/mnt/user/appdata/`. A *named Docker volume* (the old
+default) lives in `/var/lib/docker/volumes/` and the plugin can't see it —
+it logs `'docker_ipedro_pgdata' does NOT exist!` and skips it, silently
+leaving your database out of every backup.
+
 ## Compose
 
 ```bash
@@ -39,8 +47,29 @@ cd docker
 docker compose up -d --build
 ```
 
-The Postgres database lives in a named volume (`ipedro_pgdata`) so the data
-survives container/image rebuilds.
+The Postgres database lives in a host bind-mount under appdata
+(`/mnt/user/appdata/ipedro/pgdata`) so the data survives container/image
+rebuilds **and** gets caught by the Appdata Backup plugin.
+
+### Migrating from the old named volume
+
+Earlier versions used a named volume (`ipedro_pgdata`, which Docker Compose
+exposes as `docker_ipedro_pgdata`). If you're upgrading, move that data to
+the host path **before** starting the stack with the new compose, or
+Postgres will initialize an empty database at the new path:
+
+```bash
+cd /mnt/user/appdata/ipedro/docker
+../scripts/migrate_pgdata_to_appdata.sh        # copies; old volume left intact
+docker compose up -d
+```
+
+The script copies (never moves) read-only from the old volume, so you can
+roll back. Once you've confirmed the bot's data is present, reclaim the old
+volume with `docker volume rm docker_ipedro_pgdata`.
+
+Then point the **Appdata Backup** plugin at `/mnt/user/appdata/ipedro/`
+(it'll now include `pgdata/`).
 
 ## Logs
 
