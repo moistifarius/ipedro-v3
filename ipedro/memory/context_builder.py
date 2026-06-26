@@ -104,28 +104,45 @@ def _humanize_span(seconds: float, *, suffix: str) -> str:
     return f"about {val} {unit}{plural}{suffix}"
 
 
-def _gap_marker(prev: datetime | None, cur: datetime | None) -> str | None:
-    """An inline '[⏳ … later]' marker when two consecutive messages are
-    far enough apart to be worth flagging, else None."""
+def _format_local_stamp(dt: datetime, tz) -> str:
+    """Localized wall-clock stamp, e.g. 'Sun 21 Jun 2026, 10:47 AM PDT'.
+    Short weekday + short month so it stays compact when embedded in a
+    gap marker."""
+    local = dt.astimezone(tz)
+    return local.strftime("%a %-d %b %Y, %-I:%M %p %Z").strip()
+
+
+def _gap_marker(
+    prev: datetime | None, cur: datetime | None, tz,
+) -> str | None:
+    """An inline '[⏳ <stamp>, about N later]' marker when two consecutive
+    messages are far enough apart to be worth flagging, else None.
+
+    The stamp is the *exact* localized time of ``cur`` so the bot can
+    answer 'when did Matt say that' precisely; the relative span keeps
+    'how long ago' obvious without arithmetic.
+    """
     prev, cur = _aware(prev), _aware(cur)
     if prev is None or cur is None:
         return None
     gap = (cur - prev).total_seconds()
     if gap < _GAP_MARK_THRESHOLD_SECONDS:
         return None
-    return f"[⏳ {_humanize_span(gap, suffix=' later')}]"
+    stamp = _format_local_stamp(cur, tz)
+    span = _humanize_span(gap, suffix=" later")
+    return f"[⏳ {stamp}, {span}]"
 
 
 def _format_now(now: datetime, tz) -> str:
     """The 'right now it is …' system line, localized to the bot's tz."""
-    local = now.astimezone(tz)
     # e.g. "Saturday, 21 June 2026, 2:47 PM PDT"
-    stamp = local.strftime("%A, %-d %B %Y, %-I:%M %p %Z").strip()
+    stamp = now.astimezone(tz).strftime("%A, %-d %B %Y, %-I:%M %p %Z").strip()
     return (
         f"Right now it is {stamp}. Use this to judge the time of day, the "
         f"date, and how long ago earlier messages were sent. Inline markers "
-        f"like '[⏳ about 3 days later]' show silences between messages. "
-        f"Only mention the time or date when it's actually relevant."
+        f"like '[⏳ Sun 14 Jun 2026, 9:12 AM PDT, about 3 days later]' show "
+        f"silences between messages with the exact wall-clock time of the "
+        f"next one. Only mention the time or date when it's actually relevant."
     )
 
 
@@ -219,7 +236,7 @@ async def build_context(
                 _label_user_content(m.content, m.author_name)
                 if role == "user" else m.content
             )
-            marker = _gap_marker(prev_ts, m.created_at)
+            marker = _gap_marker(prev_ts, m.created_at, settings.tzinfo)
             if marker:
                 content = f"{marker}\n{content}"
             prev_ts = _aware(m.created_at)

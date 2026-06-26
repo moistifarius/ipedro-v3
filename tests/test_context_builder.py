@@ -301,14 +301,37 @@ def test_gap_marker_threshold_and_none_handling():
     from ipedro.memory.context_builder import _gap_marker
 
     base = datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc)
+    tz = timezone.utc
     # < 1h → no marker (normal back-and-forth).
-    assert _gap_marker(base, base.replace(minute=30)) is None
-    # ≥ 1h → marker.
-    marker = _gap_marker(base, base.replace(hour=15))
-    assert marker is not None and "later" in marker and "⏳" in marker
+    assert _gap_marker(base, base.replace(minute=30), tz) is None
+    # ≥ 1h → marker carries both the exact wall-clock stamp and the
+    # humanized span, so the bot has the precise time AND knows how
+    # long ago it was at a glance.
+    cur = base.replace(hour=15)
+    marker = _gap_marker(base, cur, tz)
+    assert marker is not None
+    assert "⏳" in marker
+    assert "later" in marker
+    # Exact stamp: short weekday + day + month + year + time.
+    assert "2026" in marker and "Jun" in marker and "3:00 PM" in marker
     # Missing timestamps never crash.
-    assert _gap_marker(None, base) is None
-    assert _gap_marker(base, None) is None
+    assert _gap_marker(None, base, tz) is None
+    assert _gap_marker(base, None, tz) is None
+
+
+def test_gap_marker_renders_in_the_bot_timezone():
+    """A San Diego operator sees Pacific stamps in the marker, not UTC."""
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    from ipedro.memory.context_builder import _gap_marker
+
+    prev = datetime(2026, 6, 21, 0, 0, tzinfo=timezone.utc)
+    cur = datetime(2026, 6, 21, 17, 30, tzinfo=timezone.utc)  # 10:30 AM PDT
+    marker = _gap_marker(prev, cur, ZoneInfo("America/Los_Angeles"))
+    assert marker is not None
+    assert "10:30 AM" in marker
+    assert "PDT" in marker or "PST" in marker
 
 
 @pytest.mark.asyncio
