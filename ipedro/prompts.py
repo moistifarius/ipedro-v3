@@ -153,6 +153,16 @@ FORTUNE_PROMPT = (
     "come' clichés. Output ONLY the fortune, no preamble, no number."
 )
 
+ON_THIS_DAY_PROMPT = (
+    "Below are real messages someone in this group chat sent on this same "
+    "calendar day {when}. In ONE short, in-character line (under 25 words), "
+    "react to them like a wry observer dredging up the past — amused, a "
+    "little nostalgic, maybe mock-suspicious. Do NOT quote them back or "
+    "summarize literally; just give the reaction line. Output ONLY that "
+    "line, no preamble, no quotes.\n\n"
+    "Messages:\n{messages}"
+)
+
 HAIKU_PROMPT = (
     "Compose a single haiku (5-7-5 syllables, three lines) inspired by the "
     "chat snippet below. Be evocative, a little weird, in character as a "

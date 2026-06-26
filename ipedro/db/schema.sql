@@ -338,6 +338,14 @@ ALTER TABLE chat_config
 ALTER TABLE chat_state
     ADD COLUMN IF NOT EXISTS last_ether_at TIMESTAMPTZ;
 
+-- 'On this day' nostalgia — resurface past messages from the same calendar
+-- day. On by default (the bot wants to feel alive); once-per-local-day stamp
+-- prevents re-posting.
+ALTER TABLE chat_config
+    ADD COLUMN IF NOT EXISTS on_this_day_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE chat_state
+    ADD COLUMN IF NOT EXISTS last_on_this_day_date DATE;
+
 -- Generic key/value store for global tunables (e.g. the master Pedro prompt).
 CREATE TABLE IF NOT EXISTS kv_store (
     key        TEXT PRIMARY KEY,

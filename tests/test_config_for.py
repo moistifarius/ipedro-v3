@@ -19,6 +19,7 @@ class _FakeCfg:
             comic_enabled=False, fortune_enabled=False,
             voice_transcribe=True, memory_enabled=True,
             ether_enabled=False, duck_names_public=True,
+            on_this_day_enabled=True,
             response_policy="mention", persona="dude",
             persona_custom=None, ambient_probability=0.03,
         )

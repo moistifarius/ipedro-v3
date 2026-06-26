@@ -35,6 +35,7 @@ from ipedro.kv import kv_get
 from ipedro.personas import set_master_prompt_override
 from ipedro.memory.store import MemoryStore
 from ipedro.openai_client import OpenAIClient
+from ipedro.on_this_day import run_on_this_day_loop
 from ipedro.persona_state import PersonaStateService
 from ipedro.reminders import run_reminders_loop
 from ipedro.runtime import Runtime
@@ -174,6 +175,10 @@ async def run() -> None:
         run_ambient_loops(rt.bot, rt.db, rt.openai, stop),
         name="ambient-loops",
     )
+    on_this_day_task = asyncio.create_task(
+        run_on_this_day_loop(rt.bot, rt.db, rt.openai, settings, stop),
+        name="on-this-day",
+    )
 
     try:
         polling = asyncio.create_task(
@@ -198,6 +203,7 @@ async def run() -> None:
         for task in (
             spawner_task, share_photo_task, reminders_task,
             celebrations_task, comic_task, ambient_task,
+            on_this_day_task,
         ):
             task.cancel()
             try:

@@ -19,6 +19,7 @@ from aiogram.types import (
 )
 
 from ipedro.handlers.common import display_name, get_or_create_chat_config
+from ipedro.on_this_day import build_on_this_day, render_on_this_day
 from ipedro.prompts import (
     COMPLIMENT_PROMPT, ECHO_PROMPT, HAIKU_PROMPT, MISHEARD_LYRIC_PROMPT,
     ROAST_PROMPT, THIS_OR_THAT_PROMPT, TLDR_PROMPT,
@@ -494,6 +495,26 @@ def build_router(rt: Runtime) -> Router:
         )
         await msg.reply(out or "🪷", disable_notification=True)
 
+    @r.message(Command("onthisday"))
+    async def onthisday(msg: Message) -> None:
+        """/onthisday — resurface what people said on this calendar day in
+        the past. On-demand pull; ignores the once-a-day auto-post stamp."""
+        await get_or_create_chat_config(rt, msg)
+        await rt.bot.send_chat_action(msg.chat.id, "typing")
+        result = await build_on_this_day(
+            rt.db, rt.openai, rt.settings, msg.chat.id,
+        )
+        if result is None:
+            await msg.reply(
+                "Sh-sha. Nothing in the archive for this day yet. "
+                "Give it time — the record's still filling in.",
+                disable_notification=True,
+            )
+            return
+        await msg.reply(
+            render_on_this_day(result), disable_notification=True,
+        )
+
     @r.message(Command("this_or_that"))
     async def this_or_that(msg: Message) -> None:
         """/this_or_that A | B — Dale decides, dramatically."""
@@ -739,6 +760,7 @@ def build_router(rt: Runtime) -> Router:
             "memory": ("memory_enabled", not cfg.memory_enabled),
             "ether": ("ether_enabled", not cfg.ether_enabled),
             "ducknames": ("duck_names_public", not cfg.duck_names_public),
+            "onthisday": ("on_this_day_enabled", not cfg.on_this_day_enabled),
         }
         if field in toggles:
             col, new_val = toggles[field]
@@ -829,6 +851,7 @@ def _config_wizard_header(cfg, target_chat_id: int, *, is_dm_scoped: bool) -> st
         f"   {on if cfg.memory_enabled else off} memory\n"
         f"   {on if cfg.ether_enabled else off} ether"
         f"   {on if cfg.duck_names_public else off} duck-names public\n"
+        f"   {on if cfg.on_this_day_enabled else off} on-this-day\n"
     )
 
 
@@ -905,6 +928,10 @@ def _config_keyboard(cfg, *, target_chat_id: int) -> InlineKeyboardMarkup:
             b(f"📟 Ether: {on if cfg.ether_enabled else off}", "ether"),
             b(f"🦆 Duck names public: {on if cfg.duck_names_public else off}",
               "ducknames"),
+        ],
+        [
+            b(f"📅 On this day: {on if cfg.on_this_day_enabled else off}",
+              "onthisday"),
         ],
         [
             b("commands", "policy:commands"),

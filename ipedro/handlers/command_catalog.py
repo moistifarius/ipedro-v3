@@ -191,6 +191,10 @@ COMMANDS: tuple[Command, ...] = (
     Command("karma",        "quotes", "/karma",
             "/karma",
             "Chat karma leaderboard (👍/👎 reactions grant/dock)."),
+    Command("onthisday",    "quotes", "/onthisday",
+            "/onthisday",
+            "Resurface what people said on this calendar day in the past. "
+            "Also auto-posts once a day on its own."),
 
     # ── Reminders & dates ────────────────────────────────────────────────
     Command("remind",       "reminders", "/remind",
