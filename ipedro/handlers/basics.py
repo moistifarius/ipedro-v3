@@ -41,6 +41,8 @@ HELP_TEXT_PUBLIC = (
     "/haiku - haiku about the recent chat\n"
     "/this_or_that A | B - I decide, dramatically\n"
     "/echo @user [topic] - I mimic their style\n"
+    "  (or just say 'act like <name>' / 'do a <name> impression' in chat — "
+    "I'll reply in that member's voice, learned from their history)\n"
     "/roast @user, /compliment @user\n"
     "/lyric <line> - I mishear it\n"
     "/meme top text | bottom text - generate a meme image\n"

@@ -158,6 +158,7 @@ async def build_context(
     extra_system: str | None = None,
     memory_enabled: bool = True,
     now: datetime | None = None,
+    persona_override: str | None = None,
 ) -> BuiltContext:
     budget = settings.context_max_tokens
     messages: list[dict[str, Any]] = []
@@ -173,8 +174,10 @@ async def build_context(
         used += cost
         return True
 
-    # 1. Persona
-    persona_text = resolve_persona(persona, persona_custom)
+    # 1. Persona — an explicit override (e.g. impersonation mode) replaces
+    # the resolved persona for this turn; the temporal + name-labeling
+    # system messages below still apply.
+    persona_text = persona_override or resolve_persona(persona, persona_custom)
     _add({"role": "system", "content": persona_text})
     # 1a. Current time — gives the model temporal awareness (time of day,
     # date, how long ago things happened). Always present, independent of

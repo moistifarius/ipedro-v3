@@ -18,6 +18,7 @@ from ipedro.duckhunt.debug_toggles import is_on as debug_is_on
 from ipedro.duckhunt.scoring import challenge_is_over_time, over_time_line
 from ipedro.duckhunt.verdicts import parse_verdict
 from ipedro.handlers.common import catify, display_name, get_or_create_chat_config
+from ipedro.impersonate import build_impersonation_prompt, resolve_impersonation
 from ipedro.memory.context_builder import build_context
 from ipedro.memory.summarizer import maybe_summarize
 from ipedro.prompts import CAT_FACT_PROMPT, DUCK_BEF_CHALLENGE_JUDGE_PROMPT
@@ -468,6 +469,22 @@ def build_router(rt: Runtime) -> Router:
                 f"without being cruel. Don't acknowledge the list."
             )
         extra = "\n\n".join(extra_bits) or None
+
+        # Impersonation: "act like Luke" / "talk like Luke" / "do a Luke
+        # impression" → resolve Luke to a real member and reply in their
+        # voice, learned from their message history. Overrides the persona
+        # for just this turn; falls through to a normal reply when there's
+        # no request, no matching member, or too little history.
+        persona_override = None
+        impersonation = await resolve_impersonation(rt.db, msg.chat.id, text)
+        if impersonation is not None:
+            member, samples = impersonation
+            persona_override = build_impersonation_prompt(member.name, samples)
+            log.info(
+                "Impersonating %s (%d samples) in chat %s.",
+                member.name, len(samples), msg.chat.id,
+            )
+
         ctx = await build_context(
             store=rt.memory,
             settings=rt.settings,
@@ -480,6 +497,7 @@ def build_router(rt: Runtime) -> Router:
             ),
             extra_system=extra,
             memory_enabled=cfg.memory_enabled,
+            persona_override=persona_override,
         )
         reply = await rt.openai.chat(
             ctx.messages, max_tokens=500, chat_id=msg.chat.id,
