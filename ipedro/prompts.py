@@ -94,6 +94,11 @@ SUMMARIZE_PROMPT = (
     "You are condensing a chat log into a compact running summary. Keep names, "
     "key topics, ongoing jokes, decisions, plans, and durable facts. Drop "
     "small-talk filler. Write in 4-10 bullet points, third-person, no preamble.\n"
+    "ATTRIBUTION IS CRITICAL: each message below is prefixed with the exact "
+    "speaker's name ('Name: ...'). Attribute every statement, opinion, and "
+    "fact to the correct person using ONLY those labels. Never guess who said "
+    "something and never swap one person's words onto another. If you're not "
+    "sure who said something, leave the name out rather than guess.\n"
     "Existing summary (may be empty):\n{prior}\n\nNew messages:\n{messages}\n"
 )
 

@@ -44,6 +44,8 @@ HELP_TEXT_PUBLIC = (
     "  (or just say 'act like <name>' / 'do a <name> impression' in chat — "
     "I'll reply in that member's voice, learned from their history)\n"
     "/roast @user, /compliment @user\n"
+    "/fixname <wrong> -> <right> - fix a name I keep getting wrong "
+    "(recursively across my notes; never touches what you actually typed)\n"
     "/lyric <line> - I mishear it\n"
     "/meme top text | bottom text - generate a meme image\n"
     "/ether <text> - transmit a message as a staticky far-away radio "

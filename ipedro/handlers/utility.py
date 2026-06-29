@@ -577,6 +577,69 @@ def build_router(rt: Runtime) -> Router:
             return
         await msg.reply(f"[{name} voice] {out}", disable_notification=True)
 
+    @r.message(Command("fixname"))
+    async def fixname(msg: Message) -> None:
+        """/fixname <wrong> -> <right> — correct a name the bot keeps
+        getting wrong, recursively across summaries, facts, and my own
+        past messages. Use an arrow for multi-word names; otherwise the
+        first two words are taken as <wrong> <right>."""
+        cfg = await get_or_create_chat_config(rt, msg)
+        raw = (msg.text or "").split(None, 1)
+        if len(raw) < 2 or not raw[1].strip():
+            await msg.reply(
+                "Usage: /fixname <wrong> -> <right>\n"
+                "e.g. /fixname Matt -> Sarah   (or: /fixname Matt Sarah)",
+                disable_notification=True,
+            )
+            return
+        arg = raw[1].strip()
+        if "->" in arg:
+            wrong, right = (s.strip() for s in arg.split("->", 1))
+        elif "→" in arg:
+            wrong, right = (s.strip() for s in arg.split("→", 1))
+        else:
+            parts = arg.split()
+            if len(parts) < 2:
+                await msg.reply(
+                    "Need both names: /fixname <wrong> -> <right>",
+                    disable_notification=True,
+                )
+                return
+            wrong, right = parts[0], parts[1]
+        if not wrong or not right:
+            await msg.reply(
+                "Both names need to be non-empty.", disable_notification=True,
+            )
+            return
+        if not cfg.memory_enabled:
+            await msg.reply(
+                "Memory's off in this chat, so there's nothing stored to "
+                "correct.",
+                disable_notification=True,
+            )
+            return
+        counts = await rt.memory.correct_name(msg.chat.id, wrong, right)
+        total = counts["summaries"] + counts["facts"] + counts["messages"]
+        await rt.command_log.add(
+            msg.chat.id, msg.from_user.id if msg.from_user else None,
+            "/fixname", f"{wrong} -> {right}", True,
+        )
+        if total == 0:
+            await msg.reply(
+                f"Couldn't find “{wrong}” anywhere in my notes — nothing to "
+                f"fix. (I never rewrite what people actually typed, only my "
+                f"own notes and summaries.)",
+                disable_notification=True,
+            )
+            return
+        await msg.reply(
+            f"Fixed. Replaced “{wrong}” → “{right}” across "
+            f"{counts['summaries']} summary, {counts['facts']} fact(s), and "
+            f"{counts['messages']} of my own message(s). Sh-sha. The record's "
+            f"straight now.",
+            disable_notification=True,
+        )
+
     @r.message(Command("roast"))
     async def roast(msg: Message) -> None:
         await _do_burn(rt, msg, prompt=ROAST_PROMPT, fallback="(couldn't roast)")
