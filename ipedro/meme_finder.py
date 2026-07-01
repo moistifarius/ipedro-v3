@@ -26,6 +26,7 @@ from ipedro.prompts import MEME_PICK_PROMPT, MEME_QUERIES_PROMPT
 from ipedro.reddit import (
     Meme,
     candidates_from_topic_sub,
+    is_meme_flavored,
     meme_for_post,
     search_meme_candidates,
     search_topic_subreddits,
@@ -72,10 +73,17 @@ def parse_pick(text: str | None, n: int) -> int | None:
 
 
 def _candidate_lines(candidates: list[dict]) -> str:
-    return "\n".join(
-        f"{i + 1}. r/{p.get('subreddit') or '?'} — {p.get('title') or '(untitled)'}"
-        for i, p in enumerate(candidates)
-    )
+    """Numbered candidate lines for the judge — subreddit, flair (a strong
+    meme-vs-news signal) when present, and title."""
+    lines = []
+    for i, p in enumerate(candidates):
+        flair = (p.get("link_flair_text") or "").strip()
+        tag = f" [{flair}]" if flair else ""
+        lines.append(
+            f"{i + 1}. r/{p.get('subreddit') or '?'}{tag} — "
+            f"{p.get('title') or '(untitled)'}"
+        )
+    return "\n".join(lines)
 
 
 # ───────────────────────────── orchestration ───────────────────────────────
@@ -122,6 +130,11 @@ async def gather_candidates(queries: list[str], **creds) -> list[dict]:
         if len(out) >= _MAX_CANDIDATES:
             break
         _take(await search_meme_candidates(q, **creds))
+    # Sink non-meme-looking posts (news photos, highlight clips from the
+    # sitewide sweep) below actual memes. Stable, so within each tier the
+    # topic-sub → meme-sub → sitewide priority is preserved. This also
+    # makes the judge-unavailable fallback (first candidate) a meme.
+    out.sort(key=lambda p: not is_meme_flavored(p))
     return out[:_MAX_CANDIDATES]
 
 
@@ -130,16 +143,16 @@ async def find_relevant_meme(
     queries: list[str],
     *,
     topic_label: str,
-    trust_first: bool = False,
     chat_id: int | None = None,
     **creds,
 ) -> Meme | None:
     """The full pipeline: gather candidates, judge, build the Meme.
 
-    ``trust_first``: when the judge says none fit (or is unavailable),
-    fall back to the first candidate anyway — used for EXPLICIT topics,
-    where the search already matched the user's literal words. For derived
-    topics we return None instead so the caller can be honest about it."""
+    The judge's 0 ("none of these are a relevant MEME") is FINAL — posting
+    a news photo that happened to match the query is exactly the failure
+    users notice, so an honest miss beats a wrong hit. Only when the judge
+    is unavailable/unusable do we trust the (meme-flavored-first) search
+    order and take the first candidate."""
     queries = [q for q in (queries or []) if (q or "").strip()]
     if not queries:
         return None
@@ -158,9 +171,7 @@ async def find_relevant_meme(
         post = candidates[pick - 1]
     elif pick is None:            # judge unusable → trust search order
         post = candidates[0]
-    elif trust_first:             # judge said 0, but the topic was explicit
-        post = candidates[0]
-    if post is None:
+    if post is None:              # judge said 0 — nothing is a relevant meme
         log.info(
             "meme judge rejected all %d candidates for %r.",
             len(candidates), topic_label,

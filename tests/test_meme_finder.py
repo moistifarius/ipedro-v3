@@ -161,23 +161,15 @@ async def test_judge_pick_is_used(wired):
 
 
 @pytest.mark.asyncio
-async def test_judge_zero_without_trust_first_returns_none(wired):
+async def test_judge_zero_is_final(wired):
+    """Judge saying 'none of these are a relevant meme' means NO post —
+    posting a news photo that matched the query is the failure mode users
+    notice, so an honest miss always wins."""
     calls, _ = wired
     ai = _FakeAI("0")
     meme = await find_relevant_meme(ai, ["cats"], topic_label="cats")
     assert meme is None
     assert calls["meme_for"] == []      # nothing fetched
-
-
-@pytest.mark.asyncio
-async def test_judge_zero_with_trust_first_posts_first(wired):
-    calls, state = wired
-    ai = _FakeAI("0")
-    meme = await find_relevant_meme(
-        ai, ["cats"], topic_label="cats", trust_first=True,
-    )
-    assert meme is not None
-    assert calls["meme_for"][0]["permalink"] == "/r/lakers/1"
 
 
 @pytest.mark.asyncio
@@ -208,3 +200,42 @@ async def test_empty_queries_short_circuit(wired):
     assert await find_relevant_meme(ai, [], topic_label="x") is None
     assert await find_relevant_meme(ai, ["", "  "], topic_label="x") is None
     assert calls["topic_subs"] == [] and calls["searches"] == []
+
+
+@pytest.mark.asyncio
+async def test_non_meme_candidates_sink_below_memes(wired):
+    """A news photo from the sitewide sweep must sort BELOW meme-flavored
+    posts, so the judge-unavailable fallback (first candidate) is a meme."""
+    calls, state = wired
+    state["topic_subs"] = []
+    state["search_posts"]["default"] = [
+        {"permalink": "/r/nba/1", "title": "Lakers acquire star in trade",
+         "subreddit": "nba", "url": "https://i.redd.it/news.jpg"},   # news
+        {"permalink": "/r/nba/2", "title": "playoff meme goes hard",
+         "subreddit": "nba", "url": "https://i.redd.it/m.jpg"},      # meme title
+        {"permalink": "/r/nba/3", "title": "big win last night",
+         "subreddit": "nba", "url": "https://i.redd.it/w.jpg",
+         "link_flair_text": "Meme"},                                 # meme flair
+    ]
+    got = await gather_candidates(["lakers"])
+    permalinks = [p["permalink"] for p in got]
+    # Meme-flavored (2: title, 3: flair) come first, news photo sinks last.
+    assert permalinks.index("/r/nba/1") == len(permalinks) - 1
+    # Judge-unavailable → first candidate → a meme, not the news photo.
+    ai = _FakeAI("no clue")
+    meme = await find_relevant_meme(ai, ["lakers"], topic_label="lakers")
+    assert calls["meme_for"][0]["permalink"] != "/r/nba/1"
+
+
+@pytest.mark.asyncio
+async def test_judge_sees_flair_tags(wired):
+    calls, state = wired
+    state["topic_subs"] = []
+    state["search_posts"]["default"] = [
+        {"permalink": "/r/nba/3", "title": "big win",
+         "subreddit": "nba", "url": "https://i.redd.it/w.jpg",
+         "link_flair_text": "Meme"},
+    ]
+    ai = _FakeAI("1")
+    await find_relevant_meme(ai, ["lakers"], topic_label="lakers")
+    assert "[Meme]" in ai.prompts[-1]

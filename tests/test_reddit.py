@@ -561,8 +561,13 @@ async def test_candidates_from_topic_sub_falls_back_to_top_listing(monkeypatch):
             return None                                    # sub search dry
         if "/top" in url:
             return {"data": {"children": [
+                # A plain news photo — must be filtered out of the fallback.
+                _t3(url="https://i.redd.it/news.jpg", title="game recap",
+                    subreddit="lakers", permalink="/r/lakers/comments/n/y/"),
+                # A flaired meme — the only thing the fallback should keep.
                 _t3(url="https://i.redd.it/top.jpg", title="community classic",
-                    subreddit="lakers", permalink="/r/lakers/comments/z/x/"),
+                    subreddit="lakers", permalink="/r/lakers/comments/z/x/",
+                    link_flair_text="Meme"),
             ]}}
         return None
 
@@ -575,6 +580,24 @@ async def test_candidates_from_topic_sub_falls_back_to_top_listing(monkeypatch):
     assert "/r/lakers/search" in calls[0][0]
     assert calls[0][1]["q"] == "meme"
     assert "/r/lakers/top" in calls[1][0]
+
+
+def test_is_meme_flavored_signals():
+    from ipedro.reddit import is_meme_flavored
+    # Known meme community.
+    assert is_meme_flavored({"subreddit": "me_irl", "title": "x"})
+    assert is_meme_flavored({"subreddit": "MEMES", "title": "x"})
+    # Meme-ish flair inside a topic community.
+    assert is_meme_flavored({"subreddit": "nba", "title": "big win",
+                             "link_flair_text": "Shitpost"})
+    assert is_meme_flavored({"subreddit": "nba", "title": "big win",
+                             "link_flair_text": "Humour"})
+    # 'meme' in the title.
+    assert is_meme_flavored({"subreddit": "nba", "title": "playoff memes"})
+    # A plain news photo is NOT meme-flavored.
+    assert not is_meme_flavored({"subreddit": "nba",
+                                 "title": "Lakers acquire star in trade",
+                                 "link_flair_text": "News"})
 
 
 # ─────────── detection hardening (adversarial-review regressions) ─────────

@@ -591,10 +591,10 @@ def build_router(rt: Runtime) -> Router:
         if topic:
             # Judged search: candidates from the topic's own subreddit,
             # the meme subs, and sitewide; the cheap model picks the one
-            # that actually matches (trust_first: an explicit topic that
-            # matched the user's literal words still posts on judge-doubt).
+            # that is BOTH an actual meme and about the topic — a judge
+            # rejection is an honest miss, never a random post.
             meme = await find_relevant_meme(
-                rt.openai, [topic], topic_label=topic, trust_first=True,
+                rt.openai, [topic], topic_label=topic,
                 chat_id=msg.chat.id, **creds,
             )
         else:

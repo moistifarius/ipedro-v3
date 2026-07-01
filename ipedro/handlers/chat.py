@@ -266,10 +266,11 @@ async def _handle_meme_request(rt: Runtime, msg: Message, cfg, topic: str) -> No
         client_secret=rt.settings.reddit_client_secret,
     )
     if topic:
-        # Explicit subject — judged search; a dry result is an honest
+        # Explicit subject — judged search; a dry result (including the
+        # judge deciding nothing found is a relevant MEME) is an honest
         # miss, not a cue to post something random.
         meme = await find_relevant_meme(
-            rt.openai, [topic], topic_label=topic, trust_first=True,
+            rt.openai, [topic], topic_label=topic,
             chat_id=msg.chat.id, **creds,
         )
         if meme is None:
@@ -294,7 +295,7 @@ async def _handle_meme_request(rt: Runtime, msg: Message, cfg, topic: str) -> No
             )
             meme = await find_relevant_meme(
                 rt.openai, queries, topic_label=queries[0],
-                trust_first=False, chat_id=msg.chat.id, **creds,
+                chat_id=msg.chat.id, **creds,
             )
         if meme is None:
             meme = await fetch_meme(**creds)

@@ -53,6 +53,37 @@ MEME_SEARCH_SUBS: tuple[str, ...] = (
     "memes", "me_irl", "funny", "dankmemes", "wholesomememes",
 )
 
+# Communities where a media post IS (nearly always) a meme, beyond the
+# search rotation above. Used by is_meme_flavored.
+_MEME_SUB_SET: frozenset[str] = frozenset(
+    s.lower() for s in MEME_SEARCH_SUBS
+) | frozenset({
+    "meirl", "2meirl4meirl", "adviceanimals", "shitposting",
+    "comedyheaven", "okbuddyretard", "memesopdidnotlike", "dankvideos",
+})
+
+# Post flair that marks a meme/joke post inside a non-meme community —
+# most topic subs flair them ("Meme", "Shitpost", "Humor", …).
+_MEME_FLAIR_RE = re.compile(
+    r"meme|shit\s*post|humou?r|funny|joke|comic|satire", re.IGNORECASE,
+)
+
+
+def is_meme_flavored(post: dict) -> bool:
+    """Heuristic: does this post LOOK like a meme (vs a news photo, game
+    highlight, or ordinary picture)? True when it lives in a known meme
+    community, carries a meme-ish flair, or says 'meme' in its title.
+    Used to filter topic-sub pulls and to sink non-meme candidates below
+    meme ones before the judge sees them."""
+    sub = (post.get("subreddit") or "").lower()
+    if sub in _MEME_SUB_SET:
+        return True
+    flair = post.get("link_flair_text") or ""
+    if flair and _MEME_FLAIR_RE.search(flair):
+        return True
+    title = post.get("title") or ""
+    return bool(re.search(r"\bmemes?\b", title, re.IGNORECASE))
+
 _USER_AGENT = "iPedro/1.0 (Telegram meme bot)"
 _IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 _MAX_COMMENT_LEN = 600
@@ -629,7 +660,10 @@ async def candidates_from_topic_sub(
 ) -> list[dict]:
     """Meme-ish media posts from a topic's own community: search 'meme'
     inside it first (top of all time — the community's classics), falling
-    back to its recent top media posts."""
+    back to meme-FLAVORED posts from its recent top listing. The plain
+    top listing is full of news photos and highlight clips, so the
+    fallback keeps only posts that pass is_meme_flavored (meme flair /
+    'meme' in the title) rather than whatever's popular."""
     if not sub:
         return []
     ua = user_agent or _USER_AGENT
@@ -648,7 +682,10 @@ async def candidates_from_topic_sub(
                 client, _listing_url(base, sub, json_suffix),
                 t="month", limit=25, raw_json=1,
             )
-            posts = _displayable_posts(listing, limit) if listing else []
+            posts = [
+                p for p in (_displayable_posts(listing) if listing else [])
+                if is_meme_flavored(p)
+            ][:limit]
     return posts
 
 
