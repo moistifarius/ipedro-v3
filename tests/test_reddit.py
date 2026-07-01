@@ -255,11 +255,13 @@ def test_build_reddit_comment_prompt_includes_material_and_members():
         meme, ["Matt", "Sarah", "Matt"], "you are literally dale gribble",
     )
     assert msgs[0]["role"] == "system" and msgs[1]["role"] == "user"
+    system = msgs[0]["content"]
     # Persona carried into the system message.
-    assert "dale gribble" in msgs[0]["content"]
-    # It must forbid copying the comments verbatim.
-    assert "do not copy" in msgs[0]["content"].lower() or \
-        "do NOT copy" in msgs[0]["content"]
+    assert "dale gribble" in system
+    # The comments must be framed as the inspiration to build on...
+    assert "inspiration" in system.lower() or "build on" in system.lower()
+    # ...while still forbidding verbatim quoting.
+    assert "word-for-word" in system.lower() or "quote" in system.lower()
     user = msgs[1]["content"]
     assert "monday again" in user and "r/me_irl" in user
     assert "so real" in user            # comments as inspiration

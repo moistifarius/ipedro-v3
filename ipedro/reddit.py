@@ -277,9 +277,9 @@ def build_reddit_comment_prompt(
     meme: "Meme", member_names: list[str], persona_text: str,
     *, extra_context: str | None = None,
 ) -> list[dict]:
-    """Messages array for generating the bot's OWN reaction to a meme —
-    riffing on the real Reddit comments for vibe, tailored to who's in the
-    chat, in the chat's persona voice. Pure/testable."""
+    """Messages array for generating the bot's OWN reaction to a meme,
+    built FROM the top Reddit comments as inspiration, tailored to who's in
+    the chat, in the chat's persona voice. Pure/testable."""
     comments = "\n".join(f"- {c}" for c in meme.top_comments[:6]) or "(none)"
     # Dedup + cap the member list so a big chat doesn't blow the prompt.
     seen: list[str] = []
@@ -292,15 +292,18 @@ def build_reddit_comment_prompt(
         f"{persona_text}\n\n"
         "A meme just got posted in your group chat. React to it with ONE "
         "short line (under 200 characters), in your voice, like one of the "
-        "crew chiming in. The reddit comments below are ONLY for vibe and "
-        "inspiration — riff off the energy, do NOT copy or quote them. You "
-        "MAY name-drop someone in the chat if it genuinely fits the meme, "
-        "but never force it and never @ everyone. No hashtags, no 'as an "
-        "AI', keep emoji minimal. Output ONLY the reaction line."
+        "crew chiming in. IMPORTANT: base your reaction on the top reddit "
+        "comments below — take the angle, joke, or observation people "
+        "latched onto and re-cast it in your own words for this chat. Build "
+        "on their take; just don't quote them word-for-word. You MAY "
+        "name-drop someone in the chat if it genuinely fits, but never "
+        "force it and never @ everyone. No hashtags, no 'as an AI', keep "
+        "emoji minimal. Output ONLY the reaction line."
     )
     user = (
         f"Meme: {meme.title or '(untitled)'} (from r/{meme.subreddit})\n\n"
-        f"Reddit comments (inspiration only, do not copy):\n{comments}\n\n"
+        f"Top reddit comments — your inspiration, build on these "
+        f"(don't quote verbatim):\n{comments}\n\n"
         f"People in this chat: {members}"
     )
     if extra_context:
