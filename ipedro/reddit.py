@@ -224,28 +224,39 @@ def _comments_url(base: str, permalink: str, json_suffix: bool) -> str:
 
 
 # ───────────────────────────── OAuth token cache ──────────────────────────
-_token_cache: dict = {"token": None, "expires_at": 0.0}
+# After a failed mint (bad creds, 401, network), don't hammer the token
+# endpoint on every /redditmeme — back off for this long, then retry.
+_TOKEN_FAILURE_COOLDOWN = 60.0
+_token_cache: dict = {"token": None, "expires_at": 0.0, "retry_after": 0.0}
 _token_lock = asyncio.Lock()
 
 
 def reset_token_cache() -> None:
-    """Drop the cached bearer token (tests / forced refresh)."""
+    """Drop the cached bearer token and any failure back-off (tests /
+    forced refresh — e.g. /debug_redditmeme wants a fresh attempt)."""
     _token_cache["token"] = None
     _token_cache["expires_at"] = 0.0
+    _token_cache["retry_after"] = 0.0
 
 
 async def _get_oauth_token(
     client_id: str, client_secret: str, user_agent: str,
 ) -> str | None:
     """Application-only (client_credentials) bearer token, cached until
-    shortly before it expires. Returns None if acquisition fails."""
+    shortly before it expires. Returns None if acquisition fails, and
+    briefly backs off so a bad-credential setup doesn't retry-storm the
+    token endpoint (which would draw Reddit's rate limiter)."""
     now = time.time()
     if _token_cache["token"] and now < _token_cache["expires_at"]:
         return _token_cache["token"]
+    if now < _token_cache["retry_after"]:
+        return None  # recent failure; don't hammer
     async with _token_lock:
         now = time.time()
         if _token_cache["token"] and now < _token_cache["expires_at"]:
             return _token_cache["token"]
+        if now < _token_cache["retry_after"]:
+            return None
         try:
             async with httpx.AsyncClient(
                 timeout=15.0, follow_redirects=True,
@@ -260,14 +271,17 @@ async def _get_oauth_token(
                 payload = resp.json()
         except Exception as exc:
             log.warning("reddit token fetch failed: %s", exc)
+            _token_cache["retry_after"] = time.time() + _TOKEN_FAILURE_COOLDOWN
             return None
         token = payload.get("access_token")
         if not token:
             log.warning("reddit token response had no access_token: %s", payload)
+            _token_cache["retry_after"] = time.time() + _TOKEN_FAILURE_COOLDOWN
             return None
         ttl = float(payload.get("expires_in") or _TOKEN_FALLBACK_TTL)
         _token_cache["token"] = token
         _token_cache["expires_at"] = time.time() + max(60.0, ttl - _TOKEN_REFRESH_MARGIN)
+        _token_cache["retry_after"] = 0.0
         log.info("reddit oauth token acquired (ttl=%.0fs).", ttl)
         return token
 

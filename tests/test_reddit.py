@@ -252,3 +252,59 @@ async def test_api_context_falls_back_to_anon_when_token_fails(monkeypatch):
     assert base == _ANON_BASE
     assert json_suffix is True
     assert "Authorization" not in headers
+
+
+@pytest.mark.asyncio
+async def test_token_failure_backs_off_then_reset_clears_it(monkeypatch):
+    """A failed mint sets a retry cooldown so we don't hammer Reddit; a
+    successful mint is cached and reused; reset clears the back-off."""
+    import ipedro.reddit as rd
+
+    reset_token_cache()
+    calls = {"n": 0}
+
+    class _Resp:
+        def __init__(self, status, payload):
+            self.status_code = status
+            self._payload = payload
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise httpx.HTTPStatusError("boom", request=None, response=None)
+
+        def json(self):
+            return self._payload
+
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **k):
+            calls["n"] += 1
+            # First attempt fails (bad creds), later attempts would succeed.
+            if calls["n"] == 1:
+                return _Resp(401, {})
+            return _Resp(200, {"access_token": "TOK", "expires_in": 3600})
+
+    monkeypatch.setattr(rd.httpx, "AsyncClient", _FakeClient)
+
+    # 1st call fails → None, and a back-off is armed.
+    assert await rd._get_oauth_token("id", "sec", "ua") is None
+    assert calls["n"] == 1
+    # 2nd call is inside the cooldown → returns None WITHOUT another POST.
+    assert await rd._get_oauth_token("id", "sec", "ua") is None
+    assert calls["n"] == 1
+    # Clearing the back-off allows a fresh attempt, which now succeeds.
+    reset_token_cache()
+    assert await rd._get_oauth_token("id", "sec", "ua") == "TOK"
+    assert calls["n"] == 2
+    # Subsequent call is served from cache (no new POST).
+    assert await rd._get_oauth_token("id", "sec", "ua") == "TOK"
+    assert calls["n"] == 2
+    reset_token_cache()
