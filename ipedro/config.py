@@ -78,9 +78,9 @@ class Settings(BaseSettings):
 
     # Reddit meme puller (/redditmeme). Reddit blocks generic/duplicate
     # User-Agents; per their API rules a descriptive UA that includes your
-    # reddit username reduces the odds of a 403. Override REDDIT_USER_AGENT
-    # in .env, e.g. "ipedro/1.0 (by /u/yourname)".
-    reddit_user_agent: str = "ipedro/1.0 (Telegram meme bot)"
+    # reddit username reduces the odds of a 403. Defaults to the operator's
+    # username; override REDDIT_USER_AGENT in .env to change it.
+    reddit_user_agent: str = "python:ipedro:1.0 (by /u/moistifarius)"
 
     # Per-chat defaults
     default_response_policy_private: ResponsePolicy = "always"
