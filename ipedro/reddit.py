@@ -20,6 +20,7 @@ import logging
 import os
 import random
 import tempfile
+import time
 from dataclasses import dataclass, field
 
 import httpx
@@ -27,6 +28,17 @@ import httpx
 from ipedro.radio_fx import ffmpeg_available
 
 log = logging.getLogger(__name__)
+
+# OAuth token host vs data host. Reddit blocks anonymous www.reddit.com/.json
+# from datacenter IPs (403); with a "script" app's client_id/secret we mint
+# an application-only (read-only) bearer token at the token host and make
+# all data calls to the OAuth host. See ipedro/reddit.py header + docs.
+_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
+_OAUTH_BASE = "https://oauth.reddit.com"
+_ANON_BASE = "https://www.reddit.com"
+# Refresh a bit before the token actually expires.
+_TOKEN_REFRESH_MARGIN = 120.0
+_TOKEN_FALLBACK_TTL = 3600.0  # used only if the response omits expires_in
 
 # The rotation. Mostly-SFW meme subs; NSFW-tagged posts are filtered out
 # regardless.
@@ -198,6 +210,85 @@ def pick_top_comment(
     return None, None
 
 
+# ───────────────────────────── URL builders (pure) ────────────────────────
+def _listing_url(base: str, sub: str, json_suffix: bool) -> str:
+    return f"{base}/r/{sub}/top{'.json' if json_suffix else ''}"
+
+
+def _comments_url(base: str, permalink: str, json_suffix: bool) -> str:
+    # Anonymous host wants a trailing-slash-free path + .json; the OAuth host
+    # returns JSON natively and 404s on a .json suffix.
+    if json_suffix:
+        return f"{base}{permalink.rstrip('/')}.json"
+    return f"{base}{permalink}"
+
+
+# ───────────────────────────── OAuth token cache ──────────────────────────
+_token_cache: dict = {"token": None, "expires_at": 0.0}
+_token_lock = asyncio.Lock()
+
+
+def reset_token_cache() -> None:
+    """Drop the cached bearer token (tests / forced refresh)."""
+    _token_cache["token"] = None
+    _token_cache["expires_at"] = 0.0
+
+
+async def _get_oauth_token(
+    client_id: str, client_secret: str, user_agent: str,
+) -> str | None:
+    """Application-only (client_credentials) bearer token, cached until
+    shortly before it expires. Returns None if acquisition fails."""
+    now = time.time()
+    if _token_cache["token"] and now < _token_cache["expires_at"]:
+        return _token_cache["token"]
+    async with _token_lock:
+        now = time.time()
+        if _token_cache["token"] and now < _token_cache["expires_at"]:
+            return _token_cache["token"]
+        try:
+            async with httpx.AsyncClient(
+                timeout=15.0, follow_redirects=True,
+            ) as client:
+                resp = await client.post(
+                    _TOKEN_URL,
+                    auth=(client_id, client_secret),   # HTTP Basic
+                    headers={"User-Agent": user_agent},
+                    data={"grant_type": "client_credentials"},  # form-encoded
+                )
+                resp.raise_for_status()
+                payload = resp.json()
+        except Exception as exc:
+            log.warning("reddit token fetch failed: %s", exc)
+            return None
+        token = payload.get("access_token")
+        if not token:
+            log.warning("reddit token response had no access_token: %s", payload)
+            return None
+        ttl = float(payload.get("expires_in") or _TOKEN_FALLBACK_TTL)
+        _token_cache["token"] = token
+        _token_cache["expires_at"] = time.time() + max(60.0, ttl - _TOKEN_REFRESH_MARGIN)
+        log.info("reddit oauth token acquired (ttl=%.0fs).", ttl)
+        return token
+
+
+async def _api_context(
+    client_id: str, client_secret: str, user_agent: str,
+) -> tuple[str, dict, bool]:
+    """Resolve (base_url, request_headers, needs_json_suffix).
+
+    With credentials we authenticate and use the OAuth host; otherwise we
+    fall back to the anonymous host (which usually 403s from servers, but
+    is better than nothing on a residential IP)."""
+    headers = {"User-Agent": user_agent}
+    if client_id and client_secret:
+        token = await _get_oauth_token(client_id, client_secret, user_agent)
+        if token:
+            headers["Authorization"] = f"bearer {token}"
+            return _OAUTH_BASE, headers, False
+    return _ANON_BASE, headers, True
+
+
 # ───────────────────────────── async fetch ────────────────────────────────
 async def _get_json(client: httpx.AsyncClient, url: str, **params):
     try:
@@ -215,22 +306,24 @@ async def fetch_meme(
     *,
     timeout: float = 12.0,
     user_agent: str | None = None,
+    client_id: str = "",
+    client_secret: str = "",
 ) -> Meme | None:
     """Fetch one meme with a top comment. Tries subreddits in random order
     until one yields displayable media; returns None if all fail."""
     r = rng or random
+    ua = user_agent or _USER_AGENT
     subs = list(subreddits)
     r.shuffle(subs)
     # Vary the listing window so it's not the same handful every time.
     window = r.choice(("day", "week"))
+    base, headers, json_suffix = await _api_context(client_id, client_secret, ua)
     async with httpx.AsyncClient(
-        headers={"User-Agent": user_agent or _USER_AGENT},
-        timeout=timeout,
-        follow_redirects=True,
+        headers=headers, timeout=timeout, follow_redirects=True,
     ) as client:
         for sub in subs:
             listing = await _get_json(
-                client, f"https://www.reddit.com/r/{sub}/top.json",
+                client, _listing_url(base, sub, json_suffix),
                 t=window, limit=75, raw_json=1,
             )
             if not listing:
@@ -244,7 +337,7 @@ async def fetch_meme(
             comment = author = None
             comments = await _get_json(
                 client,
-                f"https://www.reddit.com{post.get('permalink', '')}.json",
+                _comments_url(base, post.get("permalink", ""), json_suffix),
                 sort="top", limit=25, raw_json=1,
             )
             if isinstance(comments, list) and len(comments) >= 2:
@@ -259,6 +352,49 @@ async def fetch_meme(
                 comment_author=author,
             )
     return None
+
+
+async def diagnose(
+    *, user_agent: str = "", client_id: str = "", client_secret: str = "",
+    timeout: float = 15.0,
+) -> dict:
+    """Structured self-diagnosis for /debug_redditmeme: which mode, whether
+    the token was obtained, and the HTTP status of a real listing call."""
+    ua = user_agent or _USER_AGENT
+    report: dict = {
+        "credentials_set": bool(client_id and client_secret),
+        "user_agent": ua,
+        "mode": "anonymous",
+        "token_ok": None,
+        "listing_status": None,
+        "listing_children": None,
+        "error": None,
+    }
+    reset_token_cache()
+    try:
+        base, headers, json_suffix = await _api_context(client_id, client_secret, ua)
+        report["mode"] = "oauth" if base == _OAUTH_BASE else "anonymous"
+        if report["credentials_set"]:
+            report["token_ok"] = "Authorization" in headers
+        async with httpx.AsyncClient(
+            headers=headers, timeout=timeout, follow_redirects=True,
+        ) as client:
+            resp = await client.get(
+                _listing_url(base, SUBREDDITS[0], json_suffix),
+                params={"t": "day", "limit": 5, "raw_json": 1},
+            )
+            report["listing_status"] = resp.status_code
+            if resp.status_code == 200:
+                try:
+                    j = resp.json()
+                    report["listing_children"] = len(
+                        (j.get("data") or {}).get("children") or []
+                    )
+                except Exception:
+                    report["error"] = "200 but body was not JSON"
+    except Exception as exc:
+        report["error"] = f"{type(exc).__name__}: {exc}"
+    return report
 
 
 # ───────────────────────────── media download ─────────────────────────────

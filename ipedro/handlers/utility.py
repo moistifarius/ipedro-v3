@@ -524,10 +524,15 @@ def build_router(rt: Runtime) -> Router:
         await get_or_create_chat_config(rt, msg)
         await rt.bot.send_chat_action(msg.chat.id, "upload_photo")
         ua = rt.settings.reddit_user_agent
-        meme = await fetch_meme(user_agent=ua)
+        meme = await fetch_meme(
+            user_agent=ua,
+            client_id=rt.settings.reddit_client_id,
+            client_secret=rt.settings.reddit_client_secret,
+        )
         if meme is None:
             await msg.reply(
-                "Sh-sha. Feeds are quiet or blocking me. Try again in a bit.",
+                "Sh-sha. Feeds are quiet or blocking me. Try again in a bit. "
+                "(Admin: /debug_redditmeme to see why.)",
                 disable_notification=True,
             )
             return

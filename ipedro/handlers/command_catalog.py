@@ -356,6 +356,10 @@ COMMANDS: tuple[Command, ...] = (
     Command("debug_sharephoto","debug", "/debug_sharephoto",
             "/debug_sharephoto",
             "Force Dale to generate + post a photo now."),
+    Command("debug_redditmeme","debug", "/debug_redditmeme",
+            "/debug_redditmeme",
+            "Diagnose /redditmeme: oauth mode, token acquisition, and the "
+            "HTTP status of a real Reddit data call."),
     Command("debug_ether",  "debug", "/debug_ether",
             "/debug_ether",
             "Force one ether broadcast right now (needs ≥ 2 ether-enabled chats)."),

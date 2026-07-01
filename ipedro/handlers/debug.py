@@ -26,6 +26,8 @@ _HELP = (
     "Debug commands (admin only):\n"
     "  /debug_help — this list\n"
     "  /debug_sharephoto — force Dale to generate + post a photo now\n"
+    "  /debug_redditmeme — diagnose why /redditmeme is or isn't working "
+    "(oauth mode, token, HTTP status)\n"
     "  /debug_ether — force one ether broadcast right now (needs ≥ 2 ether-enabled chats)\n"
     "  /ether_status — show which interference source (live WebSDR / bundled / synthetic) the last ether used, and cache state\n"
     "  /ether_refresh — drop the live shortwave cache; next /ether will refetch from the WebSDR list\n"
@@ -73,6 +75,52 @@ def build_router(rt: Runtime) -> Router:
             return
         await msg.reply("Generating photo…", disable_notification=True)
         await _take_and_post_photo(msg.chat.id, rt.bot, rt.openai)
+
+    @r.message(Command("debug_redditmeme"))
+    async def debug_redditmeme(msg: Message) -> None:
+        """Diagnose why /redditmeme is (or isn't) working."""
+        if not await require_admin(msg, rt.settings.admin_ids):
+            return
+        from ipedro.reddit import diagnose
+        rep = await diagnose(
+            user_agent=rt.settings.reddit_user_agent,
+            client_id=rt.settings.reddit_client_id,
+            client_secret=rt.settings.reddit_client_secret,
+        )
+        lines = [
+            "🔎 /redditmeme diagnosis",
+            f"  credentials set: {rep['credentials_set']}",
+            f"  mode: {rep['mode']}",
+            f"  user-agent: {rep['user_agent']}",
+        ]
+        if rep["credentials_set"]:
+            lines.append(f"  oauth token: {'ok' if rep['token_ok'] else 'FAILED'}")
+        lines.append(f"  listing HTTP status: {rep['listing_status']}")
+        if rep["listing_children"] is not None:
+            lines.append(f"  posts returned: {rep['listing_children']}")
+        if rep["error"]:
+            lines.append(f"  error: {rep['error']}")
+        # Actionable hint.
+        if not rep["credentials_set"]:
+            lines.append(
+                "\nNo Reddit app credentials. Reddit blocks anonymous access "
+                "from servers (403). Create a 'script' app at "
+                "https://www.reddit.com/prefs/apps and set REDDIT_CLIENT_ID + "
+                "REDDIT_CLIENT_SECRET in .env."
+            )
+        elif rep["credentials_set"] and not rep["token_ok"]:
+            lines.append(
+                "\nToken request failed — check REDDIT_CLIENT_ID / "
+                "REDDIT_CLIENT_SECRET are correct and the app is a 'script' "
+                "type (which has a secret)."
+            )
+        elif rep["listing_status"] and rep["listing_status"] != 200:
+            lines.append(
+                f"\nReddit returned {rep['listing_status']} on a data call. "
+                "429 = rate-limited (wait); 401 = token/scope issue; 403 = "
+                "still blocked."
+            )
+        await msg.reply("\n".join(lines), disable_notification=True)
 
     @r.message(Command("debug_ether"))
     async def debug_ether(msg: Message) -> None:

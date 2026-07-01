@@ -4,13 +4,21 @@ from __future__ import annotations
 
 import random
 
+import pytest
+
 from ipedro.reddit import (
+    _ANON_BASE,
+    _OAUTH_BASE,
     Meme,
     Media,
+    _api_context,
+    _comments_url,
+    _listing_url,
     build_caption,
     choose_post,
     pick_top_comment,
     reddit_audio_candidates,
+    reset_token_cache,
     resolve_media,
 )
 
@@ -181,3 +189,66 @@ def test_build_caption_truncates_to_limit():
     assert len(cap) <= 1024
     assert cap.endswith("· r/funny")
     assert "…" in cap
+
+
+# ───────────────────────────── url builders ───────────────────────────────
+def test_listing_url_oauth_has_no_json_suffix():
+    assert _listing_url(_OAUTH_BASE, "memes", False) == \
+        "https://oauth.reddit.com/r/memes/top"
+
+
+def test_listing_url_anonymous_has_json_suffix():
+    assert _listing_url(_ANON_BASE, "memes", True) == \
+        "https://www.reddit.com/r/memes/top.json"
+
+
+def test_comments_url_oauth_keeps_permalink_no_suffix():
+    url = _comments_url(_OAUTH_BASE, "/r/memes/comments/abc/slug/", False)
+    assert url == "https://oauth.reddit.com/r/memes/comments/abc/slug/"
+
+
+def test_comments_url_anonymous_strips_slash_and_adds_json():
+    url = _comments_url(_ANON_BASE, "/r/memes/comments/abc/slug/", True)
+    assert url == "https://www.reddit.com/r/memes/comments/abc/slug.json"
+
+
+# ───────────────────────── api context / token ────────────────────────────
+@pytest.mark.asyncio
+async def test_api_context_anonymous_without_credentials():
+    reset_token_cache()
+    # No network hit when creds absent — resolves straight to anon.
+    base, headers, json_suffix = await _api_context("", "", "ua/1.0")
+    assert base == _ANON_BASE
+    assert json_suffix is True
+    assert "Authorization" not in headers
+    assert headers["User-Agent"] == "ua/1.0"
+
+
+@pytest.mark.asyncio
+async def test_api_context_uses_cached_token_for_oauth(monkeypatch):
+    """With creds + a (mocked) valid cached token, we hit the OAuth host
+    with a bearer header and no .json suffix."""
+    import ipedro.reddit as rd
+
+    async def _fake_token(cid, secret, ua):
+        return "TOK123"
+
+    monkeypatch.setattr(rd, "_get_oauth_token", _fake_token)
+    base, headers, json_suffix = await _api_context("id", "secret", "ua/1.0")
+    assert base == _OAUTH_BASE
+    assert json_suffix is False
+    assert headers["Authorization"] == "bearer TOK123"
+
+
+@pytest.mark.asyncio
+async def test_api_context_falls_back_to_anon_when_token_fails(monkeypatch):
+    import ipedro.reddit as rd
+
+    async def _no_token(cid, secret, ua):
+        return None
+
+    monkeypatch.setattr(rd, "_get_oauth_token", _no_token)
+    base, headers, json_suffix = await _api_context("id", "secret", "ua/1.0")
+    assert base == _ANON_BASE
+    assert json_suffix is True
+    assert "Authorization" not in headers

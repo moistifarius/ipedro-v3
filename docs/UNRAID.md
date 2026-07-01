@@ -103,6 +103,35 @@ gunzip -c /mnt/user/backups/ipedro-YYYY-MM-DD.sql.gz \
     | docker compose exec -T postgres psql -U ipedro -d ipedro
 ```
 
+## Reddit memes (`/redditmeme`)
+
+Reddit blocks its anonymous `.json` API from server/datacenter IPs (HTTP
+403), so `/redditmeme` uses Reddit's OAuth **application-only** (read-only)
+access. You need a free Reddit "script" app:
+
+1. Sign in to Reddit, go to <https://www.reddit.com/prefs/apps>.
+2. Click **create another app…** at the bottom.
+3. Name it anything (e.g. `ipedro`), choose type **script**.
+4. Set **redirect uri** to `http://localhost:8080` (unused for read-only,
+   but the form requires one).
+5. Create it. The **client id** is the string just under the app name
+   (near "personal use script"); the **secret** is the `secret` field.
+
+Add both to `.env`:
+
+```bash
+REDDIT_CLIENT_ID=your_client_id
+REDDIT_CLIENT_SECRET=your_client_secret
+# Optional — a descriptive UA cuts throttling. Defaults to /u/moistifarius.
+REDDIT_USER_AGENT=python:ipedro:1.0 (by /u/yourname)
+```
+
+Restart the stack, then run `/debug_redditmeme` (admin) in a chat: it
+reports the mode (oauth vs anonymous), whether the token was obtained, and
+the HTTP status of a real Reddit call — so you can tell at a glance if the
+credentials are wired up. The bot caches the bearer token and reuses it
+(re-minting only near expiry), and honors Reddit's rate limits.
+
 ## Troubleshooting
 
 - **`extension "vector" does not exist`** — `pgvector/pgvector:pg16` ships
