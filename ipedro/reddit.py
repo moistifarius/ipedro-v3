@@ -316,9 +316,15 @@ def pick_top_comment(
 #     got/have would match declaratives and negations;
 #   * "meme this" must be (basically) the whole message.
 # These also only run on messages the bot was answering anyway.
+# Every name the bot answers to (current persona + legacy aliases) —
+# "duder gimme a meme about that" is as much a request as "pedro …".
+_BOT_NAMES = (
+    r"(?:pedro|idale|dale(?:\s+gribble)?|rusty(?:\s+shackleford)?"
+    r"|boomhauer|dude(?:r(?:ino)?)?|el\s+duderino|bot)"
+)
 _REQ_PREFIX = (
     r"(?:^|[.!?]\s+|,\s*"
-    r"|\b(?:pedro|dale|rusty|idale|bot)\b[,!:]?\s+"
+    r"|\b" + _BOT_NAMES + r"\b[,!:]?\s+"
     r"|\b(?:please|pls)\s+"
     r"|\b(?:can|could|will|would)\s+(?:you|u)\s+(?:please\s+)?)"
 )
@@ -342,7 +348,7 @@ _MEME_QUESTION_RE = re.compile(
 # punctuation allowed) — "meme this" mid-sentence is never a request.
 _MEME_THIS_RE = re.compile(
     r"^\W*(?:(?:hey|ok|okay|yo)[,!\s]+)?"
-    r"(?:(?:pedro|dale|rusty|idale|bot)[,!:\s]+)?"
+    r"(?:" + _BOT_NAMES + r"[,!:\s]+)?"
     r"memes?\s+(?:this|that)[\s.!?]*$",
     re.IGNORECASE,
 )

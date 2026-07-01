@@ -613,3 +613,20 @@ def test_detect_meme_request_rejects_casual_mentions(text):
 def test_detect_meme_request_hardened_positives(text, expected):
     from ipedro.reddit import detect_meme_request
     assert detect_meme_request(text) == expected
+
+
+@pytest.mark.parametrize("text,expected", [
+    # casual name-first asks — every alias the bot answers to counts as
+    # a request lead-in ("duder gimme a meme about that?")
+    ("duder gimme a meme about that?", ""),
+    ("pedro gimme a meme about that?", ""),
+    ("dude, gimme a meme about that", ""),
+    ("hey duder gimme a meme about the game", "the game"),
+    ("boomhauer give me a meme about cats", "cats"),
+    ("duderino post a meme about mondays", "mondays"),
+    ("duder meme this", ""),
+    ("el duderino, meme that", ""),
+])
+def test_detect_meme_request_all_bot_name_leadins(text, expected):
+    from ipedro.reddit import detect_meme_request
+    assert detect_meme_request(text) == expected
