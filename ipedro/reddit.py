@@ -170,18 +170,12 @@ def resolve_media(post: dict) -> Media | None:
     return None
 
 
-def choose_post(
-    listing: dict, rng: random.Random | None = None,
-    *, top_k: int | None = None,
-) -> dict | None:
-    """Pick a random displayable, SFW, non-stickied post from a listing.
-
-    ``top_k`` limits the pool to the first K displayable candidates — used
-    for relevance-sorted search results, where the further down the list
-    you go the less the post has to do with the query."""
-    r = rng or random
+def _displayable_posts(listing: dict, top_k: int | None = None) -> list[dict]:
+    """Displayable, SFW, non-stickied post dicts from a listing, in listing
+    order (which is relevance/score order for searches). ``top_k`` caps the
+    result."""
     children = (listing.get("data") or {}).get("children") or []
-    candidates = []
+    out: list[dict] = []
     for c in children:
         if c.get("kind") != "t3":
             continue
@@ -190,12 +184,53 @@ def choose_post(
             continue
         if resolve_media(d) is None:
             continue
-        candidates.append(d)
-        if top_k is not None and len(candidates) >= top_k:
+        out.append(d)
+        if top_k is not None and len(out) >= top_k:
             break
+    return out
+
+
+def choose_post(
+    listing: dict, rng: random.Random | None = None,
+    *, top_k: int | None = None,
+) -> dict | None:
+    """Pick a random displayable post from a listing (see
+    ``_displayable_posts``). ``top_k`` limits the pool to the first K
+    candidates — used for relevance-sorted search results, where the
+    further down the list you go the less the post has to do with the
+    query."""
+    r = rng or random
+    candidates = _displayable_posts(listing, top_k)
     if not candidates:
         return None
     return r.choice(candidates)
+
+
+def pick_topic_subreddits(
+    listing: dict, limit: int = 2, min_subscribers: int = 5000,
+) -> list[str]:
+    """Community names from a /subreddits/search listing worth pulling
+    topic memes from: public, SFW, not a user profile, and big enough to
+    actually have content. Preserves Reddit's relevance order."""
+    children = (listing.get("data") or {}).get("children") or []
+    out: list[str] = []
+    for c in children:
+        if c.get("kind") != "t5":
+            continue
+        d = c.get("data") or {}
+        name = d.get("display_name") or ""
+        if not name or name.lower().startswith("u_"):
+            continue
+        if d.get("over18") or d.get("over_18"):
+            continue
+        if (d.get("subreddit_type") or "public") != "public":
+            continue
+        if int(d.get("subscribers") or 0) < min_subscribers:
+            continue
+        out.append(name)
+        if len(out) >= limit:
+            break
+    return out
 
 
 # Reddit comment media embeds. A Giphy gif comment's body looks like
@@ -341,6 +376,11 @@ def _search_url(base: str, subs: tuple[str, ...], json_suffix: bool) -> str:
 
 def _sitewide_search_url(base: str, json_suffix: bool) -> str:
     return f"{base}/search{'.json' if json_suffix else ''}"
+
+
+def _subreddit_search_url(base: str, json_suffix: bool) -> str:
+    """Community search — used to discover the topic's own subreddit(s)."""
+    return f"{base}/subreddits/search{'.json' if json_suffix else ''}"
 
 
 def _comments_url(base: str, permalink: str, json_suffix: bool) -> str:
@@ -514,6 +554,136 @@ async def _meme_from_post(
     )
 
 
+async def search_topic_subreddits(
+    query: str,
+    *,
+    limit: int = 2,
+    timeout: float = 12.0,
+    user_agent: str | None = None,
+    client_id: str = "",
+    client_secret: str = "",
+) -> list[str]:
+    """Discover the topic's own communities via /subreddits/search — so a
+    'meme about the lakers' can come from r/lakers, not just r/memes."""
+    query = (query or "").strip()
+    if not query:
+        return []
+    ua = user_agent or _USER_AGENT
+    base, headers, json_suffix = await _api_context(client_id, client_secret, ua)
+    async with httpx.AsyncClient(
+        headers=headers, timeout=timeout, follow_redirects=True,
+    ) as client:
+        listing = await _get_json(
+            client, _subreddit_search_url(base, json_suffix),
+            q=query, limit=10, raw_json=1,
+        )
+    if not listing:
+        return []
+    return pick_topic_subreddits(listing, limit=limit)
+
+
+async def candidates_from_topic_sub(
+    sub: str,
+    *,
+    limit: int = 6,
+    timeout: float = 12.0,
+    user_agent: str | None = None,
+    client_id: str = "",
+    client_secret: str = "",
+) -> list[dict]:
+    """Meme-ish media posts from a topic's own community: search 'meme'
+    inside it first (top of all time — the community's classics), falling
+    back to its recent top media posts."""
+    if not sub:
+        return []
+    ua = user_agent or _USER_AGENT
+    base, headers, json_suffix = await _api_context(client_id, client_secret, ua)
+    async with httpx.AsyncClient(
+        headers=headers, timeout=timeout, follow_redirects=True,
+    ) as client:
+        listing = await _get_json(
+            client, _search_url(base, (sub,), json_suffix),
+            q="meme", restrict_sr="on", sort="top", t="year",
+            limit=25, raw_json=1,
+        )
+        posts = _displayable_posts(listing, limit) if listing else []
+        if not posts:
+            listing = await _get_json(
+                client, _listing_url(base, sub, json_suffix),
+                t="month", limit=25, raw_json=1,
+            )
+            posts = _displayable_posts(listing, limit) if listing else []
+    return posts
+
+
+async def search_meme_candidates(
+    query: str,
+    *,
+    limit: int = 8,
+    timeout: float = 12.0,
+    user_agent: str | None = None,
+    client_id: str = "",
+    client_secret: str = "",
+) -> list[dict]:
+    """Candidate meme posts for ``query`` from the big meme subs
+    (relevance search inside them returns actual memes), then a sitewide
+    search with 'meme' appended. Deduped by permalink, listing order
+    preserved (relevance-first)."""
+    query = (query or "").strip()
+    if not query:
+        return []
+    ua = user_agent or _USER_AGENT
+    base, headers, json_suffix = await _api_context(client_id, client_secret, ua)
+    attempts: list[tuple[str, dict]] = [
+        (
+            _search_url(base, MEME_SEARCH_SUBS, json_suffix),
+            dict(q=query, restrict_sr="on", sort="relevance",
+                 t="all", limit=50, raw_json=1),
+        ),
+        (
+            _sitewide_search_url(base, json_suffix),
+            dict(q=f"{query} meme", sort="relevance",
+                 t="all", limit=50, raw_json=1),
+        ),
+    ]
+    out: list[dict] = []
+    seen: set[str] = set()
+    async with httpx.AsyncClient(
+        headers=headers, timeout=timeout, follow_redirects=True,
+    ) as client:
+        for url, params in attempts:
+            listing = await _get_json(client, url, **params)
+            if not listing:
+                continue
+            for d in _displayable_posts(listing, limit):
+                key = d.get("permalink") or d.get("url") or ""
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(d)
+            if len(out) >= limit:
+                break
+    return out[:limit]
+
+
+async def meme_for_post(
+    post: dict,
+    *,
+    timeout: float = 12.0,
+    user_agent: str | None = None,
+    client_id: str = "",
+    client_secret: str = "",
+) -> Meme | None:
+    """Build a full Meme (media + top comment) from a candidate post dict
+    picked by the caller."""
+    ua = user_agent or _USER_AGENT
+    base, headers, json_suffix = await _api_context(client_id, client_secret, ua)
+    async with httpx.AsyncClient(
+        headers=headers, timeout=timeout, follow_redirects=True,
+    ) as client:
+        return await _meme_from_post(client, base, json_suffix, post)
+
+
 async def fetch_meme_about(
     topic: str,
     rng: random.Random | None = None,
@@ -524,43 +694,23 @@ async def fetch_meme_about(
     client_secret: str = "",
 ) -> Meme | None:
     """Search Reddit for a meme about ``topic`` and return it with its top
-    comment. Tries the big meme subs first (relevance search inside them
-    returns actual memes), then a sitewide search with 'meme' appended.
-    Picks among the first few displayable hits so repeat asks vary without
-    drifting into irrelevance. Returns None when nothing usable surfaces.
-    """
+    comment. Thin composition of search_meme_candidates + meme_for_post —
+    picks among the first few hits so repeat asks vary. The smarter
+    multi-source, AI-judged path lives in ipedro.meme_finder; this remains
+    the simple no-AI variant."""
     topic = (topic or "").strip()
     if not topic:
         return None
     r = rng or random
-    ua = user_agent or _USER_AGENT
-    base, headers, json_suffix = await _api_context(client_id, client_secret, ua)
-    attempts: list[tuple[str, dict]] = [
-        (
-            _search_url(base, MEME_SEARCH_SUBS, json_suffix),
-            dict(q=topic, restrict_sr="on", sort="relevance",
-                 t="all", limit=50, raw_json=1),
-        ),
-        (
-            _sitewide_search_url(base, json_suffix),
-            dict(q=f"{topic} meme", sort="relevance",
-                 t="all", limit=50, raw_json=1),
-        ),
-    ]
-    async with httpx.AsyncClient(
-        headers=headers, timeout=timeout, follow_redirects=True,
-    ) as client:
-        for url, params in attempts:
-            listing = await _get_json(client, url, **params)
-            if not listing:
-                continue
-            post = choose_post(listing, r, top_k=8)
-            if not post:
-                continue
-            meme = await _meme_from_post(client, base, json_suffix, post)
-            if meme:
-                return meme
-    return None
+    creds = dict(
+        timeout=timeout, user_agent=user_agent,
+        client_id=client_id, client_secret=client_secret,
+    )
+    candidates = await search_meme_candidates(topic, **creds)
+    if not candidates:
+        return None
+    post = r.choice(candidates)
+    return await meme_for_post(post, **creds)
 
 
 async def diagnose(

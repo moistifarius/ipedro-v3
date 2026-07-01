@@ -516,3 +516,62 @@ async def test_fetch_meme_about_empty_topic_short_circuits(monkeypatch):
     monkeypatch.setattr(rd, "_api_context", boom)
     assert await rd.fetch_meme_about("") is None
     assert await rd.fetch_meme_about("   ") is None
+
+
+# ───────────────────── topic-subreddit discovery ──────────────────────────
+def _t5(**data):
+    return {"kind": "t5", "data": data}
+
+
+def test_pick_topic_subreddits_filters_and_orders():
+    from ipedro.reddit import pick_topic_subreddits
+    listing = {"data": {"children": [
+        _t5(display_name="u_someuser", subscribers=99999),        # profile
+        _t5(display_name="nsfwsub", over18=True, subscribers=99999),
+        _t5(display_name="tiny", subscribers=12),                 # too small
+        _t5(display_name="privateclub", subreddit_type="private",
+            subscribers=99999),
+        _t5(display_name="lakers", subscribers=800000),           # ✓
+        _t5(display_name="nba", subscribers=9000000),             # ✓
+        _t5(display_name="basketball", subscribers=500000),       # over limit
+    ]}}
+    assert pick_topic_subreddits(listing, limit=2) == ["lakers", "nba"]
+
+
+def test_subreddit_search_url():
+    from ipedro.reddit import _subreddit_search_url
+    assert _subreddit_search_url(_OAUTH_BASE, False) == \
+        "https://oauth.reddit.com/subreddits/search"
+    assert _subreddit_search_url(_ANON_BASE, True) == \
+        "https://www.reddit.com/subreddits/search.json"
+
+
+@pytest.mark.asyncio
+async def test_candidates_from_topic_sub_falls_back_to_top_listing(monkeypatch):
+    import ipedro.reddit as rd
+
+    calls = []
+
+    async def fake_api_context(cid, secret, ua):
+        return rd._ANON_BASE, {"User-Agent": ua}, True
+
+    async def fake_get_json(client, url, **params):
+        calls.append((url, params))
+        if "/search" in url:
+            return None                                    # sub search dry
+        if "/top" in url:
+            return {"data": {"children": [
+                _t3(url="https://i.redd.it/top.jpg", title="community classic",
+                    subreddit="lakers", permalink="/r/lakers/comments/z/x/"),
+            ]}}
+        return None
+
+    monkeypatch.setattr(rd, "_api_context", fake_api_context)
+    monkeypatch.setattr(rd, "_get_json", fake_get_json)
+
+    posts = await rd.candidates_from_topic_sub("lakers")
+    assert len(posts) == 1 and posts[0]["title"] == "community classic"
+    # First tried the in-sub 'meme' search, then the top listing.
+    assert "/r/lakers/search" in calls[0][0]
+    assert calls[0][1]["q"] == "meme"
+    assert "/r/lakers/top" in calls[1][0]

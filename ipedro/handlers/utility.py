@@ -21,9 +21,8 @@ from aiogram.types import (
 from ipedro.bot_messages import track
 from ipedro.handlers.common import display_name, get_or_create_chat_config
 from ipedro.on_this_day import build_on_this_day, render_on_this_day
-from ipedro.reddit import (
-    build_caption, download_media, fetch_meme, fetch_meme_about,
-)
+from ipedro.meme_finder import find_relevant_meme
+from ipedro.reddit import build_caption, download_media, fetch_meme
 from ipedro.prompts import (
     COMPLIMENT_PROMPT, ECHO_PROMPT, HAIKU_PROMPT, MISHEARD_LYRIC_PROMPT,
     ROAST_PROMPT, THIS_OR_THAT_PROMPT, TLDR_PROMPT,
@@ -589,7 +588,14 @@ def build_router(rt: Runtime) -> Router:
             client_secret=rt.settings.reddit_client_secret,
         )
         if topic:
-            meme = await fetch_meme_about(topic, **creds)
+            # Judged search: candidates from the topic's own subreddit,
+            # the meme subs, and sitewide; the cheap model picks the one
+            # that actually matches (trust_first: an explicit topic that
+            # matched the user's literal words still posts on judge-doubt).
+            meme = await find_relevant_meme(
+                rt.openai, [topic], topic_label=topic, trust_first=True,
+                chat_id=msg.chat.id, **creds,
+            )
         else:
             meme = await fetch_meme(**creds)
         if meme is None:

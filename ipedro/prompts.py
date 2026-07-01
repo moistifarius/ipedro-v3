@@ -168,13 +168,26 @@ ON_THIS_DAY_PROMPT = (
     "Messages:\n{messages}"
 )
 
-MEME_TOPIC_PROMPT = (
-    "Below are the latest messages from a group chat. Distill what the "
-    "group is currently talking about into a short search query (2-5 plain "
-    "words, lowercase, no punctuation, no quotes) suitable for finding a "
-    "relevant meme. Ignore messages that ask the bot for a meme — find the "
-    "topic UNDER that request. Output ONLY the query.\n\n"
+MEME_QUERIES_PROMPT = (
+    "Below are the latest messages from a group chat. Output THREE "
+    "alternative reddit search queries for finding a meme about what the "
+    "group is currently discussing — one per line, most specific first:\n"
+    "  line 1: the core subject in 2-4 words\n"
+    "  line 2: the broader concept in 1-2 words\n"
+    "  line 3: a different angle or synonym for the same topic\n"
+    "Plain lowercase words only. No punctuation, no numbering, no quotes, "
+    "no explanations. Ignore messages that ask the bot for a meme — find "
+    "the topic UNDER that request.\n\n"
     "Messages:\n{messages}"
+)
+
+MEME_PICK_PROMPT = (
+    "You are choosing the meme most relevant to what a group chat is "
+    "talking about.\n"
+    "Topic: {topic}\n\n"
+    "Candidate reddit posts:\n{candidates}\n\n"
+    "Reply with ONLY the number of the single most relevant candidate. "
+    "If none of them genuinely relate to the topic, reply 0."
 )
 
 HAIKU_PROMPT = (
