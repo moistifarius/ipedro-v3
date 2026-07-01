@@ -15,12 +15,10 @@ from ipedro.reddit import (
     _comments_url,
     _listing_url,
     build_caption,
-    build_reddit_comment_prompt,
     choose_post,
     clean_comment_text,
     extract_comment_media,
     pick_top_comment,
-    pick_top_comments,
     reddit_audio_candidates,
     reset_token_cache,
     resolve_media,
@@ -224,68 +222,6 @@ def test_extract_comment_media_giphy_fallback_from_body():
 
 def test_extract_comment_media_none_for_plain_text():
     assert extract_comment_media({"body": "just a normal comment"}) is None
-
-
-# ─────────────────────── multi-comment gathering ──────────────────────────
-def test_pick_top_comments_returns_several_in_order():
-    listing = {"data": {"children": [
-        _t1(stickied=True, body="rules", author="mod"),      # skipped
-        _t1(body="first", author="a"),
-        _t1(body="[removed]", author="x"),                    # skipped
-        _t1(body="second", author="b"),
-        _t1(body="third", author="c"),
-    ]}}
-    got = pick_top_comments(listing, limit=6)
-    assert [c["body"] for c in got] == ["first", "second", "third"]
-
-
-def test_pick_top_comments_respects_limit():
-    listing = {"data": {"children": [
-        _t1(body=f"c{i}", author=f"u{i}") for i in range(10)
-    ]}}
-    assert len(pick_top_comments(listing, limit=3)) == 3
-
-
-# ─────────────────────── AI reaction prompt ───────────────────────────────
-def test_build_reddit_comment_prompt_includes_material_and_members():
-    meme = Meme(subreddit="me_irl", title="monday again", post_author="op",
-                permalink="/x", media=Media("photo", "u"),
-                top_comments=["so real", "this is me fr"])
-    msgs = build_reddit_comment_prompt(
-        meme, ["Matt", "Sarah", "Matt"], "you are literally dale gribble",
-    )
-    assert msgs[0]["role"] == "system" and msgs[1]["role"] == "user"
-    # Persona carried into the system message.
-    assert "dale gribble" in msgs[0]["content"]
-    # It must forbid copying the comments verbatim.
-    assert "do not copy" in msgs[0]["content"].lower() or \
-        "do NOT copy" in msgs[0]["content"]
-    user = msgs[1]["content"]
-    assert "monday again" in user and "r/me_irl" in user
-    assert "so real" in user            # comments as inspiration
-    # Members deduped ("Matt" once) and listed.
-    assert "Matt" in user and "Sarah" in user
-    assert user.count("Matt") == 1
-
-
-def test_build_reddit_comment_prompt_handles_empty_material():
-    meme = Meme(subreddit="funny", title="", post_author="op",
-                permalink="/x", media=Media("photo", "u"), top_comments=[])
-    msgs = build_reddit_comment_prompt(meme, [], "persona")
-    user = msgs[1]["content"]
-    assert "(none)" in user           # no comments
-    assert "(unknown)" in user        # no members
-    assert "(untitled)" in user       # no title
-
-
-def test_build_reddit_comment_prompt_appends_extra_context():
-    meme = Meme(subreddit="memes", title="t", post_author="op",
-                permalink="/x", media=Media("photo", "u"),
-                top_comments=["a"])
-    msgs = build_reddit_comment_prompt(
-        meme, ["Liz"], "persona", extra_context="they've been arguing about pizza",
-    )
-    assert "arguing about pizza" in msgs[1]["content"]
 
 
 # ───────────────────────────── caption ────────────────────────────────────

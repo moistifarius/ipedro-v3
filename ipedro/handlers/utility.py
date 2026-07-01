@@ -20,12 +20,8 @@ from aiogram.types import (
 
 from ipedro.bot_messages import track
 from ipedro.handlers.common import display_name, get_or_create_chat_config
-from ipedro.impersonate import chat_members
 from ipedro.on_this_day import build_on_this_day, render_on_this_day
-from ipedro.personas import resolve_persona
-from ipedro.reddit import (
-    build_caption, build_reddit_comment_prompt, download_media, fetch_meme,
-)
+from ipedro.reddit import build_caption, download_media, fetch_meme
 from ipedro.prompts import (
     COMPLIMENT_PROMPT, ECHO_PROMPT, HAIKU_PROMPT, MISHEARD_LYRIC_PROMPT,
     ROAST_PROMPT, THIS_OR_THAT_PROMPT, TLDR_PROMPT,
@@ -75,40 +71,6 @@ def _parse_user_date(raw: str) -> tuple[int, int, int | None] | None:
         except ValueError:
             continue
     return None
-
-
-async def _reddit_reaction_caption(rt: Runtime, chat_id: int, meme, cfg) -> str:
-    """The caption for a /redditmeme post: the bot's OWN one-line reaction,
-    generated from the Reddit discussion + who's in the chat, in the chat's
-    persona voice. Falls back to the verbatim top comment (build_caption)
-    when generation is unavailable or empty."""
-    footer = f"\n\n· r/{meme.subreddit}"
-    try:
-        members = await chat_members(rt.db, chat_id)
-        names = [m.first_name or m.name for m in members]
-        extra = None
-        if cfg.memory_enabled:
-            summary = await rt.memory.latest_summary(chat_id)
-            if summary and summary.summary:
-                extra = summary.summary[:600]
-        persona_text = resolve_persona(cfg.persona, cfg.persona_custom)
-        messages = build_reddit_comment_prompt(
-            meme, names, persona_text, extra_context=extra,
-        )
-        line = await rt.openai.cheap_chat(
-            messages, max_tokens=120, temperature=1.0, chat_id=chat_id,
-        )
-        line = (line or "").strip().strip('"')
-    except Exception as exc:  # pragma: no cover - defensive
-        log.info("reddit reaction generation failed in %s: %s", chat_id, exc)
-        line = ""
-    if not line:
-        return build_caption(meme)   # fall back to the verbatim top comment
-    body = line
-    budget = 1024 - len(footer)
-    if len(body) > budget:
-        body = body[: budget - 1].rstrip() + "…"
-    return f"{body}{footer}"
 
 
 async def _answer_reddit_media(
@@ -579,10 +541,8 @@ def build_router(rt: Runtime) -> Router:
     @r.message(Command("redditmeme", "rmeme"))
     async def redditmeme(msg: Message) -> None:
         """/redditmeme (/rmeme) — pull a meme from a rotation of subreddits
-        and post it. Instead of parroting the top comment, the bot writes
-        its OWN reaction, riffing on the discussion and tailored to who's
-        in the chat."""
-        cfg = await get_or_create_chat_config(rt, msg)
+        and post it with the post's top comment as the caption."""
+        await get_or_create_chat_config(rt, msg)
         await rt.bot.send_chat_action(msg.chat.id, "upload_photo")
         ua = rt.settings.reddit_user_agent
         meme = await fetch_meme(
@@ -604,7 +564,7 @@ def build_router(rt: Runtime) -> Router:
                 disable_notification=True,
             )
             return
-        caption = await _reddit_reaction_caption(rt, msg.chat.id, meme, cfg)
+        caption = build_caption(meme)
         try:
             sent = await _answer_reddit_media(
                 msg, data, meme.media.kind, caption,

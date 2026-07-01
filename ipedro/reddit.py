@@ -79,9 +79,6 @@ class Meme:
     # Some top comments ARE media (a Giphy gif, an image reply). When so,
     # this holds the gif/image to post instead of the raw markdown.
     comment_media: Media | None = None
-    # Cleaned text of the top few comments — raw material for the bot to
-    # write its OWN reaction from (see build_reddit_comment_prompt).
-    top_comments: list[str] = field(default_factory=list)
 
 
 # ───────────────────────────── pure helpers ───────────────────────────────
@@ -233,15 +230,15 @@ def extract_comment_media(comment: dict) -> Media | None:
     return None
 
 
-def pick_top_comments(
-    comments_listing: dict, limit: int = 6, max_len: int = _MAX_COMMENT_LEN,
-) -> list[dict]:
-    """Up to ``limit`` usable comment DATA dicts from a permalink's comments
-    listing (already sorted top → highest first). Skips removed/deleted,
-    the AutoModerator, stickied, and over-long text comments (media-only
-    comments like a gif embed are kept regardless of the length cap)."""
+def pick_top_comment(
+    comments_listing: dict, max_len: int = _MAX_COMMENT_LEN,
+) -> dict | None:
+    """Highest-voted usable comment DATA dict from a permalink's comments
+    listing (already sorted top). Skips removed/deleted, the AutoModerator,
+    stickied, and over-long comments. The caller derives the display text
+    (clean_comment_text), author, and any embedded media
+    (extract_comment_media) from the returned dict."""
     children = (comments_listing.get("data") or {}).get("children") or []
-    out: list[dict] = []
     for c in children:
         if c.get("kind") != "t1":
             continue
@@ -254,61 +251,12 @@ def pick_top_comments(
             continue
         if author.lower() in ("automoderator", "[deleted]"):
             continue
+        # A media-only comment (just a gif embed) has a short body and is
+        # fine; the length cap only guards against walls of text.
         if len(body) > max_len and extract_comment_media(d) is None:
             continue
-        out.append(d)
-        if len(out) >= limit:
-            break
-    return out
-
-
-def pick_top_comment(
-    comments_listing: dict, max_len: int = _MAX_COMMENT_LEN,
-) -> dict | None:
-    """The single highest-voted usable comment dict (or None). The caller
-    derives display text (clean_comment_text), author, and embedded media
-    (extract_comment_media) from it."""
-    picked = pick_top_comments(comments_listing, limit=1, max_len=max_len)
-    return picked[0] if picked else None
-
-
-# ─────────────────────────── AI reaction prompt ───────────────────────────
-def build_reddit_comment_prompt(
-    meme: "Meme", member_names: list[str], persona_text: str,
-    *, extra_context: str | None = None,
-) -> list[dict]:
-    """Messages array for generating the bot's OWN reaction to a meme —
-    riffing on the real Reddit comments for vibe, tailored to who's in the
-    chat, in the chat's persona voice. Pure/testable."""
-    comments = "\n".join(f"- {c}" for c in meme.top_comments[:6]) or "(none)"
-    # Dedup + cap the member list so a big chat doesn't blow the prompt.
-    seen: list[str] = []
-    for n in member_names:
-        n = (n or "").strip()
-        if n and n not in seen:
-            seen.append(n)
-    members = ", ".join(seen[:15]) if seen else "(unknown)"
-    system = (
-        f"{persona_text}\n\n"
-        "A meme just got posted in your group chat. React to it with ONE "
-        "short line (under 200 characters), in your voice, like one of the "
-        "crew chiming in. The reddit comments below are ONLY for vibe and "
-        "inspiration — riff off the energy, do NOT copy or quote them. You "
-        "MAY name-drop someone in the chat if it genuinely fits the meme, "
-        "but never force it and never @ everyone. No hashtags, no 'as an "
-        "AI', keep emoji minimal. Output ONLY the reaction line."
-    )
-    user = (
-        f"Meme: {meme.title or '(untitled)'} (from r/{meme.subreddit})\n\n"
-        f"Reddit comments (inspiration only, do not copy):\n{comments}\n\n"
-        f"People in this chat: {members}"
-    )
-    if extra_context:
-        user += f"\n\nWhat's been going on in the chat lately:\n{extra_context}"
-    return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
-    ]
+        return d
+    return None
 
 
 # ───────────────────────────── URL builders (pure) ────────────────────────
@@ -451,23 +399,17 @@ async def fetch_meme(
                 continue
             comment = author = None
             comment_media = None
-            top_comments: list[str] = []
             comments = await _get_json(
                 client,
                 _comments_url(base, post.get("permalink", ""), json_suffix),
                 sort="top", limit=25, raw_json=1,
             )
             if isinstance(comments, list) and len(comments) >= 2:
-                cdicts = pick_top_comments(comments[1], limit=6)
-                for cd in cdicts:
-                    t = clean_comment_text(cd.get("body") or "")
-                    if t:
-                        top_comments.append(t)
-                if cdicts:
-                    first = cdicts[0]
-                    author = first.get("author") or None
-                    comment_media = extract_comment_media(first)
-                    comment = clean_comment_text(first.get("body") or "") or None
+                cdata = pick_top_comment(comments[1])
+                if cdata:
+                    author = cdata.get("author") or None
+                    comment_media = extract_comment_media(cdata)
+                    comment = clean_comment_text(cdata.get("body") or "") or None
             return Meme(
                 subreddit=sub,
                 title=post.get("title") or "",
@@ -477,7 +419,6 @@ async def fetch_meme(
                 comment=comment,
                 comment_author=author,
                 comment_media=comment_media,
-                top_comments=top_comments,
             )
     return None
 
