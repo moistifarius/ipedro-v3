@@ -16,6 +16,8 @@ from ipedro.reddit import (
     _listing_url,
     build_caption,
     choose_post,
+    clean_comment_text,
+    extract_comment_media,
     pick_top_comment,
     reddit_audio_candidates,
     reset_token_cache,
@@ -145,24 +147,81 @@ def test_pick_top_comment_returns_first_usable():
         _t1(body="actual funny take", author="realuser"),
         _t1(body="second best", author="other"),
     ]}}
-    body, author = pick_top_comment(listing)
-    assert body == "actual funny take" and author == "realuser"
+    c = pick_top_comment(listing)
+    assert c["body"] == "actual funny take" and c["author"] == "realuser"
 
 
 def test_pick_top_comment_skips_automod_and_deleted_and_long():
     listing = {"data": {"children": [
         _t1(body="beep boop I am automod", author="AutoModerator"),
         _t1(body="[deleted]", author="[deleted]"),
-        _t1(body="x" * 5000, author="rambler"),          # too long
+        _t1(body="x" * 5000, author="rambler"),          # too long, no media
         _t1(body="finally a good one", author="hero"),
     ]}}
-    body, author = pick_top_comment(listing)
-    assert body == "finally a good one" and author == "hero"
+    c = pick_top_comment(listing)
+    assert c["body"] == "finally a good one" and c["author"] == "hero"
 
 
 def test_pick_top_comment_none_when_all_unusable():
     listing = {"data": {"children": [_t1(body="[removed]", author="x")]}}
-    assert pick_top_comment(listing) == (None, None)
+    assert pick_top_comment(listing) is None
+
+
+def test_pick_top_comment_keeps_gif_only_comment():
+    """A media-only comment (just a gif embed) is short and must be kept —
+    it's exactly the case we want to render as a gif."""
+    listing = {"data": {"children": [
+        _t1(body="![gif](giphy|641arBi22PAty)", author="gifguy"),
+    ]}}
+    c = pick_top_comment(listing)
+    assert c is not None and c["author"] == "gifguy"
+
+
+# ───────────────────────── comment media ──────────────────────────────────
+def test_clean_comment_text_strips_embeds():
+    assert clean_comment_text("lol ![gif](giphy|abc123) so true") == "lol  so true"
+    assert clean_comment_text("![img](xyz)") == ""
+    assert clean_comment_text("just text") == "just text"
+
+
+def test_extract_comment_media_from_giphy_metadata():
+    comment = {
+        "body": "![gif](giphy|641arBi22PAty)",
+        "media_metadata": {
+            "giphy|641arBi22PAty": {
+                "status": "valid", "e": "AnimatedImage", "m": "image/gif",
+                "s": {"gif": "https://i.giphy.com/media/641arBi22PAty/giphy.gif",
+                      "mp4": "https://i.giphy.com/media/641arBi22PAty/giphy.mp4"},
+            }
+        },
+    }
+    m = extract_comment_media(comment)
+    assert m is not None and m.kind == "animation"
+    assert m.url.endswith(".mp4")   # mp4 preferred when present
+
+
+def test_extract_comment_media_image_reply():
+    comment = {
+        "body": "![img](abc123)",
+        "media_metadata": {
+            "abc123": {"status": "valid", "e": "Image", "m": "image/png",
+                       "s": {"u": "https://i.redd.it/abc123.png"}},
+        },
+    }
+    m = extract_comment_media(comment)
+    assert m is not None and m.kind == "photo" and m.url.endswith(".png")
+
+
+def test_extract_comment_media_giphy_fallback_from_body():
+    # No media_metadata — build the giphy URL from the id in the markdown.
+    comment = {"body": "![gif](giphy|641arBi22PAty)"}
+    m = extract_comment_media(comment)
+    assert m is not None and m.kind == "animation"
+    assert "641arBi22PAty" in m.url and m.url.endswith(".gif")
+
+
+def test_extract_comment_media_none_for_plain_text():
+    assert extract_comment_media({"body": "just a normal comment"}) is None
 
 
 # ───────────────────────────── caption ────────────────────────────────────

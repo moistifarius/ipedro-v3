@@ -19,6 +19,7 @@ import asyncio
 import logging
 import os
 import random
+import re
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -75,6 +76,9 @@ class Meme:
     media: Media
     comment: str | None = None
     comment_author: str | None = None
+    # Some top comments ARE media (a Giphy gif, an image reply). When so,
+    # this holds the gif/image to post instead of the raw markdown.
+    comment_media: Media | None = None
 
 
 # ───────────────────────────── pure helpers ───────────────────────────────
@@ -185,12 +189,55 @@ def choose_post(
     return r.choice(candidates)
 
 
+# Reddit comment media embeds. A Giphy gif comment's body looks like
+# '![gif](giphy|641arBi22PAty)'; an image reply is '![img](abc123)'. The
+# referenced id keys into the comment's media_metadata.
+_GIPHY_RE = re.compile(r"!\[gif\]\(giphy\|([A-Za-z0-9]+)", re.IGNORECASE)
+_EMBED_RE = re.compile(r"!\[(?:gif|img)\]\([^)]*\)", re.IGNORECASE)
+
+
+def clean_comment_text(body: str) -> str:
+    """Strip inline media-embed markdown so we never show a raw
+    '![gif](giphy|...)' token as text. Returns the remaining prose."""
+    return _EMBED_RE.sub("", body or "").strip()
+
+
+def extract_comment_media(comment: dict) -> Media | None:
+    """The gif/image a comment embeds, or None. Prefers the authoritative
+    media_metadata (handles Giphy gifs and image replies); falls back to
+    building a Giphy URL from the id in the body."""
+    meta = comment.get("media_metadata") or {}
+    for m in meta.values():
+        if not isinstance(m, dict) or m.get("status") != "valid":
+            continue
+        s = m.get("s") or {}
+        mime = (m.get("m") or "").lower()
+        etype = (m.get("e") or "").lower()
+        if etype == "animatedimage" or "gif" in mime:
+            url = s.get("mp4") or s.get("gif")     # mp4 is smaller; both loop
+            if url:
+                return Media("animation", url)
+        if etype == "image" or mime.startswith("image/"):
+            url = s.get("u") or s.get("gif")
+            if url:
+                return Media("photo", url)
+    gm = _GIPHY_RE.search(comment.get("body") or "")
+    if gm:
+        return Media(
+            "animation",
+            f"https://i.giphy.com/media/{gm.group(1)}/giphy.gif",
+        )
+    return None
+
+
 def pick_top_comment(
     comments_listing: dict, max_len: int = _MAX_COMMENT_LEN,
-) -> tuple[str | None, str | None]:
-    """Highest-voted usable comment (body, author) from a permalink's
-    comments listing (already sorted top). Skips removed/deleted, the
-    AutoModerator, stickied, and over-long comments."""
+) -> dict | None:
+    """Highest-voted usable comment DATA dict from a permalink's comments
+    listing (already sorted top). Skips removed/deleted, the AutoModerator,
+    stickied, and over-long comments. The caller derives the display text
+    (clean_comment_text), author, and any embedded media
+    (extract_comment_media) from the returned dict."""
     children = (comments_listing.get("data") or {}).get("children") or []
     for c in children:
         if c.get("kind") != "t1":
@@ -204,10 +251,12 @@ def pick_top_comment(
             continue
         if author.lower() in ("automoderator", "[deleted]"):
             continue
-        if len(body) > max_len:
+        # A media-only comment (just a gif embed) has a short body and is
+        # fine; the length cap only guards against walls of text.
+        if len(body) > max_len and extract_comment_media(d) is None:
             continue
-        return body, author
-    return None, None
+        return d
+    return None
 
 
 # ───────────────────────────── URL builders (pure) ────────────────────────
@@ -349,13 +398,18 @@ async def fetch_meme(
             if media is None:
                 continue
             comment = author = None
+            comment_media = None
             comments = await _get_json(
                 client,
                 _comments_url(base, post.get("permalink", ""), json_suffix),
                 sort="top", limit=25, raw_json=1,
             )
             if isinstance(comments, list) and len(comments) >= 2:
-                comment, author = pick_top_comment(comments[1])
+                cdata = pick_top_comment(comments[1])
+                if cdata:
+                    author = cdata.get("author") or None
+                    comment_media = extract_comment_media(cdata)
+                    comment = clean_comment_text(cdata.get("body") or "") or None
             return Meme(
                 subreddit=sub,
                 title=post.get("title") or "",
@@ -364,6 +418,7 @@ async def fetch_meme(
                 media=media,
                 comment=comment,
                 comment_author=author,
+                comment_media=comment_media,
             )
     return None
 

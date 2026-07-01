@@ -73,6 +73,27 @@ def _parse_user_date(raw: str) -> tuple[int, int, int | None] | None:
     return None
 
 
+async def _answer_reddit_media(
+    msg: Message, data: bytes, kind: str, caption: str | None,
+):
+    """Send downloaded Reddit media as the right Telegram type. Shared by
+    the meme post and its (possibly gif) top comment."""
+    if kind == "photo":
+        return await msg.answer_photo(
+            BufferedInputFile(data, filename="meme.jpg"),
+            caption=caption, disable_notification=True,
+        )
+    if kind == "animation":
+        return await msg.answer_animation(
+            BufferedInputFile(data, filename="meme.gif"),
+            caption=caption, disable_notification=True,
+        )
+    return await msg.answer_video(
+        BufferedInputFile(data, filename="meme.mp4"),
+        caption=caption, disable_notification=True,
+    )
+
+
 async def _resolve_target_user(
     rt: Runtime, msg: Message,
 ) -> tuple[int | None, str]:
@@ -545,21 +566,9 @@ def build_router(rt: Runtime) -> Router:
             return
         caption = build_caption(meme)
         try:
-            if meme.media.kind == "photo":
-                sent = await msg.answer_photo(
-                    BufferedInputFile(data, filename="meme.jpg"),
-                    caption=caption, disable_notification=True,
-                )
-            elif meme.media.kind == "animation":
-                sent = await msg.answer_animation(
-                    BufferedInputFile(data, filename="meme.gif"),
-                    caption=caption, disable_notification=True,
-                )
-            else:
-                sent = await msg.answer_video(
-                    BufferedInputFile(data, filename="meme.mp4"),
-                    caption=caption, disable_notification=True,
-                )
+            sent = await _answer_reddit_media(
+                msg, data, meme.media.kind, caption,
+            )
             track(msg.chat.id, sent.message_id, caption)
         except Exception as exc:
             log.warning("redditmeme send failed in %s: %s", msg.chat.id, exc)
@@ -567,6 +576,22 @@ def build_router(rt: Runtime) -> Router:
                 "Got a meme but Telegram wouldn't take the file. Try again.",
                 disable_notification=True,
             )
+            return
+        # When the top comment is itself a gif/image, post it as a follow-up
+        # so the reply reads as the actual gif — not raw '![gif](...)' text.
+        if meme.comment_media is not None:
+            cdata = await download_media(meme.comment_media, user_agent=ua)
+            if cdata:
+                try:
+                    gsent = await _answer_reddit_media(
+                        msg, cdata, meme.comment_media.kind, None,
+                    )
+                    track(msg.chat.id, gsent.message_id, "[reddit comment gif]")
+                except Exception as exc:
+                    log.info(
+                        "redditmeme comment-media send failed in %s: %s",
+                        msg.chat.id, exc,
+                    )
 
     @r.message(Command("this_or_that"))
     async def this_or_that(msg: Message) -> None:
