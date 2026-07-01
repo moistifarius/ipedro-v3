@@ -48,6 +48,7 @@ HELP_TEXT_PUBLIC = (
     "(recursively across my notes; never touches what you actually typed)\n"
     "/lyric <line> - I mishear it\n"
     "/meme top text | bottom text - generate a meme image\n"
+    "/redditmeme (/rmeme) - pull a meme + its top comment from reddit\n"
     "/ether <text> - transmit a message as a staticky far-away radio "
     "voice into another ether-tuned chat (or send/reply /ether on a "
     "voice note to transmit the real recording)\n"

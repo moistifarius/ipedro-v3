@@ -18,8 +18,10 @@ from aiogram.types import (
     InlineKeyboardMarkup, Message,
 )
 
+from ipedro.bot_messages import track
 from ipedro.handlers.common import display_name, get_or_create_chat_config
 from ipedro.on_this_day import build_on_this_day, render_on_this_day
+from ipedro.reddit import build_caption, download_media, fetch_meme
 from ipedro.prompts import (
     COMPLIMENT_PROMPT, ECHO_PROMPT, HAIKU_PROMPT, MISHEARD_LYRIC_PROMPT,
     ROAST_PROMPT, THIS_OR_THAT_PROMPT, TLDR_PROMPT,
@@ -514,6 +516,52 @@ def build_router(rt: Runtime) -> Router:
         await msg.reply(
             render_on_this_day(result), disable_notification=True,
         )
+
+    @r.message(Command("redditmeme", "rmeme"))
+    async def redditmeme(msg: Message) -> None:
+        """/redditmeme (/rmeme) — pull a meme from a rotation of subreddits
+        and post it with the post's top comment as the caption."""
+        await get_or_create_chat_config(rt, msg)
+        await rt.bot.send_chat_action(msg.chat.id, "upload_photo")
+        ua = rt.settings.reddit_user_agent
+        meme = await fetch_meme(user_agent=ua)
+        if meme is None:
+            await msg.reply(
+                "Sh-sha. Feeds are quiet or blocking me. Try again in a bit.",
+                disable_notification=True,
+            )
+            return
+        data = await download_media(meme.media, user_agent=ua)
+        if not data:
+            await msg.reply(
+                "Found one but couldn't grab the media. Try again.",
+                disable_notification=True,
+            )
+            return
+        caption = build_caption(meme)
+        try:
+            if meme.media.kind == "photo":
+                sent = await msg.answer_photo(
+                    BufferedInputFile(data, filename="meme.jpg"),
+                    caption=caption, disable_notification=True,
+                )
+            elif meme.media.kind == "animation":
+                sent = await msg.answer_animation(
+                    BufferedInputFile(data, filename="meme.gif"),
+                    caption=caption, disable_notification=True,
+                )
+            else:
+                sent = await msg.answer_video(
+                    BufferedInputFile(data, filename="meme.mp4"),
+                    caption=caption, disable_notification=True,
+                )
+            track(msg.chat.id, sent.message_id, caption)
+        except Exception as exc:
+            log.warning("redditmeme send failed in %s: %s", msg.chat.id, exc)
+            await msg.reply(
+                "Got a meme but Telegram wouldn't take the file. Try again.",
+                disable_notification=True,
+            )
 
     @r.message(Command("this_or_that"))
     async def this_or_that(msg: Message) -> None:

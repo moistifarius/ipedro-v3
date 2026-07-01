@@ -76,6 +76,12 @@ class Settings(BaseSettings):
     # a different location.
     bot_timezone: str = "America/Los_Angeles"
 
+    # Reddit meme puller (/redditmeme). Reddit blocks generic/duplicate
+    # User-Agents; per their API rules a descriptive UA that includes your
+    # reddit username reduces the odds of a 403. Override REDDIT_USER_AGENT
+    # in .env, e.g. "ipedro/1.0 (by /u/yourname)".
+    reddit_user_agent: str = "ipedro/1.0 (Telegram meme bot)"
+
     # Per-chat defaults
     default_response_policy_private: ResponsePolicy = "always"
     default_response_policy_group: ResponsePolicy = "mention"
