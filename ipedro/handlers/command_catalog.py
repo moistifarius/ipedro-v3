@@ -136,7 +136,8 @@ COMMANDS: tuple[Command, ...] = (
     Command("redditmeme",   "ai", "/redditmeme",
             "/redditmeme  (or /rmeme)",
             "Pull a meme from a rotation of subreddits and post it with the "
-            "post's top comment as the caption."),
+            "bot's own reaction — riffing on the discussion, tailored to "
+            "who's in the chat."),
     Command("ether",        "ai", "/ether",
             "/ether <text> | /ether (reply to voice)",
             "Transmit a message as staticky shortwave-voice into another "
