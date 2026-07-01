@@ -575,3 +575,41 @@ async def test_candidates_from_topic_sub_falls_back_to_top_listing(monkeypatch):
     assert "/r/lakers/search" in calls[0][0]
     assert calls[0][1]["q"] == "meme"
     assert "/r/lakers/top" in calls[1][0]
+
+
+# ─────────── detection hardening (adversarial-review regressions) ─────────
+@pytest.mark.parametrize("text", [
+    # casual mentions / narration must NOT hijack the reply
+    "haha good meme this is perfect",
+    "did you see the meme this morning?",
+    "I'll send a meme about it later",
+    "he said he'd give me a meme about cats tomorrow",
+    "im going to post a meme about the election on twitter",
+    "do you have some memes on your phone?",
+    "I got a meme about this from Dani, so funny",
+    "no i dont have a meme about that saved",
+])
+def test_detect_meme_request_rejects_casual_mentions(text):
+    from ipedro.reddit import detect_meme_request
+    assert detect_meme_request(text) is None
+
+
+@pytest.mark.parametrize("text,expected", [
+    # lead-ins that put the verb in request position
+    ("can you find a meme about parking tickets", "parking tickets"),
+    ("could you post a meme about mondays", "mondays"),
+    ("sure, drop a meme about it", ""),           # deictic after comma
+    # question forms addressed to the bot
+    ("do you have a meme about mondays", "mondays"),
+    ("got a meme about mondays?", "mondays"),
+    # anchored 'meme this' with a name prefix
+    ("pedro, meme this", ""),
+    ("hey dale meme that", ""),
+    # topic hygiene
+    ("give me a meme about cats, man", "cats"),     # comma-vocative dropped
+    ("give me a meme about the dude", "the dude"),  # real topic preserved
+    ("gimme a meme about cats tomorrow", "cats"),   # time adverb stripped
+])
+def test_detect_meme_request_hardened_positives(text, expected):
+    from ipedro.reddit import detect_meme_request
+    assert detect_meme_request(text) == expected

@@ -95,22 +95,23 @@ async def _answer_reddit_media(
     )
 
 
-async def post_meme_to_chat(rt: Runtime, msg: Message, meme) -> bool:
+async def post_meme_to_chat(rt: Runtime, msg: Message, meme) -> str | None:
     """Download a fetched Meme's media and post it (caption = verbatim top
     comment via build_caption), plus the gif follow-up when the top comment
-    is itself media. Returns True when the main post went out. Shared by
+    is itself media. Returns the posted caption on success (so callers can
+    record the bot's turn into memory), None on failure. Shared by
     /redditmeme and the natural-language 'meme about X' trigger."""
     ua = rt.settings.reddit_user_agent
     data = await download_media(meme.media, user_agent=ua)
     if not data:
-        return False
+        return None
     caption = build_caption(meme)
     try:
         sent = await _answer_reddit_media(msg, data, meme.media.kind, caption)
         track(msg.chat.id, sent.message_id, caption)
     except Exception as exc:
         log.warning("reddit meme send failed in %s: %s", msg.chat.id, exc)
-        return False
+        return None
     # When the top comment is itself a gif/image, post it as a follow-up
     # so the reply reads as the actual gif — not raw '![gif](...)' text.
     if meme.comment_media is not None:
@@ -126,7 +127,7 @@ async def post_meme_to_chat(rt: Runtime, msg: Message, meme) -> bool:
                     "reddit comment-media send failed in %s: %s",
                     msg.chat.id, exc,
                 )
-    return True
+    return caption
 
 
 async def _resolve_target_user(
@@ -612,7 +613,7 @@ def build_router(rt: Runtime) -> Router:
                     disable_notification=True,
                 )
             return
-        if not await post_meme_to_chat(rt, msg, meme):
+        if await post_meme_to_chat(rt, msg, meme) is None:
             await msg.reply(
                 "Found one but couldn't deliver the media. Try again.",
                 disable_notification=True,

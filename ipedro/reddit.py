@@ -304,24 +304,48 @@ def pick_top_comment(
 
 
 # ─────────────────────── meme-request detection (pure) ────────────────────
-# "hey pedro give me a meme about the game" / "find a meme about this" /
-# "any memes about mondays?" / "meme this". A request verb (or question
-# form) is REQUIRED so casual mentions ("that meme about cats was funny")
-# don't hijack the reply. These only run on messages the bot was going to
-# answer anyway (mention / reply / DM), which further limits false hits.
+# "hey pedro give me a meme about the game" / "can you find a meme about
+# this" / "any memes about mondays?" / "meme this". Detection must not
+# hijack casual mentions ("that meme about cats was funny", "I'll send a
+# meme about it later", "did you see the meme this morning?"), so:
+#   * the request VERB must sit in imperative position — the start of the
+#     message/clause, or right after the bot's name / "please" / a
+#     "can|could|will|would you" lead-in;
+#   * the question form requires an any/you-subject shape ("any memes
+#     about", "do you have a meme about", "you got a meme about") — bare
+#     got/have would match declaratives and negations;
+#   * "meme this" must be (basically) the whole message.
+# These also only run on messages the bot was answering anyway.
+_REQ_PREFIX = (
+    r"(?:^|[.!?]\s+|,\s*"
+    r"|\b(?:pedro|dale|rusty|idale|bot)\b[,!:]?\s+"
+    r"|\b(?:please|pls)\s+"
+    r"|\b(?:can|could|will|would)\s+(?:you|u)\s+(?:please\s+)?)"
+)
 _MEME_VERB_RE = re.compile(
-    r"\b(?:gimme|give\s+(?:me|us)|find(?:\s+(?:me|us))?|post|drop|send"
+    _REQ_PREFIX +
+    r"(?:gimme|give\s+(?:me|us)|find(?:\s+(?:me|us))?|post|drop|send"
     r"(?:\s+(?:me|us))?|show\s+(?:me|us)|get\s+(?:me|us)|pull(?:\s+up)?)\s+"
     r"(?:a\s+|some\s+|another\s+|me\s+a\s+)?memes?\b"
     r"(?:\s+(?:about|of|on|for|regarding)\s+(?P<topic>.+))?",
     re.IGNORECASE,
 )
 _MEME_QUESTION_RE = re.compile(
-    r"\b(?:any|got|you\s+got|have)\s+(?:a\s+|any\s+|some\s+)?memes?\s+"
-    r"(?:about|of|on|for)\s+(?P<topic>.+)",
+    r"(?:\b(?:any|got\s+any|have\s+any"
+    r"|do\s+(?:you|u)\s+(?:have|got)(?:\s+(?:a|any|some))?"
+    r"|(?:you|u)\s+got(?:\s+(?:a|any|some))?)"
+    r"|" + _REQ_PREFIX + r"got(?:\s+(?:a|any|some))?)\s+"
+    r"memes?\s+(?:about|of|for)\s+(?P<topic>.+)",
     re.IGNORECASE,
 )
-_MEME_THIS_RE = re.compile(r"\bmemes?\s+this\b", re.IGNORECASE)
+# Whole-message imperative only (leading hey/bot-name and trailing
+# punctuation allowed) — "meme this" mid-sentence is never a request.
+_MEME_THIS_RE = re.compile(
+    r"^\W*(?:(?:hey|ok|okay|yo)[,!\s]+)?"
+    r"(?:(?:pedro|dale|rusty|idale|bot)[,!:\s]+)?"
+    r"memes?\s+(?:this|that)[\s.!?]*$",
+    re.IGNORECASE,
+)
 
 # Topics that mean "the current conversation" rather than a literal subject.
 _DEICTIC_TOPICS = frozenset({
@@ -330,8 +354,13 @@ _DEICTIC_TOPICS = frozenset({
     "the current topic", "what we're talking about",
     "what were talking about", "whatever",
 })
+# Politeness / time-adverb tails are safe to strip repeatedly; vocatives
+# (man/dude/pedro/dale) ONLY when comma-separated, so real topics like
+# "the dude" or "pedro" survive.
 _TOPIC_FILLER_RE = re.compile(
-    r"\s+(?:please|pls|plz|thanks|thx|now|rn|lol|lmao|man|dude|dale|pedro)$",
+    r"\s+(?:please|pls|plz|thanks|thx|now|rn|asap|lol|lmao"
+    r"|real\s+quick|later|tomorrow|today|tonight|soon|again)$"
+    r"|,\s*(?:man|dude|dale|pedro)$",
     re.IGNORECASE,
 )
 
@@ -345,14 +374,15 @@ def detect_meme_request(text: str | None) -> str | None:
     """
     if not text:
         return None
-    if _MEME_THIS_RE.search(text):
+    if _MEME_THIS_RE.match(text):
         return ""
     m = _MEME_VERB_RE.search(text) or _MEME_QUESTION_RE.search(text)
     if not m:
         return None
     topic = (m.group("topic") or "").strip()
-    # Trim trailing punctuation / clause tail, then politeness filler.
-    topic = re.split(r"[?!.;:]", topic, 1)[0].strip()
+    # Trim at clause boundaries (commas included — "about cats, and also…"),
+    # then peel politeness/time filler.
+    topic = re.split(r"[,?!.;:]", topic, 1)[0].strip()
     prev = None
     while topic and topic != prev:
         prev = topic

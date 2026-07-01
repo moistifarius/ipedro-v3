@@ -228,6 +228,23 @@ async def _derive_meme_queries(
     return await derive_topic_queries(rt.openai, snippet, chat_id=chat_id)
 
 
+async def _record_bot_turn(rt: Runtime, cfg, chat_id: int, text: str) -> None:
+    """Record one of the bot's meme-path outputs as an assistant turn and
+    give the summarizer its usual chance to run. Without this, stored
+    history shows the user's meme request going unanswered — and the model
+    starts believing it ignores (or can't serve) such requests."""
+    if not cfg.memory_enabled:
+        return
+    try:
+        await rt.memory.record_message(
+            chat_id=chat_id, role="assistant", content=text,
+            message_id=None, user_id=None,
+        )
+        await maybe_summarize(rt.memory, rt.openai, rt.settings, chat_id)
+    except Exception as exc:  # pragma: no cover - defensive
+        log.info("meme-turn memory record failed for %s: %s", chat_id, exc)
+
+
 async def _handle_meme_request(rt: Runtime, msg: Message, cfg, topic: str) -> None:
     """Serve a natural-language meme request ("give me a meme about X").
 
@@ -236,7 +253,8 @@ async def _handle_meme_request(rt: Runtime, msg: Message, cfg, topic: str) -> No
     subreddit first, then the meme subs, then sitewide; the cheap model
     judges which candidate actually matches. When the derived-topic hunt
     finds nothing, we say so and post a random pull — labeled, so it
-    doesn't read like a failed relevance match."""
+    doesn't read like a failed relevance match. Every visible output is
+    recorded to memory like any other bot reply."""
     # Local import: utility imports nothing from chat, but keeping this
     # lazy makes the no-cycle property robust to future refactors.
     from ipedro.handlers.utility import post_meme_to_chat
@@ -255,11 +273,12 @@ async def _handle_meme_request(rt: Runtime, msg: Message, cfg, topic: str) -> No
             chat_id=msg.chat.id, **creds,
         )
         if meme is None:
-            await msg.reply(
+            miss = (
                 f"Sh-sha. Swept the feeds for “{topic}” — nothing usable. "
-                f"Try different words.",
-                disable_notification=True,
+                f"Try different words."
             )
+            await msg.reply(miss, disable_notification=True)
+            await _record_bot_turn(rt, cfg, msg.chat.id, miss)
             return
     else:
         # "about this" / bare ask — derive queries from the conversation
@@ -280,11 +299,12 @@ async def _handle_meme_request(rt: Runtime, msg: Message, cfg, topic: str) -> No
         if meme is None:
             meme = await fetch_meme(**creds)
             if meme is None:
-                await msg.reply(
+                quiet = (
                     "Sh-sha. Feeds are quiet or blocking me. Try again "
-                    "in a bit.",
-                    disable_notification=True,
+                    "in a bit."
                 )
+                await msg.reply(quiet, disable_notification=True)
+                await _record_bot_turn(rt, cfg, msg.chat.id, quiet)
                 return
             note = (
                 f"Sh-sha. Nothing solid on “{queries[0]}” — wire's top "
@@ -296,13 +316,18 @@ async def _handle_meme_request(rt: Runtime, msg: Message, cfg, topic: str) -> No
             try:
                 sent = await msg.reply(note, disable_notification=True)
                 track(msg.chat.id, sent.message_id, note)
+                await _record_bot_turn(rt, cfg, msg.chat.id, note)
             except Exception:  # pragma: no cover - defensive
                 pass
-    if not await post_meme_to_chat(rt, msg, meme):
-        await msg.reply(
-            "Found one but couldn't deliver the media. Try again.",
-            disable_notification=True,
-        )
+    caption = await post_meme_to_chat(rt, msg, meme)
+    if caption is None:
+        fail = "Found one but couldn't deliver the media. Try again."
+        await msg.reply(fail, disable_notification=True)
+        await _record_bot_turn(rt, cfg, msg.chat.id, fail)
+        return
+    await _record_bot_turn(
+        rt, cfg, msg.chat.id, f"[shared a meme] {caption}",
+    )
 
 
 def build_router(rt: Runtime) -> Router:
