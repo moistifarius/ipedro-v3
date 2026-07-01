@@ -21,7 +21,9 @@ from aiogram.types import (
 from ipedro.bot_messages import track
 from ipedro.handlers.common import display_name, get_or_create_chat_config
 from ipedro.on_this_day import build_on_this_day, render_on_this_day
-from ipedro.reddit import build_caption, download_media, fetch_meme
+from ipedro.reddit import (
+    build_caption, download_media, fetch_meme, fetch_meme_about,
+)
 from ipedro.prompts import (
     COMPLIMENT_PROMPT, ECHO_PROMPT, HAIKU_PROMPT, MISHEARD_LYRIC_PROMPT,
     ROAST_PROMPT, THIS_OR_THAT_PROMPT, TLDR_PROMPT,
@@ -92,6 +94,40 @@ async def _answer_reddit_media(
         BufferedInputFile(data, filename="meme.mp4"),
         caption=caption, disable_notification=True,
     )
+
+
+async def post_meme_to_chat(rt: Runtime, msg: Message, meme) -> bool:
+    """Download a fetched Meme's media and post it (caption = verbatim top
+    comment via build_caption), plus the gif follow-up when the top comment
+    is itself media. Returns True when the main post went out. Shared by
+    /redditmeme and the natural-language 'meme about X' trigger."""
+    ua = rt.settings.reddit_user_agent
+    data = await download_media(meme.media, user_agent=ua)
+    if not data:
+        return False
+    caption = build_caption(meme)
+    try:
+        sent = await _answer_reddit_media(msg, data, meme.media.kind, caption)
+        track(msg.chat.id, sent.message_id, caption)
+    except Exception as exc:
+        log.warning("reddit meme send failed in %s: %s", msg.chat.id, exc)
+        return False
+    # When the top comment is itself a gif/image, post it as a follow-up
+    # so the reply reads as the actual gif — not raw '![gif](...)' text.
+    if meme.comment_media is not None:
+        cdata = await download_media(meme.comment_media, user_agent=ua)
+        if cdata:
+            try:
+                gsent = await _answer_reddit_media(
+                    msg, cdata, meme.comment_media.kind, None,
+                )
+                track(msg.chat.id, gsent.message_id, "[reddit comment gif]")
+            except Exception as exc:
+                log.info(
+                    "reddit comment-media send failed in %s: %s",
+                    msg.chat.id, exc,
+                )
+    return True
 
 
 async def _resolve_target_user(
@@ -540,58 +576,41 @@ def build_router(rt: Runtime) -> Router:
 
     @r.message(Command("redditmeme", "rmeme"))
     async def redditmeme(msg: Message) -> None:
-        """/redditmeme (/rmeme) — pull a post from Reddit's r/popular and
-        post it with the post's top comment as the caption."""
+        """/redditmeme [topic] (/rmeme) — no topic: a post from Reddit's
+        r/popular; with a topic: search Reddit for a meme about it. Either
+        way the caption is the post's top comment."""
         await get_or_create_chat_config(rt, msg)
         await rt.bot.send_chat_action(msg.chat.id, "upload_photo")
-        ua = rt.settings.reddit_user_agent
-        meme = await fetch_meme(
-            user_agent=ua,
+        parts = (msg.text or "").split(None, 1)
+        topic = parts[1].strip() if len(parts) > 1 else ""
+        creds = dict(
+            user_agent=rt.settings.reddit_user_agent,
             client_id=rt.settings.reddit_client_id,
             client_secret=rt.settings.reddit_client_secret,
         )
+        if topic:
+            meme = await fetch_meme_about(topic, **creds)
+        else:
+            meme = await fetch_meme(**creds)
         if meme is None:
+            if topic:
+                await msg.reply(
+                    f"Sh-sha. Swept the feeds for “{topic}” — nothing "
+                    f"usable. Try different words.",
+                    disable_notification=True,
+                )
+            else:
+                await msg.reply(
+                    "Sh-sha. Feeds are quiet or blocking me. Try again in "
+                    "a bit. (Admin: /debug_redditmeme to see why.)",
+                    disable_notification=True,
+                )
+            return
+        if not await post_meme_to_chat(rt, msg, meme):
             await msg.reply(
-                "Sh-sha. Feeds are quiet or blocking me. Try again in a bit. "
-                "(Admin: /debug_redditmeme to see why.)",
+                "Found one but couldn't deliver the media. Try again.",
                 disable_notification=True,
             )
-            return
-        data = await download_media(meme.media, user_agent=ua)
-        if not data:
-            await msg.reply(
-                "Found one but couldn't grab the media. Try again.",
-                disable_notification=True,
-            )
-            return
-        caption = build_caption(meme)
-        try:
-            sent = await _answer_reddit_media(
-                msg, data, meme.media.kind, caption,
-            )
-            track(msg.chat.id, sent.message_id, caption)
-        except Exception as exc:
-            log.warning("redditmeme send failed in %s: %s", msg.chat.id, exc)
-            await msg.reply(
-                "Got a meme but Telegram wouldn't take the file. Try again.",
-                disable_notification=True,
-            )
-            return
-        # When the top comment is itself a gif/image, post it as a follow-up
-        # so the reply reads as the actual gif — not raw '![gif](...)' text.
-        if meme.comment_media is not None:
-            cdata = await download_media(meme.comment_media, user_agent=ua)
-            if cdata:
-                try:
-                    gsent = await _answer_reddit_media(
-                        msg, cdata, meme.comment_media.kind, None,
-                    )
-                    track(msg.chat.id, gsent.message_id, "[reddit comment gif]")
-                except Exception as exc:
-                    log.info(
-                        "redditmeme comment-media send failed in %s: %s",
-                        msg.chat.id, exc,
-                    )
 
     @r.message(Command("this_or_that"))
     async def this_or_that(msg: Message) -> None:

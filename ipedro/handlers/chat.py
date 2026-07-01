@@ -21,7 +21,10 @@ from ipedro.handlers.common import catify, display_name, get_or_create_chat_conf
 from ipedro.impersonate import build_impersonation_prompt, resolve_impersonation
 from ipedro.memory.context_builder import build_context
 from ipedro.memory.summarizer import maybe_summarize
-from ipedro.prompts import CAT_FACT_PROMPT, DUCK_BEF_CHALLENGE_JUDGE_PROMPT
+from ipedro.prompts import (
+    CAT_FACT_PROMPT, DUCK_BEF_CHALLENGE_JUDGE_PROMPT, MEME_TOPIC_PROMPT,
+)
+from ipedro.reddit import detect_meme_request, fetch_meme, fetch_meme_about
 from ipedro.runtime import Runtime
 from ipedro.user_flags import has_flag, maybe_auto_grudge
 
@@ -194,6 +197,92 @@ async def _transcribe_voice(rt: Runtime, msg: Message) -> str | None:
     except Exception as exc:
         log.warning("Voice transcription failed: %s", exc)
         return None
+
+
+async def _derive_meme_topic(rt: Runtime, chat_id: int, memory_on: bool) -> str:
+    """Distill the current conversation into a short meme-search query.
+
+    Reads the recent stored messages and asks the cheap model for 2-5
+    keywords. Returns '' when there's nothing to work with (memory off,
+    empty chat, AI down) — the caller falls back to a generic meme."""
+    if not memory_on:
+        return ""
+    try:
+        recent = await rt.memory.recent_messages(chat_id, 12)
+    except Exception as exc:  # pragma: no cover - defensive
+        log.info("meme topic: recent_messages failed for %s: %s", chat_id, exc)
+        return ""
+    lines = [
+        f"{m.author_name or m.role}: {m.content}"
+        for m in recent
+        if (m.content or "").strip() and not m.content.startswith("/")
+    ]
+    if not lines:
+        return ""
+    snippet = "\n".join(lines)[-3000:]
+    topic = await rt.openai.cheap_completion(
+        MEME_TOPIC_PROMPT.format(messages=snippet),
+        max_tokens=24, chat_id=chat_id,
+    )
+    topic = (topic or "").strip().strip('"').strip()
+    # A runaway answer isn't a search query; treat it as a miss.
+    if len(topic) > 80 or "\n" in topic:
+        return ""
+    return topic
+
+
+async def _handle_meme_request(rt: Runtime, msg: Message, cfg, topic: str) -> None:
+    """Serve a natural-language meme request ("give me a meme about X").
+
+    ``topic`` is '' when the ask was deictic ("about this") — derive it
+    from the conversation; if that yields nothing, fall back to a random
+    r/popular pull so the user still gets a meme."""
+    # Local import: utility imports nothing from chat, but keeping this
+    # lazy makes the no-cycle property robust to future refactors.
+    from ipedro.handlers.utility import post_meme_to_chat
+
+    await rt.bot.send_chat_action(msg.chat.id, "upload_photo")
+    creds = dict(
+        user_agent=rt.settings.reddit_user_agent,
+        client_id=rt.settings.reddit_client_id,
+        client_secret=rt.settings.reddit_client_secret,
+    )
+    if topic:
+        # Explicit subject — a dry search is an honest miss, not a cue to
+        # post something random.
+        meme = await fetch_meme_about(topic, **creds)
+        if meme is None:
+            await msg.reply(
+                f"Sh-sha. Swept the feeds for “{topic}” — nothing usable. "
+                f"Try different words.",
+                disable_notification=True,
+            )
+            return
+    else:
+        # "about this" / bare ask — best-effort: derive the topic from the
+        # conversation, and fall back to a random r/popular pull so the
+        # user still gets a meme.
+        derived = await _derive_meme_topic(rt, msg.chat.id, cfg.memory_enabled)
+        meme = None
+        if derived:
+            log.info(
+                "meme request: derived topic %r for chat %s",
+                derived, msg.chat.id,
+            )
+            meme = await fetch_meme_about(derived, **creds)
+        if meme is None:
+            meme = await fetch_meme(**creds)
+        if meme is None:
+            await msg.reply(
+                "Sh-sha. Feeds are quiet or blocking me. Try again in a bit.",
+                disable_notification=True,
+            )
+            return
+    if not await post_meme_to_chat(rt, msg, meme):
+        await msg.reply(
+            "Found one but couldn't deliver the media. Try again.",
+            disable_notification=True,
+        )
 
 
 def build_router(rt: Runtime) -> Router:
@@ -399,8 +488,9 @@ def build_router(rt: Runtime) -> Router:
                 log.debug("Reaction failed: %s", exc)
 
         # Cat mention: drop a dubious cat fact and stop. Skip the regular
-        # AI reply so the bot doesn't both fact and chat.
-        if _mentions_cat(text):
+        # AI reply so the bot doesn't both fact and chat. A meme request
+        # wins though — "meme about cats" wants a meme, not a cat fact.
+        if _mentions_cat(text) and detect_meme_request(text) is None:
             await rt.bot.send_chat_action(msg.chat.id, "typing")
             fact = await rt.openai.cheap_completion(CAT_FACT_PROMPT, max_tokens=120)
             reply_text = catify(fact or "🐈")
@@ -450,6 +540,15 @@ def build_router(rt: Runtime) -> Router:
             # Trigger background summarization opportunistically even when we don't reply.
             if cfg.memory_enabled:
                 await maybe_summarize(rt.memory, rt.openai, rt.settings, msg.chat.id)
+            return
+
+        # "hey pedro give me a meme about this" → fetch a relevant meme
+        # from Reddit (topic explicit, or distilled from the current
+        # conversation) and post it with its top comment instead of a
+        # text reply. Only fires on messages the bot was answering anyway.
+        meme_topic = detect_meme_request(text)
+        if meme_topic is not None:
+            await _handle_meme_request(rt, msg, cfg, meme_topic)
             return
 
         await rt.bot.send_chat_action(msg.chat.id, "typing")

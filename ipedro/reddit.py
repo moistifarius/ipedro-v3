@@ -46,6 +46,13 @@ _TOKEN_FALLBACK_TTL = 3600.0  # used only if the response omits expires_in
 # The post's real source community is surfaced in the caption footer.
 SUBREDDITS: tuple[str, ...] = ("popular",)
 
+# Topic searches ("meme about X") look in the big meme communities first —
+# relevance search inside them returns actual memes rather than news posts.
+# Sitewide search (with 'meme' appended to the query) is the fallback.
+MEME_SEARCH_SUBS: tuple[str, ...] = (
+    "memes", "me_irl", "funny", "dankmemes", "wholesomememes",
+)
+
 _USER_AGENT = "iPedro/1.0 (Telegram meme bot)"
 _IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 _MAX_COMMENT_LEN = 600
@@ -165,8 +172,13 @@ def resolve_media(post: dict) -> Media | None:
 
 def choose_post(
     listing: dict, rng: random.Random | None = None,
+    *, top_k: int | None = None,
 ) -> dict | None:
-    """Pick a random displayable, SFW, non-stickied post from a listing."""
+    """Pick a random displayable, SFW, non-stickied post from a listing.
+
+    ``top_k`` limits the pool to the first K displayable candidates — used
+    for relevance-sorted search results, where the further down the list
+    you go the less the post has to do with the query."""
     r = rng or random
     children = (listing.get("data") or {}).get("children") or []
     candidates = []
@@ -179,6 +191,8 @@ def choose_post(
         if resolve_media(d) is None:
             continue
         candidates.append(d)
+        if top_k is not None and len(candidates) >= top_k:
+            break
     if not candidates:
         return None
     return r.choice(candidates)
@@ -254,9 +268,79 @@ def pick_top_comment(
     return None
 
 
+# ─────────────────────── meme-request detection (pure) ────────────────────
+# "hey pedro give me a meme about the game" / "find a meme about this" /
+# "any memes about mondays?" / "meme this". A request verb (or question
+# form) is REQUIRED so casual mentions ("that meme about cats was funny")
+# don't hijack the reply. These only run on messages the bot was going to
+# answer anyway (mention / reply / DM), which further limits false hits.
+_MEME_VERB_RE = re.compile(
+    r"\b(?:gimme|give\s+(?:me|us)|find(?:\s+(?:me|us))?|post|drop|send"
+    r"(?:\s+(?:me|us))?|show\s+(?:me|us)|get\s+(?:me|us)|pull(?:\s+up)?)\s+"
+    r"(?:a\s+|some\s+|another\s+|me\s+a\s+)?memes?\b"
+    r"(?:\s+(?:about|of|on|for|regarding)\s+(?P<topic>.+))?",
+    re.IGNORECASE,
+)
+_MEME_QUESTION_RE = re.compile(
+    r"\b(?:any|got|you\s+got|have)\s+(?:a\s+|any\s+|some\s+)?memes?\s+"
+    r"(?:about|of|on|for)\s+(?P<topic>.+)",
+    re.IGNORECASE,
+)
+_MEME_THIS_RE = re.compile(r"\bmemes?\s+this\b", re.IGNORECASE)
+
+# Topics that mean "the current conversation" rather than a literal subject.
+_DEICTIC_TOPICS = frozenset({
+    "this", "that", "it", "us", "this convo", "the convo",
+    "this conversation", "the conversation", "this chat", "the chat",
+    "the current topic", "what we're talking about",
+    "what were talking about", "whatever",
+})
+_TOPIC_FILLER_RE = re.compile(
+    r"\s+(?:please|pls|plz|thanks|thx|now|rn|lol|lmao|man|dude|dale|pedro)$",
+    re.IGNORECASE,
+)
+
+
+def detect_meme_request(text: str | None) -> str | None:
+    """Detect a meme request in a chat message.
+
+    Returns None when there's no request; '' when the topic should be
+    derived from the current conversation ("meme about this", or no topic
+    given); otherwise the explicit topic string to search for.
+    """
+    if not text:
+        return None
+    if _MEME_THIS_RE.search(text):
+        return ""
+    m = _MEME_VERB_RE.search(text) or _MEME_QUESTION_RE.search(text)
+    if not m:
+        return None
+    topic = (m.group("topic") or "").strip()
+    # Trim trailing punctuation / clause tail, then politeness filler.
+    topic = re.split(r"[?!.;:]", topic, 1)[0].strip()
+    prev = None
+    while topic and topic != prev:
+        prev = topic
+        topic = _TOPIC_FILLER_RE.sub("", topic).strip()
+    topic = topic.strip(" ,\"'")
+    if not topic or topic.lower() in _DEICTIC_TOPICS:
+        return ""
+    return topic
+
+
 # ───────────────────────────── URL builders (pure) ────────────────────────
 def _listing_url(base: str, sub: str, json_suffix: bool) -> str:
     return f"{base}/r/{sub}/top{'.json' if json_suffix else ''}"
+
+
+def _search_url(base: str, subs: tuple[str, ...], json_suffix: bool) -> str:
+    """Search WITHIN a set of subreddits (multireddit syntax + restrict_sr
+    passed as a query param by the caller)."""
+    return f"{base}/r/{'+'.join(subs)}/search{'.json' if json_suffix else ''}"
+
+
+def _sitewide_search_url(base: str, json_suffix: bool) -> str:
+    return f"{base}/search{'.json' if json_suffix else ''}"
 
 
 def _comments_url(base: str, permalink: str, json_suffix: bool) -> str:
@@ -389,34 +473,93 @@ async def fetch_meme(
             post = choose_post(listing, r)
             if not post:
                 continue
-            media = resolve_media(post)
-            if media is None:
+            meme = await _meme_from_post(client, base, json_suffix, post)
+            if meme:
+                return meme
+    return None
+
+
+async def _meme_from_post(
+    client: httpx.AsyncClient, base: str, json_suffix: bool, post: dict,
+) -> Meme | None:
+    """Build a Meme from a chosen post dict: resolve its media and fetch
+    the top comment. Shared by the feed and search paths."""
+    media = resolve_media(post)
+    if media is None:
+        return None
+    comment = author = None
+    comment_media = None
+    comments = await _get_json(
+        client,
+        _comments_url(base, post.get("permalink", ""), json_suffix),
+        sort="top", limit=25, raw_json=1,
+    )
+    if isinstance(comments, list) and len(comments) >= 2:
+        cdata = pick_top_comment(comments[1])
+        if cdata:
+            author = cdata.get("author") or None
+            comment_media = extract_comment_media(cdata)
+            comment = clean_comment_text(cdata.get("body") or "") or None
+    return Meme(
+        # The post's actual community, not the feed/search we found it
+        # through — so the footer reads e.g. "· r/aww".
+        subreddit=post.get("subreddit") or "",
+        title=post.get("title") or "",
+        post_author=post.get("author") or "",
+        permalink=post.get("permalink") or "",
+        media=media,
+        comment=comment,
+        comment_author=author,
+        comment_media=comment_media,
+    )
+
+
+async def fetch_meme_about(
+    topic: str,
+    rng: random.Random | None = None,
+    *,
+    timeout: float = 12.0,
+    user_agent: str | None = None,
+    client_id: str = "",
+    client_secret: str = "",
+) -> Meme | None:
+    """Search Reddit for a meme about ``topic`` and return it with its top
+    comment. Tries the big meme subs first (relevance search inside them
+    returns actual memes), then a sitewide search with 'meme' appended.
+    Picks among the first few displayable hits so repeat asks vary without
+    drifting into irrelevance. Returns None when nothing usable surfaces.
+    """
+    topic = (topic or "").strip()
+    if not topic:
+        return None
+    r = rng or random
+    ua = user_agent or _USER_AGENT
+    base, headers, json_suffix = await _api_context(client_id, client_secret, ua)
+    attempts: list[tuple[str, dict]] = [
+        (
+            _search_url(base, MEME_SEARCH_SUBS, json_suffix),
+            dict(q=topic, restrict_sr="on", sort="relevance",
+                 t="all", limit=50, raw_json=1),
+        ),
+        (
+            _sitewide_search_url(base, json_suffix),
+            dict(q=f"{topic} meme", sort="relevance",
+                 t="all", limit=50, raw_json=1),
+        ),
+    ]
+    async with httpx.AsyncClient(
+        headers=headers, timeout=timeout, follow_redirects=True,
+    ) as client:
+        for url, params in attempts:
+            listing = await _get_json(client, url, **params)
+            if not listing:
                 continue
-            comment = author = None
-            comment_media = None
-            comments = await _get_json(
-                client,
-                _comments_url(base, post.get("permalink", ""), json_suffix),
-                sort="top", limit=25, raw_json=1,
-            )
-            if isinstance(comments, list) and len(comments) >= 2:
-                cdata = pick_top_comment(comments[1])
-                if cdata:
-                    author = cdata.get("author") or None
-                    comment_media = extract_comment_media(cdata)
-                    comment = clean_comment_text(cdata.get("body") or "") or None
-            return Meme(
-                # The post's actual community, not the "popular" feed we
-                # queried it through — so the footer reads e.g. "· r/aww".
-                subreddit=post.get("subreddit") or sub,
-                title=post.get("title") or "",
-                post_author=post.get("author") or "",
-                permalink=post.get("permalink") or "",
-                media=media,
-                comment=comment,
-                comment_author=author,
-                comment_media=comment_media,
-            )
+            post = choose_post(listing, r, top_k=8)
+            if not post:
+                continue
+            meme = await _meme_from_post(client, base, json_suffix, post)
+            if meme:
+                return meme
     return None
 
 

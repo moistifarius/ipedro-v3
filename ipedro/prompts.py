@@ -168,6 +168,15 @@ ON_THIS_DAY_PROMPT = (
     "Messages:\n{messages}"
 )
 
+MEME_TOPIC_PROMPT = (
+    "Below are the latest messages from a group chat. Distill what the "
+    "group is currently talking about into a short search query (2-5 plain "
+    "words, lowercase, no punctuation, no quotes) suitable for finding a "
+    "relevant meme. Ignore messages that ask the bot for a meme — find the "
+    "topic UNDER that request. Output ONLY the query.\n\n"
+    "Messages:\n{messages}"
+)
+
 HAIKU_PROMPT = (
     "Compose a single haiku (5-7-5 syllables, three lines) inspired by the "
     "chat snippet below. Be evocative, a little weird, in character as a "

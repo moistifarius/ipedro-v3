@@ -367,3 +367,152 @@ async def test_token_failure_backs_off_then_reset_clears_it(monkeypatch):
     assert await rd._get_oauth_token("id", "sec", "ua") == "TOK"
     assert calls["n"] == 2
     reset_token_cache()
+
+
+# ───────────────────── meme-request detection ─────────────────────────────
+@pytest.mark.parametrize("text,expected", [
+    ("give me a meme about cats", "cats"),
+    ("hey pedro gimme a meme about the game", "the game"),
+    ("find a meme about tax season please", "tax season"),
+    ("post a meme of shrek", "shrek"),
+    ("show me a meme on mondays", "mondays"),
+    ("any memes about mondays?", "mondays"),
+    ("drop a meme for the group", "the group"),
+    ("send me a meme about crypto lol", "crypto"),
+])
+def test_detect_meme_request_explicit_topic(text, expected):
+    from ipedro.reddit import detect_meme_request
+    assert detect_meme_request(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "give me a meme about this",
+    "gimme a meme about this conversation",
+    "find a meme about that",
+    "give me a meme",                # no topic at all
+    "meme this",
+    "post a meme about whatever",
+])
+def test_detect_meme_request_deictic_means_derive(text):
+    from ipedro.reddit import detect_meme_request
+    assert detect_meme_request(text) == ""
+
+
+@pytest.mark.parametrize("text", [
+    "that meme about cats was funny",     # no request verb
+    "I love memes",
+    "the meme economy is wild",
+    "what's the weather",
+    "",
+    None,
+])
+def test_detect_meme_request_ignores_non_requests(text):
+    from ipedro.reddit import detect_meme_request
+    assert detect_meme_request(text) is None
+
+
+# ───────────────────── search url builders ────────────────────────────────
+def test_search_url_multireddit_oauth_and_anon():
+    from ipedro.reddit import _search_url
+    subs = ("memes", "funny")
+    assert _search_url(_OAUTH_BASE, subs, False) == \
+        "https://oauth.reddit.com/r/memes+funny/search"
+    assert _search_url(_ANON_BASE, subs, True) == \
+        "https://www.reddit.com/r/memes+funny/search.json"
+
+
+def test_sitewide_search_url():
+    from ipedro.reddit import _sitewide_search_url
+    assert _sitewide_search_url(_OAUTH_BASE, False) == \
+        "https://oauth.reddit.com/search"
+    assert _sitewide_search_url(_ANON_BASE, True) == \
+        "https://www.reddit.com/search.json"
+
+
+def test_choose_post_top_k_limits_pool():
+    # With top_k=1 the first displayable candidate is always chosen.
+    listing = {"data": {"children": [
+        _t3(url="https://i.redd.it/first.jpg", title="first"),
+        _t3(url="https://i.redd.it/second.jpg", title="second"),
+        _t3(url="https://i.redd.it/third.jpg", title="third"),
+    ]}}
+    for seed in range(5):
+        post = choose_post(listing, random.Random(seed), top_k=1)
+        assert post["title"] == "first"
+
+
+# ───────────────────── fetch_meme_about pipeline ──────────────────────────
+def _search_listing(title, sub="memes"):
+    return {"data": {"children": [
+        _t3(url="https://i.redd.it/hit.jpg", title=title, subreddit=sub,
+            permalink=f"/r/{sub}/comments/abc/{title}/"),
+    ]}}
+
+
+def _comments_fixture(body="top comment here"):
+    return [
+        {"data": {"children": []}},                       # post listing
+        {"data": {"children": [_t1(body=body, author="commenter")]}},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_meme_about_uses_meme_subs_then_falls_back(monkeypatch):
+    import ipedro.reddit as rd
+
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_api_context(cid, secret, ua):
+        return rd._ANON_BASE, {"User-Agent": ua}, True
+
+    async def fake_get_json(client, url, **params):
+        calls.append((url, params))
+        if "/r/memes+" in url:
+            return None                                   # meme subs: dry
+        if url.endswith("/search.json"):
+            return _search_listing("relevant meme", sub="pics")
+        if "/comments/" in url:
+            return _comments_fixture("lmao exactly")
+        return None
+
+    monkeypatch.setattr(rd, "_api_context", fake_api_context)
+    monkeypatch.setattr(rd, "_get_json", fake_get_json)
+
+    meme = await rd.fetch_meme_about("tax season", rng=random.Random(0))
+    assert meme is not None
+    assert meme.subreddit == "pics"           # post's real community
+    assert meme.comment == "lmao exactly"
+    # First call was the restricted meme-sub search with the raw topic...
+    assert "/r/memes+" in calls[0][0]
+    assert calls[0][1]["q"] == "tax season"
+    assert calls[0][1]["restrict_sr"] == "on"
+    # ...then the sitewide fallback with 'meme' appended.
+    assert calls[1][0].endswith("/search.json")
+    assert calls[1][1]["q"] == "tax season meme"
+
+
+@pytest.mark.asyncio
+async def test_fetch_meme_about_returns_none_when_all_dry(monkeypatch):
+    import ipedro.reddit as rd
+
+    async def fake_api_context(cid, secret, ua):
+        return rd._ANON_BASE, {"User-Agent": ua}, True
+
+    async def fake_get_json(client, url, **params):
+        return None
+
+    monkeypatch.setattr(rd, "_api_context", fake_api_context)
+    monkeypatch.setattr(rd, "_get_json", fake_get_json)
+    assert await rd.fetch_meme_about("anything") is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_meme_about_empty_topic_short_circuits(monkeypatch):
+    import ipedro.reddit as rd
+
+    async def boom(*a, **k):                              # must not be called
+        raise AssertionError("network path should not run for empty topic")
+
+    monkeypatch.setattr(rd, "_api_context", boom)
+    assert await rd.fetch_meme_about("") is None
+    assert await rd.fetch_meme_about("   ") is None

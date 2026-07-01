@@ -134,9 +134,10 @@ COMMANDS: tuple[Command, ...] = (
             "/meme top text | bottom text",
             "Generate a meme image."),
     Command("redditmeme",   "ai", "/redditmeme",
-            "/redditmeme  (or /rmeme)",
-            "Pull a post from Reddit's r/popular and post it with the "
-            "post's top comment as the caption."),
+            "/redditmeme [topic]  (or /rmeme)",
+            "No topic: a post from Reddit's r/popular. With a topic: search "
+            "Reddit for a relevant meme. Caption is the post's top comment. "
+            "Also triggers in chat: 'hey pedro, give me a meme about this'."),
     Command("ether",        "ai", "/ether",
             "/ether <text> | /ether (reply to voice)",
             "Transmit a message as staticky shortwave-voice into another "
