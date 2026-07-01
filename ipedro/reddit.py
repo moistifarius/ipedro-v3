@@ -1,4 +1,4 @@
-"""Pull a meme (image / gif / video) from a rotation of subreddits and the
+"""Pull a post (image / gif / video) from Reddit's r/popular feed and the
 post's top comment, so the bot can drop it into a chat.
 
 Reddit exposes public JSON at ``/r/<sub>/top.json`` and
@@ -41,15 +41,10 @@ _ANON_BASE = "https://www.reddit.com"
 _TOKEN_REFRESH_MARGIN = 120.0
 _TOKEN_FALLBACK_TTL = 3600.0  # used only if the response omits expires_in
 
-# The rotation. Mostly-SFW meme subs; NSFW-tagged posts are filtered out
-# regardless.
-SUBREDDITS: tuple[str, ...] = (
-    "me_irl",
-    "memes",
-    "coaxedintoasnafu",
-    "notinteresting",
-    "funny",
-)
+# We pull from r/popular — Reddit's cross-community trending feed (already
+# SFW-filtered by Reddit; NSFW-tagged posts are dropped again regardless).
+# The post's real source community is surfaced in the caption footer.
+SUBREDDITS: tuple[str, ...] = ("popular",)
 
 _USER_AGENT = "iPedro/1.0 (Telegram meme bot)"
 _IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
@@ -411,7 +406,9 @@ async def fetch_meme(
                     comment_media = extract_comment_media(cdata)
                     comment = clean_comment_text(cdata.get("body") or "") or None
             return Meme(
-                subreddit=sub,
+                # The post's actual community, not the "popular" feed we
+                # queried it through — so the footer reads e.g. "· r/aww".
+                subreddit=post.get("subreddit") or sub,
                 title=post.get("title") or "",
                 post_author=post.get("author") or "",
                 permalink=post.get("permalink") or "",

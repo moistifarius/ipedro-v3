@@ -540,8 +540,8 @@ def build_router(rt: Runtime) -> Router:
 
     @r.message(Command("redditmeme", "rmeme"))
     async def redditmeme(msg: Message) -> None:
-        """/redditmeme (/rmeme) — pull a meme from a rotation of subreddits
-        and post it with the post's top comment as the caption."""
+        """/redditmeme (/rmeme) — pull a post from Reddit's r/popular and
+        post it with the post's top comment as the caption."""
         await get_or_create_chat_config(rt, msg)
         await rt.bot.send_chat_action(msg.chat.id, "upload_photo")
         ua = rt.settings.reddit_user_agent
