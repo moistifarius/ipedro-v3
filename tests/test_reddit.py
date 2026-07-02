@@ -482,13 +482,17 @@ async def test_fetch_meme_about_uses_meme_subs_then_falls_back(monkeypatch):
     assert meme is not None
     assert meme.subreddit == "pics"           # post's real community
     assert meme.comment == "lmao exactly"
-    # First call was the restricted meme-sub search with the raw topic...
+    # First call was the restricted meme-sub RELEVANCE search...
     assert "/r/memes+" in calls[0][0]
     assert calls[0][1]["q"] == "tax season"
     assert calls[0][1]["restrict_sr"] == "on"
+    assert calls[0][1]["sort"] == "relevance"
+    # ...then the meme-sub TOP search (crowd-validated classics)...
+    assert "/r/memes+" in calls[1][0]
+    assert calls[1][1]["sort"] == "top"
     # ...then the sitewide fallback with 'meme' appended.
-    assert calls[1][0].endswith("/search.json")
-    assert calls[1][1]["q"] == "tax season meme"
+    assert calls[2][0].endswith("/search.json") and "/r/" not in calls[2][0]
+    assert calls[2][1]["q"] == "tax season meme"
 
 
 @pytest.mark.asyncio

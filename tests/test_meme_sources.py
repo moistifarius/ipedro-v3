@@ -39,6 +39,7 @@ def test_parse_imgur_image_album_nsfw_and_animated():
         {"nsfw": True, "title": "nope",
          "link": "https://i.imgur.com/x.jpg", "id": "n1"},   # nsfw dropped
         {"nsfw": False, "is_album": True, "title": "album meme", "id": "a1",
+         "points": 4321,
          "images": [{"link": "https://i.imgur.com/first.png"}]},
         {"nsfw": False, "title": "moving meme", "id": "v1", "animated": True,
          "link": "https://i.imgur.com/v.gifv",
@@ -56,6 +57,7 @@ def test_parse_imgur_image_album_nsfw_and_animated():
         ("gif meme", "animation"),
     ]
     assert got[0]["imgur_id"] == "a1"
+    assert got[0]["score"] == 4321          # gallery points → votes signal
     assert all(c["source"] == "imgur" for c in got)
 
 

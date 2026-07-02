@@ -184,15 +184,20 @@ MEME_QUERIES_PROMPT = (
 MEME_PICK_PROMPT = (
     "You are choosing a MEME for a group chat.\n"
     "Topic: {topic}\n\n"
-    "Candidate reddit posts (flair in [brackets] when available):\n"
+    "Candidates (upvotes in parentheses when known, flair in [brackets]):\n"
     "{candidates}\n\n"
-    "Pick the single candidate that is BOTH:\n"
-    "  1. an actual meme — a joke/image-macro/shitpost format. NOT a news "
-    "photo, article screenshot, game highlight, product shot, or ordinary "
-    "picture. Meme-y subreddits and flairs like [Meme]/[Shitpost] are "
-    "strong signals; sober titles that read like headlines are not memes.\n"
-    "  2. genuinely about the topic.\n"
-    "Reply with ONLY its number. If no candidate satisfies BOTH, reply 0."
+    "Pick the candidate most likely to actually get a laugh:\n"
+    "  1. It MUST be an actual meme — joke/image-macro/shitpost format. "
+    "NOT a news photo, article screenshot, game highlight, product shot, "
+    "or ordinary picture. Meme subreddits and flairs like [Meme]/"
+    "[Shitpost] are strong signals; sober titles that read like headlines "
+    "are not memes.\n"
+    "  2. LOOSE topical relevance is enough. A heavily-upvoted, genuinely "
+    "funny meme that's only loosely related BEATS a precisely on-topic "
+    "meme with few upvotes. Upvotes are the crowd's verdict on funny — "
+    "weigh them heavily.\n"
+    "Reply with ONLY its number. Reply 0 only if nothing is both a meme "
+    "and at least loosely related to the topic."
 )
 
 HAIKU_PROMPT = (

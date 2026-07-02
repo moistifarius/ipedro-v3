@@ -118,6 +118,8 @@ def parse_imgur_results(payload: dict, limit: int = 6) -> list[dict]:
             "title": title,
             "media": media,
             "imgur_id": item.get("id") or "",
+            # Imgur gallery votes — comparable role to reddit's score.
+            "score": int(item.get("points") or item.get("score") or 0),
         })
         if len(out) >= limit:
             break

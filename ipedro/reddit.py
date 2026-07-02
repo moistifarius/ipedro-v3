@@ -701,25 +701,35 @@ async def search_meme_candidates(
     client_id: str = "",
     client_secret: str = "",
 ) -> list[dict]:
-    """Candidate meme posts for ``query`` from the big meme subs
-    (relevance search inside them returns actual memes), then a sitewide
-    search with 'meme' appended. Deduped by permalink, listing order
-    preserved (relevance-first)."""
+    """Candidate meme posts for ``query`` from the big meme subs — first
+    by relevance, then by TOP (all-time upvotes: the crowd-validated
+    classics matching the query) — then a sitewide relevance search with
+    'meme' appended. Deduped by permalink, listing order preserved."""
     query = (query or "").strip()
     if not query:
         return []
     ua = user_agent or _USER_AGENT
     base, headers, json_suffix = await _api_context(client_id, client_secret, ua)
-    attempts: list[tuple[str, dict]] = [
+    # Per-attempt take caps: relevance gets half the budget so the
+    # top-voted pass always has room to contribute crowd favorites.
+    attempts: list[tuple[str, dict, int]] = [
         (
             _search_url(base, MEME_SEARCH_SUBS, json_suffix),
             dict(q=query, restrict_sr="on", sort="relevance",
                  t="all", limit=50, raw_json=1),
+            max(3, limit // 2),
+        ),
+        (
+            _search_url(base, MEME_SEARCH_SUBS, json_suffix),
+            dict(q=query, restrict_sr="on", sort="top",
+                 t="all", limit=50, raw_json=1),
+            limit,
         ),
         (
             _sitewide_search_url(base, json_suffix),
             dict(q=f"{query} meme", sort="relevance",
                  t="all", limit=50, raw_json=1),
+            limit,
         ),
     ]
     out: list[dict] = []
@@ -727,18 +737,20 @@ async def search_meme_candidates(
     async with httpx.AsyncClient(
         headers=headers, timeout=timeout, follow_redirects=True,
     ) as client:
-        for url, params in attempts:
+        for url, params, take in attempts:
+            if len(out) >= limit:
+                break
             listing = await _get_json(client, url, **params)
             if not listing:
                 continue
-            for d in _displayable_posts(listing, limit):
+            for d in _displayable_posts(listing, take):
+                if len(out) >= limit:
+                    break
                 key = d.get("permalink") or d.get("url") or ""
                 if key in seen:
                     continue
                 seen.add(key)
                 out.append(d)
-            if len(out) >= limit:
-                break
     return out[:limit]
 
 

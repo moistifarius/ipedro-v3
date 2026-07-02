@@ -92,8 +92,9 @@ def _candidate_lines(candidates: list[dict]) -> str:
         where = f"r/{p.get('subreddit') or '?'}" if source == "reddit" else source
         flair = (p.get("link_flair_text") or "").strip()
         tag = f" [{flair}]" if flair else ""
+        votes = _fmt_score(candidate_score(p))
         lines.append(
-            f"{i + 1}. {where}{tag} — {p.get('title') or '(untitled)'}"
+            f"{i + 1}. {where}{tag}{votes} — {p.get('title') or '(untitled)'}"
         )
     return "\n".join(lines)
 
@@ -114,6 +115,37 @@ def _is_memeish(p: dict) -> bool:
     if (p.get("source") or "reddit") != "reddit":
         return True
     return is_meme_flavored(p)
+
+
+# Sort weight for candidates whose source reports no vote count (Giphy):
+# park them mid-pack rather than at either extreme.
+_UNKNOWN_SCORE = 250
+# Candidates with a KNOWN score below this are junk nobody laughed at —
+# pruned when we can afford to (see gather_candidates).
+_MIN_SCORE = 25
+_MIN_KEEP = 4
+
+
+def candidate_score(p: dict) -> int | None:
+    """Upvotes for a candidate, or None when the source doesn't report
+    votes (Giphy). Reddit posts carry 'score'/'ups'; imgur candidates get
+    'score' from gallery points at parse time."""
+    for key in ("score", "ups"):
+        v = p.get(key)
+        if v is not None:
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _fmt_score(score: int | None) -> str:
+    if score is None:
+        return ""
+    if score >= 1000:
+        return f" ({score / 1000:.1f}k↑)".replace(".0k", "k")
+    return f" ({score}↑)"
 
 
 # ───────────────────────────── orchestration ───────────────────────────────
@@ -187,11 +219,26 @@ async def gather_candidates(
         if imgur_client_id and len(out) < _MAX_CANDIDATES:
             _take(await imgur_candidates(q, imgur_client_id, user_agent=ua))
 
-    # Sink non-meme-looking posts (news photos, highlight clips from the
-    # sitewide sweep) below actual memes. Stable, so within each tier the
-    # source priority is preserved. This also makes the judge-unavailable
-    # fallback (first candidate) a meme.
-    out.sort(key=lambda p: not _is_memeish(p))
+    # Rank: memes before non-memes, then BY VOTES within each tier — a
+    # heavily-upvoted meme that's only loosely on-topic beats a precise
+    # but unloved one (the judge is told the same). This also makes the
+    # judge-unavailable fallback (first candidate) the most-upvoted meme.
+    def _rank(p: dict) -> tuple:
+        score = candidate_score(p)
+        return (
+            not _is_memeish(p),
+            -(score if score is not None else _UNKNOWN_SCORE),
+        )
+
+    out.sort(key=_rank)
+    # Prune known-low-vote junk (nobody laughed) when we can afford to —
+    # never below _MIN_KEEP candidates, so niche topics still work.
+    pruned = [
+        p for p in out
+        if (candidate_score(p) is None or candidate_score(p) >= _MIN_SCORE)
+    ]
+    if len(pruned) >= _MIN_KEEP:
+        out = pruned
     return out[:_MAX_CANDIDATES]
 
 

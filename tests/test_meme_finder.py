@@ -347,3 +347,72 @@ async def test_judge_sees_source_labels(wired):
     )
     prompt = ai.prompts[-1]
     assert "r/memes" in prompt and "giphy — giphy gif" in prompt
+
+
+# ───────────────────────── vote-aware ranking ──────────────────────────────
+def test_candidate_score_and_format():
+    from ipedro.meme_finder import _fmt_score, candidate_score
+    assert candidate_score({"score": 12345}) == 12345
+    assert candidate_score({"ups": 88}) == 88
+    assert candidate_score({"title": "no votes"}) is None
+    assert _fmt_score(12345) == " (12.3k↑)"
+    assert _fmt_score(2000) == " (2k↑)"
+    assert _fmt_score(88) == " (88↑)"
+    assert _fmt_score(None) == ""
+
+
+@pytest.mark.asyncio
+async def test_candidates_ranked_by_votes_within_meme_tier(wired):
+    calls, state = wired
+    state["topic_subs"] = []
+    state["search_posts"]["default"] = [
+        dict(_post("/r/memes/low", "barely upvoted meme"), score=40),
+        dict(_post("/r/memes/high", "banger meme"), score=90000),
+        dict(_post("/r/memes/mid", "decent meme"), score=1200),
+    ]
+    got = await gather_candidates(["cats"])
+    assert [p["permalink"] for p in got] == [
+        "/r/memes/high", "/r/memes/mid", "/r/memes/low",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_low_vote_junk_pruned_when_enough_remain(wired):
+    calls, state = wired
+    state["topic_subs"] = []
+    state["search_posts"]["default"] = [
+        dict(_post(f"/r/memes/{i}", f"meme {i}"), score=1000 + i)
+        for i in range(4)
+    ] + [dict(_post("/r/memes/junk", "junk meme"), score=3)]
+    got = await gather_candidates(["cats"])
+    assert all(p["permalink"] != "/r/memes/junk" for p in got)
+
+
+@pytest.mark.asyncio
+async def test_low_vote_kept_when_candidates_scarce(wired):
+    calls, state = wired
+    state["topic_subs"] = []
+    state["search_posts"]["default"] = [
+        dict(_post("/r/memes/only", "niche meme"), score=5),
+    ]
+    got = await gather_candidates(["obscure hobby"])
+    # Too few candidates to afford pruning — keep the niche meme.
+    assert [p["permalink"] for p in got] == ["/r/memes/only"]
+
+
+@pytest.mark.asyncio
+async def test_judge_sees_vote_counts(wired):
+    calls, state = wired
+    state["topic_subs"] = []
+    state["search_posts"]["default"] = [
+        dict(_post("/r/memes/high", "banger"), score=90000),
+    ]
+    ai = _FakeAI("1")
+    await find_relevant_meme(ai, ["cats"], topic_label="cats")
+    assert "(90k↑)" in ai.prompts[-1]
+
+
+def test_pick_prompt_prefers_upvoted_loosely_relevant():
+    from ipedro.prompts import MEME_PICK_PROMPT
+    assert "BEATS" in MEME_PICK_PROMPT
+    assert "upvot" in MEME_PICK_PROMPT.lower()
