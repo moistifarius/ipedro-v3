@@ -657,3 +657,39 @@ def test_detect_meme_request_hardened_positives(text, expected):
 def test_detect_meme_request_all_bot_name_leadins(text, expected):
     from ipedro.reddit import detect_meme_request
     assert detect_meme_request(text) == expected
+
+
+# ───────────── detection widening (natural request phrasings) ─────────────
+@pytest.mark.parametrize("text,expected", [
+    ("make me a meme about mondays", "mondays"),
+    ("pedro make a meme about tax season", "tax season"),
+    ("someone make a meme of this", ""),
+    ("somebody post a meme about the game", "the game"),
+    ("i want a meme about cats", "cats"),
+    ("we need a meme of this", ""),
+    ("can i get a meme about mondays", "mondays"),
+    ("can we get a meme of shrek", "shrek"),
+    ("lemme get a meme about crypto", "crypto"),
+    ("meme about cats", "cats"),                 # bare, message start
+    ("pedro meme about cats", "cats"),           # bare after bot name
+    ("duder, meme of the lakers", "the lakers"),
+    ("make this a meme", ""),
+    ("turn that into a meme", ""),
+    ("whip up a meme about winter", "winter"),
+    ("hit me with a meme about mondays", "mondays"),
+    ("throw me a meme about golf", "golf"),
+])
+def test_detect_meme_request_natural_phrasings(text, expected):
+    from ipedro.reddit import detect_meme_request
+    assert detect_meme_request(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    # narration with the new verbs must stay dead
+    "he wants a meme about cats",
+    "she said she needs a meme about that",
+    "i was gonna make a meme about it yesterday",
+])
+def test_detect_meme_request_new_verbs_still_reject_narration(text):
+    from ipedro.reddit import detect_meme_request
+    assert detect_meme_request(text) is None

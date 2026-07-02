@@ -360,14 +360,40 @@ _REQ_PREFIX = (
     r"(?:^|[.!?]\s+|,\s*"
     r"|\b" + _BOT_NAMES + r"\b[,!:]?\s+"
     r"|\b(?:please|pls)\s+"
-    r"|\b(?:can|could|will|would)\s+(?:you|u)\s+(?:please\s+)?)"
+    r"|\b(?:can|could|will|would)\s+(?:you|u|i|we)\s+(?:please\s+)?"
+    r"|\blemme\s+"
+    r"|\bsome(?:one|body)\s+)"
 )
 _MEME_VERB_RE = re.compile(
     _REQ_PREFIX +
     r"(?:gimme|give\s+(?:me|us)|find(?:\s+(?:me|us))?|post|drop|send"
-    r"(?:\s+(?:me|us))?|show\s+(?:me|us)|get\s+(?:me|us)|pull(?:\s+up)?)\s+"
-    r"(?:a\s+|some\s+|another\s+|me\s+a\s+)?memes?\b"
+    r"(?:\s+(?:me|us))?|show\s+(?:me|us)|get(?:\s+(?:me|us))?"
+    r"|pull(?:\s+up)?|make(?:\s+(?:me|us))?|create|whip\s+up|cook\s+up"
+    r"|throw\s+(?:me|us)|hit\s+(?:me|us)\s+with)\s+"
+    r"(?:a\s+|some\s+|another\s+|me\s+a\s+|us\s+a\s+)?memes?\b"
     r"(?:\s+(?:about|of|on|for|regarding)\s+(?P<topic>.+))?",
+    re.IGNORECASE,
+)
+# First-person desire — "i want a meme about X" / "we need some memes of
+# Y". Request semantics without imperative form.
+_MEME_WANT_RE = re.compile(
+    r"\b(?:i|we)\s+(?:want|need|could\s+use|demand)\s+"
+    r"(?:a\s+|some\s+|another\s+)?memes?\b"
+    r"(?:\s+(?:about|of|on|for)\s+(?P<topic>.+))?",
+    re.IGNORECASE,
+)
+# Bare noun-first ask, gated on imperative position so casual mentions
+# ("that meme about cats was funny") stay dead: "pedro meme about cats" /
+# "meme of shrek please".
+_MEME_BARE_RE = re.compile(
+    _REQ_PREFIX +
+    r"(?:a\s+|some\s+)?memes?\s+(?:about|of)\s+(?P<topic>.+)",
+    re.IGNORECASE,
+)
+# "make this a meme" / "turn that into a meme" — deictic transforms.
+_MEME_TRANSFORM_RE = re.compile(
+    _REQ_PREFIX +
+    r"(?:make|turn)\s+(?:this|that|it)\s+(?:into\s+)?a\s+meme\b",
     re.IGNORECASE,
 )
 _MEME_QUESTION_RE = re.compile(
@@ -416,7 +442,14 @@ def detect_meme_request(text: str | None) -> str | None:
         return None
     if _MEME_THIS_RE.match(text):
         return ""
-    m = _MEME_VERB_RE.search(text) or _MEME_QUESTION_RE.search(text)
+    if _MEME_TRANSFORM_RE.search(text):
+        return ""
+    m = (
+        _MEME_VERB_RE.search(text)
+        or _MEME_QUESTION_RE.search(text)
+        or _MEME_WANT_RE.search(text)
+        or _MEME_BARE_RE.search(text)
+    )
     if not m:
         return None
     topic = (m.group("topic") or "").strip()

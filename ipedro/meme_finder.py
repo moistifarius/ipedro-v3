@@ -32,7 +32,9 @@ from ipedro.meme_sources import (
     imgur_top_comment,
     kym_meme_names,
 )
-from ipedro.prompts import MEME_PICK_PROMPT, MEME_QUERIES_PROMPT
+from ipedro.prompts import (
+    MEME_PICK_PROMPT, MEME_QUERIES_PROMPT, MEME_REQUEST_CLASSIFY_PROMPT,
+)
 from ipedro.reddit import (
     Meme,
     candidates_from_topic_sub,
@@ -146,6 +148,39 @@ def _fmt_score(score: int | None) -> str:
     if score >= 1000:
         return f" ({score / 1000:.1f}k↑)".replace(".0k", "k")
     return f" ({score}↑)"
+
+
+def parse_meme_classification(raw: str | None) -> str | None:
+    """Classifier output → detect_meme_request-compatible value:
+    None (not a request) / '' (derive from conversation) / topic."""
+    line = (raw or "").strip().splitlines()[0].strip() if (raw or "").strip() else ""
+    if not line:
+        return None
+    upper = line.upper()
+    if upper.startswith("NO"):
+        return None
+    if upper.startswith("THIS"):
+        return ""
+    if upper.startswith("TOPIC"):
+        topic = line.split(":", 1)[1].strip() if ":" in line else ""
+        topic = topic.strip(" \"'")
+        return topic or ""
+    return None
+
+
+async def classify_meme_request(
+    openai, text: str, chat_id: int | None = None,
+) -> str | None:
+    """AI fallback for meme-request detection: catches natural phrasings
+    the regex grammar misses. Callers gate this on (a) the bot already
+    replying to the message and (b) the word 'meme' being present, so it
+    never fires on ordinary chat. Conservative by prompt: reacting to /
+    discussing memes is NOT a request."""
+    raw = await openai.cheap_completion(
+        MEME_REQUEST_CLASSIFY_PROMPT.format(text=text[:500]),
+        max_tokens=24, chat_id=chat_id,
+    )
+    return parse_meme_classification(raw)
 
 
 # ───────────────────────────── orchestration ───────────────────────────────

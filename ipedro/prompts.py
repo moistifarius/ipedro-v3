@@ -181,6 +181,19 @@ MEME_QUERIES_PROMPT = (
     "Messages:\n{messages}"
 )
 
+MEME_REQUEST_CLASSIFY_PROMPT = (
+    "A group-chat bot can post memes on request. Decide whether the "
+    "message below is ASKING for a meme to be posted/found/made (by the "
+    "bot, or just 'someone'). Reacting to a meme, discussing memes, or "
+    "narrating plans ('I'll send a meme later') is NOT a request.\n\n"
+    "Message: {text}\n\n"
+    "Reply with EXACTLY one line:\n"
+    "NO            — not a meme request\n"
+    "THIS          — asking for a meme about the current conversation "
+    "('this', 'that', no subject given)\n"
+    "TOPIC: <subject> — asking for a meme about a specific subject"
+)
+
 MEME_PICK_PROMPT = (
     "You are choosing a MEME for a group chat.\n"
     "Topic: {topic}\n\n"

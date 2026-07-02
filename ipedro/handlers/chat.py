@@ -19,7 +19,9 @@ from ipedro.duckhunt.scoring import challenge_is_over_time, over_time_line
 from ipedro.duckhunt.verdicts import parse_verdict
 from ipedro.handlers.common import catify, display_name, get_or_create_chat_config
 from ipedro.impersonate import build_impersonation_prompt, resolve_impersonation
-from ipedro.meme_finder import derive_topic_queries, find_relevant_meme
+from ipedro.meme_finder import (
+    classify_meme_request, derive_topic_queries, find_relevant_meme,
+)
 from ipedro.memory.context_builder import build_context
 from ipedro.memory.summarizer import maybe_summarize
 from ipedro.prompts import CAT_FACT_PROMPT, DUCK_BEF_CHALLENGE_JUDGE_PROMPT
@@ -121,6 +123,10 @@ _CAT_WORD_RE = re.compile(
     re.IGNORECASE,
 )
 _CAT_EMOJI = frozenset("🐈🐱😺😸😹😻😼😽🙀😿😾")
+
+# Gate for the AI meme-request fallback: only consult the classifier when
+# the message actually says 'meme' (and the bot was replying anyway).
+_MEME_WORD_RE = re.compile(r"\bmemes?\b", re.IGNORECASE)
 
 
 def _mentions_pedro(text: str | None) -> bool:
@@ -541,9 +547,11 @@ def build_router(rt: Runtime) -> Router:
                 log.debug("Reaction failed: %s", exc)
 
         # Cat mention: drop a dubious cat fact and stop. Skip the regular
-        # AI reply so the bot doesn't both fact and chat. A meme request
-        # wins though — "meme about cats" wants a meme, not a cat fact.
-        if _mentions_cat(text) and detect_meme_request(text) is None:
+        # AI reply so the bot doesn't both fact and chat. Meme requests
+        # win though — "meme about cats" wants a meme, not a cat fact —
+        # and any message that says 'meme' is left for the meme intercept
+        # (with its AI fallback) to evaluate.
+        if _mentions_cat(text) and _MEME_WORD_RE.search(text) is None:
             await rt.bot.send_chat_action(msg.chat.id, "typing")
             fact = await rt.openai.cheap_completion(CAT_FACT_PROMPT, max_tokens=120)
             reply_text = catify(fact or "🐈")
@@ -596,10 +604,26 @@ def build_router(rt: Runtime) -> Router:
             return
 
         # "hey pedro give me a meme about this" → fetch a relevant meme
-        # from Reddit (topic explicit, or distilled from the current
-        # conversation) and post it with its top comment instead of a
-        # text reply. Only fires on messages the bot was answering anyway.
+        # (topic explicit, or distilled from the current conversation) and
+        # post it with its top comment instead of a text reply. Fast regex
+        # grammar first; when it misses but the message says 'meme', a
+        # cheap AI classifier decides — that's the net for natural
+        # phrasings the grammar can't enumerate. Both only run on messages
+        # the bot was answering anyway.
         meme_topic = detect_meme_request(text)
+        if meme_topic is None and _MEME_WORD_RE.search(text):
+            try:
+                meme_topic = await classify_meme_request(
+                    rt.openai, text, chat_id=msg.chat.id,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                log.info("meme classify failed in %s: %s", msg.chat.id, exc)
+                meme_topic = None
+            if meme_topic is not None:
+                log.info(
+                    "meme request via AI classifier in %s: topic=%r",
+                    msg.chat.id, meme_topic,
+                )
         if meme_topic is not None:
             await _handle_meme_request(rt, msg, cfg, meme_topic)
             return

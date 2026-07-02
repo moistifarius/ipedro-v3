@@ -416,3 +416,31 @@ def test_pick_prompt_prefers_upvoted_loosely_relevant():
     from ipedro.prompts import MEME_PICK_PROMPT
     assert "BEATS" in MEME_PICK_PROMPT
     assert "upvot" in MEME_PICK_PROMPT.lower()
+
+
+# ─────────────────── AI fallback classification parse ──────────────────────
+@pytest.mark.parametrize("raw,expected", [
+    ("NO", None),
+    ("no — just discussing memes", None),
+    ("THIS", ""),
+    ("THIS — they want the convo memed", ""),
+    ("TOPIC: airport security", "airport security"),
+    ("topic: cats", "cats"),
+    ('TOPIC: "mondays"', "mondays"),
+    ("TOPIC:", ""),                 # asked for a meme, subject unclear
+    ("", None),
+    (None, None),
+    ("gibberish with no verdict", None),
+])
+def test_parse_meme_classification(raw, expected):
+    from ipedro.meme_finder import parse_meme_classification
+    assert parse_meme_classification(raw) == expected
+
+
+@pytest.mark.asyncio
+async def test_classify_meme_request_uses_cheap_model():
+    from ipedro.meme_finder import classify_meme_request
+    ai = _FakeAI("TOPIC: golf")
+    got = await classify_meme_request(ai, "yo can u do one of those meme things about golf")
+    assert got == "golf"
+    assert "meme" in ai.prompts[-1].lower()
