@@ -112,6 +112,9 @@ class Meme:
     # Some top comments ARE media (a Giphy gif, an image reply). When so,
     # this holds the gif/image to post instead of the raw markdown.
     comment_media: Media | None = None
+    # Where the meme came from: 'reddit' | 'giphy' | 'imgur'. Controls the
+    # caption footer ('· r/<sub>' vs '· giphy').
+    source: str = "reddit"
 
 
 # ───────────────────────────── pure helpers ───────────────────────────────
@@ -920,7 +923,10 @@ def build_caption(meme: Meme, *, limit: int = 1024) -> str:
     """The chat caption: the top comment (the bot 'saying' it), with a
     small provenance footer. Falls back to the post title when there's no
     usable comment."""
-    footer = f"\n\n· r/{meme.subreddit}"
+    if meme.source == "reddit":
+        footer = f"\n\n· r/{meme.subreddit}"
+    else:
+        footer = f"\n\n· {meme.source}"
     body = (meme.comment or meme.title or "").strip()
     budget = limit - len(footer)
     if len(body) > budget:

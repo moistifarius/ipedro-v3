@@ -89,6 +89,13 @@ class Settings(BaseSettings):
     # endpoint (works only from residential IPs, if at all).
     reddit_client_id: str = ""
     reddit_client_secret: str = ""
+    # Optional extra meme sources for "meme about X" hunts. Both free:
+    # GIPHY_API_KEY from developers.giphy.com, IMGUR_CLIENT_ID from
+    # api.imgur.com/oauth2/addclient (choose 'anonymous usage'). Unset →
+    # those sources are skipped and Reddit (+ KnowYourMeme query
+    # expansion, keyless) carries the hunt.
+    giphy_api_key: str = ""
+    imgur_client_id: str = ""
 
     # Per-chat defaults
     default_response_policy_private: ResponsePolicy = "always"

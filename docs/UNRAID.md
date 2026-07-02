@@ -132,6 +132,23 @@ the HTTP status of a real Reddit call — so you can tell at a glance if the
 credentials are wired up. The bot caches the bearer token and reuses it
 (re-minting only near expiry), and honors Reddit's rate limits.
 
+### Extra meme sources (optional, recommended)
+
+Topic hunts ("gimme a meme about X") search more than Reddit when keys are
+present — both are free and take ~2 minutes each:
+
+```bash
+# Giphy: create an app at https://developers.giphy.com → API key.
+GIPHY_API_KEY=your_key
+# Imgur: register at https://api.imgur.com/oauth2/addclient
+# (choose "anonymous usage without user authorization") → Client ID.
+IMGUR_CLIENT_ID=your_client_id
+```
+
+Unset keys just skip those sources. KnowYourMeme is also consulted
+(keyless, best-effort) to learn the meme-format names for a topic —
+"distracted boyfriend" searches far better than a raw topic phrase.
+
 ## Troubleshooting
 
 - **`extension "vector" does not exist`** — `pgvector/pgvector:pg16` ships

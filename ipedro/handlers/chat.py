@@ -265,13 +265,20 @@ async def _handle_meme_request(rt: Runtime, msg: Message, cfg, topic: str) -> No
         client_id=rt.settings.reddit_client_id,
         client_secret=rt.settings.reddit_client_secret,
     )
+    # Extra sources for the judged hunt only — fetch_meme (the random
+    # r/popular fallback) is reddit-only and must not see these kwargs.
+    finder_creds = dict(
+        creds,
+        giphy_api_key=rt.settings.giphy_api_key,
+        imgur_client_id=rt.settings.imgur_client_id,
+    )
     if topic:
         # Explicit subject — judged search; a dry result (including the
         # judge deciding nothing found is a relevant MEME) is an honest
         # miss, not a cue to post something random.
         meme = await find_relevant_meme(
             rt.openai, [topic], topic_label=topic,
-            chat_id=msg.chat.id, **creds,
+            chat_id=msg.chat.id, **finder_creds,
         )
         if meme is None:
             miss = (
@@ -295,7 +302,7 @@ async def _handle_meme_request(rt: Runtime, msg: Message, cfg, topic: str) -> No
             )
             meme = await find_relevant_meme(
                 rt.openai, queries, topic_label=queries[0],
-                chat_id=msg.chat.id, **creds,
+                chat_id=msg.chat.id, **finder_creds,
             )
         if meme is None:
             meme = await fetch_meme(**creds)

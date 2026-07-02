@@ -74,15 +74,24 @@ class _FakeAI:
 
 @pytest.fixture
 def wired(monkeypatch):
-    """Monkeypatch meme_finder's reddit dependencies with recording fakes."""
+    """Monkeypatch meme_finder's source dependencies with recording fakes.
+
+    Giphy/Imgur stay inert by default (no keys); KYM returns no expansion
+    names unless a test sets state['kym'].
+    """
     calls = {"topic_subs": [], "sub_candidates": [], "searches": [],
-             "meme_for": []}
+             "meme_for": [], "kym": [], "giphy": [], "imgur": [],
+             "imgur_comments": []}
     state = {
         "topic_subs": ["lakers"],
         "sub_posts": [_post("/r/lakers/1", "lebron meme", "lakers")],
         "search_posts": {
             "default": [_post("/r/memes/2", "generic meme")],
         },
+        "kym": [],
+        "giphy_posts": [],
+        "imgur_posts": [],
+        "imgur_comment": "imgur top comment",
     }
 
     async def fake_topic_subs(query, **kw):
@@ -104,10 +113,30 @@ def wired(monkeypatch):
                     post_author="op", permalink=post["permalink"],
                     media=Media("photo", post["url"]))
 
+    async def fake_kym(query, **kw):
+        calls["kym"].append(query)
+        return state["kym"]
+
+    async def fake_giphy(query, api_key, **kw):
+        calls["giphy"].append(query)
+        return state["giphy_posts"]
+
+    async def fake_imgur(query, client_id, **kw):
+        calls["imgur"].append(query)
+        return state["imgur_posts"]
+
+    async def fake_imgur_comment(gallery_id, client_id, **kw):
+        calls["imgur_comments"].append(gallery_id)
+        return state["imgur_comment"]
+
     monkeypatch.setattr(mf, "search_topic_subreddits", fake_topic_subs)
     monkeypatch.setattr(mf, "candidates_from_topic_sub", fake_sub_candidates)
     monkeypatch.setattr(mf, "search_meme_candidates", fake_search)
     monkeypatch.setattr(mf, "meme_for_post", fake_meme_for_post)
+    monkeypatch.setattr(mf, "kym_meme_names", fake_kym)
+    monkeypatch.setattr(mf, "giphy_candidates", fake_giphy)
+    monkeypatch.setattr(mf, "imgur_candidates", fake_imgur)
+    monkeypatch.setattr(mf, "imgur_top_comment", fake_imgur_comment)
     return calls, state
 
 
@@ -239,3 +268,82 @@ async def test_judge_sees_flair_tags(wired):
     ai = _FakeAI("1")
     await find_relevant_meme(ai, ["lakers"], topic_label="lakers")
     assert "[Meme]" in ai.prompts[-1]
+
+
+# ───────────────────── multi-source + KYM expansion ────────────────────────
+@pytest.mark.asyncio
+async def test_kym_names_expand_the_query_list(wired):
+    calls, state = wired
+    state["kym"] = ["distracted boyfriend", "lakers"]   # 'lakers' is a dupe
+    await gather_candidates(["lakers"])
+    # Expansion queried KYM with the primary query only…
+    assert calls["kym"] == ["lakers"]
+    # …and the reddit search ran for the original + the NEW name only.
+    assert calls["searches"] == ["lakers", "distracted boyfriend"]
+
+
+@pytest.mark.asyncio
+async def test_giphy_imgur_only_run_with_keys(wired):
+    calls, state = wired
+    await gather_candidates(["cats"])
+    assert calls["giphy"] == [] and calls["imgur"] == []
+    await gather_candidates(["cats"], giphy_api_key="G", imgur_client_id="I")
+    assert calls["giphy"] == ["cats"] and calls["imgur"] == ["cats"]
+
+
+def _giphy_candidate(url="https://media.giphy.com/x.mp4", title="cat gif"):
+    return {"source": "giphy", "title": title, "media": Media("animation", url)}
+
+
+def _imgur_candidate(link="https://i.imgur.com/y.jpg", title="cat pic",
+                     imgur_id="abc"):
+    return {"source": "imgur", "title": title,
+            "media": Media("photo", link), "imgur_id": imgur_id}
+
+
+@pytest.mark.asyncio
+async def test_giphy_winner_builds_giphy_meme(wired):
+    calls, state = wired
+    state["topic_subs"] = []
+    state["search_posts"]["default"] = []
+    state["giphy_posts"] = [_giphy_candidate()]
+    ai = _FakeAI("1")
+    meme = await find_relevant_meme(
+        ai, ["cats"], topic_label="cats", giphy_api_key="G",
+    )
+    assert meme is not None and meme.source == "giphy"
+    assert meme.media.kind == "animation"
+    # No reddit fetch for a giphy winner.
+    assert calls["meme_for"] == []
+    # Caption footer says the source, not r/<something>.
+    from ipedro.reddit import build_caption
+    assert build_caption(meme).endswith("· giphy")
+
+
+@pytest.mark.asyncio
+async def test_imgur_winner_pulls_top_comment(wired):
+    calls, state = wired
+    state["topic_subs"] = []
+    state["search_posts"]["default"] = []
+    state["imgur_posts"] = [_imgur_candidate(imgur_id="zzz")]
+    ai = _FakeAI("1")
+    meme = await find_relevant_meme(
+        ai, ["cats"], topic_label="cats", imgur_client_id="I",
+    )
+    assert meme is not None and meme.source == "imgur"
+    assert meme.comment == "imgur top comment"
+    assert calls["imgur_comments"] == ["zzz"]
+
+
+@pytest.mark.asyncio
+async def test_judge_sees_source_labels(wired):
+    calls, state = wired
+    state["topic_subs"] = []
+    state["search_posts"]["default"] = [_post("/r/memes/2", "reddit meme")]
+    state["giphy_posts"] = [_giphy_candidate(title="giphy gif")]
+    ai = _FakeAI("1")
+    await find_relevant_meme(
+        ai, ["cats"], topic_label="cats", giphy_api_key="G",
+    )
+    prompt = ai.prompts[-1]
+    assert "r/memes" in prompt and "giphy — giphy gif" in prompt

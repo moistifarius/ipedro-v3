@@ -590,12 +590,16 @@ def build_router(rt: Runtime) -> Router:
         )
         if topic:
             # Judged search: candidates from the topic's own subreddit,
-            # the meme subs, and sitewide; the cheap model picks the one
-            # that is BOTH an actual meme and about the topic — a judge
-            # rejection is an honest miss, never a random post.
+            # the meme subs, sitewide, plus Giphy/Imgur when keys are
+            # configured; the cheap model picks the one that is BOTH an
+            # actual meme and about the topic — a judge rejection is an
+            # honest miss, never a random post.
             meme = await find_relevant_meme(
                 rt.openai, [topic], topic_label=topic,
-                chat_id=msg.chat.id, **creds,
+                chat_id=msg.chat.id,
+                giphy_api_key=rt.settings.giphy_api_key,
+                imgur_client_id=rt.settings.imgur_client_id,
+                **creds,
             )
         else:
             meme = await fetch_meme(**creds)
