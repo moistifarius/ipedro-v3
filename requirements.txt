@@ -1,15 +1,21 @@
+# Pinned to the exact versions this bot was built and tested against
+# (503 tests green). Pinning matters here: with open `>=` ranges, a future
+# `docker compose build` could pull a breaking major of aiogram / anthropic
+# / openai / pydantic and the bot would fail to start with no maintainer
+# around to fix it. To upgrade deliberately: bump a pin, rebuild, run the
+# test suite (`python -m pytest`), and only then deploy.
 aiogram==3.13.1
-openai>=1.54.0
-anthropic>=0.42.0
-asyncpg>=0.29.0
-pgvector>=0.3.0
-tiktoken>=0.7.0
-pydantic>=2.7.0
-pydantic-settings>=2.4.0
-python-dotenv>=1.0.1
-httpx>=0.27.0
-tenacity>=8.5.0
-numpy>=1.26.0
-scipy>=1.11.0
-websockets>=12.0
-captcha>=0.6.0
+openai==2.44.0
+anthropic==0.112.0
+asyncpg==0.31.0
+pgvector==0.4.2
+tiktoken==0.13.0
+pydantic==2.9.2
+pydantic-settings==2.14.2
+python-dotenv==1.2.2
+httpx==0.28.1
+tenacity==9.1.4
+numpy==2.4.6
+scipy==1.17.1
+websockets==16.0
+captcha==0.7.1

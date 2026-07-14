@@ -15,10 +15,20 @@
 # fresh empty database at the new path (your old data stays safe in the named
 # volume until you delete it).
 
+# Container logs are capped (json-file driver) so an unattended bot can't
+# fill the Unraid disk over months of uptime; the &logrotate anchor is
+# shared by both services.
+x-logging: &logrotate
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
+    logging: *logrotate
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-ipedro}
       POSTGRES_USER: ${POSTGRES_USER:-ipedro}
@@ -42,6 +52,7 @@ services:
       dockerfile: docker/Dockerfile
     image: ipedro-v2:latest
     restart: unless-stopped
+    logging: *logrotate
     depends_on:
       postgres:
         condition: service_healthy

@@ -74,6 +74,31 @@ def _parse_user_date(raw: str) -> tuple[int, int, int | None] | None:
     return None
 
 
+async def _can_edit_config(
+    rt: Runtime, user_id: int | None, host_chat, target_chat_id: int,
+) -> bool:
+    """Authorization for editing chat_config via /config or the cfg: wizard.
+
+    Allowed: bot admins (anywhere, any target — they drive /config_for from
+    their DM), OR a chat admin/creator editing THEIR OWN chat. Non-bot-admins
+    may only touch the chat the wizard lives in (target must equal the host
+    chat), so a hand-crafted 'cfg:<other_chat>:…' callback can't mutate a
+    different chat's settings."""
+    if user_id is None:
+        return False
+    if user_id in rt.settings.admin_ids:
+        return True
+    if host_chat is None or target_chat_id != host_chat.id:
+        return False
+    if getattr(host_chat, "type", None) == "private":
+        return False
+    try:
+        member = await rt.bot.get_chat_member(host_chat.id, user_id)
+    except Exception:
+        return False
+    return getattr(member, "status", None) in ("creator", "administrator")
+
+
 async def _answer_reddit_media(
     msg: Message, data: bytes, kind: str, caption: str | None,
 ):
@@ -889,6 +914,15 @@ def build_router(rt: Runtime) -> Router:
     @r.message(Command("config"))
     async def config_wizard(msg: Message) -> None:
         await get_or_create_chat_config(rt, msg)
+        if not await _can_edit_config(
+            rt, msg.from_user.id if msg.from_user else None,
+            msg.chat, msg.chat.id,
+        ):
+            await msg.reply(
+                "Only chat admins can open the settings wizard.",
+                disable_notification=True,
+            )
+            return
         cfg = await rt.chats.get_config(msg.chat.id)
         await msg.reply(
             _config_wizard_header(cfg, msg.chat.id, is_dm_scoped=False),
@@ -917,6 +951,13 @@ def build_router(rt: Runtime) -> Router:
         field = parts[2]
         if field == "noop":
             await cb.answer()
+            return
+        if not await _can_edit_config(
+            rt, cb.from_user.id if cb.from_user else None,
+            cb.message.chat, target_chat_id,
+        ):
+            await cb.answer("Only chat admins can change settings.",
+                            show_alert=True)
             return
         cfg = await rt.chats.get_config(target_chat_id)
         if not cfg:
