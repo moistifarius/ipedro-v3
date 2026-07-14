@@ -368,7 +368,8 @@ _MEME_VERB_RE = re.compile(
     _REQ_PREFIX +
     r"(?:gimme|give\s+(?:me|us)|find(?:\s+(?:me|us))?|post|drop|send"
     r"(?:\s+(?:me|us))?|show\s+(?:me|us)|get(?:\s+(?:me|us))?"
-    r"|pull(?:\s+up)?|make(?:\s+(?:me|us))?|create|whip\s+up|cook\s+up"
+    r"|pull(?:\s+up)?|make(?:\s+(?:me|us))?|create|generate|design"
+    r"|whip\s+up|cook\s+up"
     r"|throw\s+(?:me|us)|hit\s+(?:me|us)\s+with)\s+"
     r"(?:a\s+|some\s+|another\s+|me\s+a\s+|us\s+a\s+)?memes?\b"
     r"(?:\s+(?:about|of|on|for|regarding)\s+(?P<topic>.+))?",
@@ -412,6 +413,29 @@ _MEME_THIS_RE = re.compile(
     r"memes?\s+(?:this|that)[\s.!?]*$",
     re.IGNORECASE,
 )
+
+# Generation verbs — "make/create/generate/whip up a meme" means MAKE one
+# from scratch (image model), not fetch an existing one. Detected on the
+# raw text independently of which pattern matched the request, so it works
+# whether the fast grammar or the AI classifier caught it.
+_MEME_MAKE_VERB_RE = re.compile(
+    _REQ_PREFIX +
+    r"(?:make|create|generate|design|whip\s+up|cook\s+up)\s+"
+    r"(?:me\s+|us\s+|a\s+|an\s+|another\s+|some\s+)*memes?\b",
+    re.IGNORECASE,
+)
+
+
+def is_meme_generation_request(text: str | None) -> bool:
+    """True when a meme request used a GENERATE verb (make / create /
+    generate / whip up, or 'make this a meme') rather than a find/fetch
+    verb. Only meaningful alongside a non-None detect_meme_request()."""
+    if not text:
+        return False
+    return bool(
+        _MEME_MAKE_VERB_RE.search(text) or _MEME_TRANSFORM_RE.search(text)
+    )
+
 
 # Topics that mean "the current conversation" rather than a literal subject.
 _DEICTIC_TOPICS = frozenset({

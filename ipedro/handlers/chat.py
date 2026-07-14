@@ -9,7 +9,7 @@ import re
 from datetime import datetime, timezone
 
 from aiogram import F, Router
-from aiogram.types import Message, ReactionTypeEmoji
+from aiogram.types import BufferedInputFile, Message, ReactionTypeEmoji
 
 from ipedro.bot_messages import track
 from ipedro.chat_policy import IncomingMessage, should_respond
@@ -21,11 +21,14 @@ from ipedro.handlers.common import catify, display_name, get_or_create_chat_conf
 from ipedro.impersonate import build_impersonation_prompt, resolve_impersonation
 from ipedro.meme_finder import (
     classify_meme_request, derive_topic_queries, find_relevant_meme,
+    generate_meme,
 )
 from ipedro.memory.context_builder import build_context
 from ipedro.memory.summarizer import maybe_summarize
 from ipedro.prompts import CAT_FACT_PROMPT, DUCK_BEF_CHALLENGE_JUDGE_PROMPT
-from ipedro.reddit import detect_meme_request, fetch_meme
+from ipedro.reddit import (
+    detect_meme_request, fetch_meme, is_meme_generation_request,
+)
 from ipedro.runtime import Runtime
 from ipedro.user_flags import has_flag, maybe_auto_grudge
 
@@ -251,12 +254,56 @@ async def _record_bot_turn(rt: Runtime, cfg, chat_id: int, text: str) -> None:
         log.info("meme-turn memory record failed for %s: %s", chat_id, exc)
 
 
-async def _handle_meme_request(rt: Runtime, msg: Message, cfg, topic: str) -> None:
+async def _meme_subject(rt: Runtime, msg: Message, cfg, topic: str) -> str:
+    """Resolve the subject for a meme: the explicit topic, else the first
+    query distilled from the conversation ('' if nothing usable)."""
+    if topic:
+        return topic
+    queries = await _derive_meme_queries(rt, msg.chat.id, cfg.memory_enabled)
+    return queries[0] if queries else ""
+
+
+async def _handle_meme_generate(rt: Runtime, msg: Message, cfg, topic: str) -> None:
+    """'make/create a meme about X' → GENERATE one (image model) rather
+    than search Reddit for an existing one."""
+    subject = await _meme_subject(rt, msg, cfg, topic)
+    if not subject:
+        miss = "Sh-sha. Couldn't read a topic to meme. Say what it's about."
+        await msg.reply(miss, disable_notification=True)
+        await _record_bot_turn(rt, cfg, msg.chat.id, miss)
+        return
+    result = await generate_meme(rt.openai, subject, chat_id=msg.chat.id)
+    if result is None:
+        fail = "Sh-sha. Couldn't cook one up right now. Try again in a bit."
+        await msg.reply(fail, disable_notification=True)
+        await _record_bot_turn(rt, cfg, msg.chat.id, fail)
+        return
+    image, caption = result
+    try:
+        sent = await msg.answer_photo(
+            BufferedInputFile(image, filename="meme.png"),
+            caption=caption, disable_notification=True,
+        )
+        track(msg.chat.id, sent.message_id, caption)
+    except Exception as exc:
+        log.warning("meme generate send failed in %s: %s", msg.chat.id, exc)
+        await msg.reply(
+            "Made one but Telegram wouldn't take it. Try again.",
+            disable_notification=True,
+        )
+        return
+    await _record_bot_turn(rt, cfg, msg.chat.id, f"[generated a meme] {caption}")
+
+
+async def _handle_meme_request(
+    rt: Runtime, msg: Message, cfg, topic: str, *, generate: bool = False,
+) -> None:
     """Serve a natural-language meme request ("give me a meme about X").
 
-    ``topic`` is '' when the ask was deictic ("about this") — derive
-    queries from the conversation. Candidates come from the topic's own
-    subreddit first, then the meme subs, then sitewide; the cheap model
+    ``generate`` routes 'make/create a meme' asks to the image generator.
+    Otherwise: ``topic`` is '' when the ask was deictic ("about this") —
+    derive queries from the conversation. Candidates come from the topic's
+    own subreddit first, then the meme subs, then sitewide; the cheap model
     judges which candidate actually matches. When the derived-topic hunt
     finds nothing, we say so and post a random pull — labeled, so it
     doesn't read like a failed relevance match. Every visible output is
@@ -264,6 +311,11 @@ async def _handle_meme_request(rt: Runtime, msg: Message, cfg, topic: str) -> No
     # Local import: utility imports nothing from chat, but keeping this
     # lazy makes the no-cycle property robust to future refactors.
     from ipedro.handlers.utility import post_meme_to_chat
+
+    if generate:
+        await rt.bot.send_chat_action(msg.chat.id, "upload_photo")
+        await _handle_meme_generate(rt, msg, cfg, topic)
+        return
 
     await rt.bot.send_chat_action(msg.chat.id, "upload_photo")
     creds = dict(
@@ -625,7 +677,10 @@ def build_router(rt: Runtime) -> Router:
                     msg.chat.id, meme_topic,
                 )
         if meme_topic is not None:
-            await _handle_meme_request(rt, msg, cfg, meme_topic)
+            await _handle_meme_request(
+                rt, msg, cfg, meme_topic,
+                generate=is_meme_generation_request(text),
+            )
             return
 
         await rt.bot.send_chat_action(msg.chat.id, "typing")

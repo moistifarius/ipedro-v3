@@ -33,7 +33,8 @@ from ipedro.meme_sources import (
     kym_meme_names,
 )
 from ipedro.prompts import (
-    MEME_PICK_PROMPT, MEME_QUERIES_PROMPT, MEME_REQUEST_CLASSIFY_PROMPT,
+    MEME_GENERATE_PROMPT, MEME_PICK_PROMPT, MEME_QUERIES_PROMPT,
+    MEME_REQUEST_CLASSIFY_PROMPT, MEME_TEXT_PROMPT,
 )
 from ipedro.reddit import (
     Meme,
@@ -148,6 +149,55 @@ def _fmt_score(score: int | None) -> str:
     if score >= 1000:
         return f" ({score / 1000:.1f}k↑)".replace(".0k", "k")
     return f" ({score}↑)"
+
+
+def parse_meme_text(raw: str | None) -> tuple[str, str]:
+    """Pull (top, bottom) caption lines out of the meme-text model output.
+    Tolerant of missing labels: falls back to the first two non-empty
+    lines."""
+    top = bottom = ""
+    leftovers: list[str] = []
+    for line in (raw or "").splitlines():
+        s = line.strip().strip('"').strip()
+        if not s:
+            continue
+        low = s.lower()
+        if low.startswith("top:"):
+            top = s.split(":", 1)[1].strip().strip('"')
+        elif low.startswith("bottom:"):
+            bottom = s.split(":", 1)[1].strip().strip('"')
+        else:
+            leftovers.append(s)
+    if not top and leftovers:
+        top = leftovers.pop(0)
+    if not bottom and leftovers:
+        bottom = leftovers.pop(0)
+    return top[:80], bottom[:80]
+
+
+async def generate_meme(
+    openai, topic: str, *, chat_id: int | None = None,
+) -> tuple[bytes, str] | None:
+    """Make a meme from scratch: the cheap model writes the top/bottom
+    joke, the image model renders it as an image macro. Returns
+    (png_bytes, telegram_caption) or None on failure/empty topic."""
+    topic = (topic or "").strip()
+    if not topic:
+        return None
+    raw = await openai.cheap_completion(
+        MEME_TEXT_PROMPT.format(topic=topic), max_tokens=60, chat_id=chat_id,
+    )
+    top, bottom = parse_meme_text(raw)
+    if not top and not bottom:
+        top = topic                       # degrade gracefully
+    image = await openai.generate_image(
+        MEME_GENERATE_PROMPT.format(top=top or "", bottom=bottom or ""),
+        chat_id=chat_id,
+    )
+    if not image:
+        return None
+    caption_text = " / ".join(x for x in (top, bottom) if x).strip() or topic
+    return image, f"{caption_text}\n\n· freshly generated"
 
 
 def parse_meme_classification(raw: str | None) -> str | None:

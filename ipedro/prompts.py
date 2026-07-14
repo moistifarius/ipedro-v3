@@ -181,6 +181,24 @@ MEME_QUERIES_PROMPT = (
     "Messages:\n{messages}"
 )
 
+MEME_TEXT_PROMPT = (
+    "Write a short, funny meme about: {topic}. Output EXACTLY two lines "
+    "and nothing else:\n"
+    "TOP: <top caption, under 8 words>\n"
+    "BOTTOM: <bottom caption, under 8 words>\n"
+    "Relatable, punchy, actually funny. No hashtags, no quotes, no emoji."
+)
+
+MEME_GENERATE_PROMPT = (
+    "A classic internet meme image macro: one bold, high-contrast photo or "
+    "illustration that fits the joke, with caption text in large white "
+    "Impact font with a thick black outline (top and bottom). Render this "
+    "caption text EXACTLY, spelled correctly:\n"
+    "TOP TEXT: {top}\n"
+    "BOTTOM TEXT: {bottom}\n"
+    "Funny, clean, shareable. No watermark, no signature."
+)
+
 MEME_REQUEST_CLASSIFY_PROMPT = (
     "A group-chat bot can post memes on request. Decide whether the "
     "message below is ASKING for a meme to be posted/found/made (by the "

@@ -693,3 +693,35 @@ def test_detect_meme_request_natural_phrasings(text, expected):
 def test_detect_meme_request_new_verbs_still_reject_narration(text):
     from ipedro.reddit import detect_meme_request
     assert detect_meme_request(text) is None
+
+
+# ─────────────── meme GENERATION vs FETCH intent split ────────────────────
+@pytest.mark.parametrize("text,topic", [
+    ("make me a meme about mondays", "mondays"),
+    ("pedro make a meme about tax season", "tax season"),
+    ("create a meme about cats", "cats"),
+    ("generate a meme of shrek", "shrek"),
+    ("design a meme about cats", "cats"),
+    ("whip up a meme about winter", "winter"),
+    ("make this a meme", ""),
+    ("pedro turn that into a meme", ""),
+])
+def test_is_meme_generation_request_true(text, topic):
+    from ipedro.reddit import detect_meme_request, is_meme_generation_request
+    assert detect_meme_request(text) == topic       # still a detected request
+    assert is_meme_generation_request(text) is True
+
+
+@pytest.mark.parametrize("text", [
+    "find me a meme about mondays",
+    "give me a meme about cats",
+    "gimme a meme about that",
+    "any memes about mondays?",
+    "post a meme of shrek",
+    "that meme about cats was funny",     # not a request → not generation
+    "",
+    None,
+])
+def test_is_meme_generation_request_false(text):
+    from ipedro.reddit import is_meme_generation_request
+    assert is_meme_generation_request(text) is False

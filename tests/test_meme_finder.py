@@ -444,3 +444,68 @@ async def test_classify_meme_request_uses_cheap_model():
     got = await classify_meme_request(ai, "yo can u do one of those meme things about golf")
     assert got == "golf"
     assert "meme" in ai.prompts[-1].lower()
+
+
+# ───────────────────────── meme generation ────────────────────────────────
+@pytest.mark.parametrize("raw,expected", [
+    ("TOP: when its monday\nBOTTOM: again??", ("when its monday", "again??")),
+    ('TOP: "quoted top"\nBOTTOM: plain', ("quoted top", "plain")),
+    ("just a top line\nand a bottom line", ("just a top line", "and a bottom line")),
+    ("TOP: only top", ("only top", "")),
+    ("", ("", "")),
+    (None, ("", "")),
+])
+def test_parse_meme_text(raw, expected):
+    from ipedro.meme_finder import parse_meme_text
+    assert parse_meme_text(raw) == expected
+
+
+class _GenAI:
+    def __init__(self, text="TOP: mondays\nBOTTOM: again", image=b"PNGBYTES"):
+        self._text = text
+        self._image = image
+        self.image_prompts: list[str] = []
+
+    async def cheap_completion(self, prompt, **kw):
+        return self._text
+
+    async def generate_image(self, prompt, **kw):
+        self.image_prompts.append(prompt)
+        return self._image
+
+
+@pytest.mark.asyncio
+async def test_generate_meme_happy_path():
+    from ipedro.meme_finder import generate_meme
+    ai = _GenAI()
+    result = await generate_meme(ai, "mondays")
+    assert result is not None
+    image, caption = result
+    assert image == b"PNGBYTES"
+    assert "mondays" in caption and "again" in caption
+    assert caption.endswith("· freshly generated")
+    # The written joke text reached the image prompt.
+    assert "mondays" in ai.image_prompts[-1]
+
+
+@pytest.mark.asyncio
+async def test_generate_meme_empty_topic_returns_none():
+    from ipedro.meme_finder import generate_meme
+    assert await generate_meme(_GenAI(), "") is None
+    assert await generate_meme(_GenAI(), "   ") is None
+
+
+@pytest.mark.asyncio
+async def test_generate_meme_none_when_image_fails():
+    from ipedro.meme_finder import generate_meme
+    ai = _GenAI(image=None)
+    assert await generate_meme(ai, "cats") is None
+
+
+@pytest.mark.asyncio
+async def test_generate_meme_degrades_when_text_empty():
+    from ipedro.meme_finder import generate_meme
+    ai = _GenAI(text="")           # model returned nothing usable
+    result = await generate_meme(ai, "cats")
+    assert result is not None      # still generates, topic as fallback text
+    assert "cats" in ai.image_prompts[-1]
