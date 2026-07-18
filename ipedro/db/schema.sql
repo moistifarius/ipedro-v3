@@ -205,6 +205,7 @@ CREATE TABLE IF NOT EXISTS chat_state (
 CREATE TABLE IF NOT EXISTS quotes (
     id                BIGSERIAL PRIMARY KEY,
     chat_id           BIGINT NOT NULL REFERENCES chats(chat_id) ON DELETE CASCADE,
+    seq               BIGINT,          -- per-chat display number: #1, #2, #3…
     quoted_user_id    BIGINT,
     quoted_name       TEXT,
     text              TEXT NOT NULL,
@@ -214,6 +215,24 @@ CREATE TABLE IF NOT EXISTS quotes (
 );
 
 CREATE INDEX IF NOT EXISTS quotes_chat_idx ON quotes (chat_id);
+
+-- Per-chat sequential quote numbers. The BIGSERIAL `id` is global across all
+-- chats, so a single chat used to see gappy numbers like #3, #17, #42 (the
+-- gaps being other chats' quotes) — confusing, and /unquote needed those odd
+-- ids. `seq` gives each chat its own #1, #2, #3… The one-time back-fill below
+-- numbers existing rows per chat by id order; it only touches rows where seq
+-- IS NULL, so it is a no-op on every startup after the first.
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS seq BIGINT;
+UPDATE quotes q
+   SET seq = n.rn
+  FROM (
+        SELECT id,
+               ROW_NUMBER() OVER (PARTITION BY chat_id ORDER BY id) AS rn
+          FROM quotes
+         WHERE seq IS NULL
+       ) n
+ WHERE q.id = n.id
+   AND q.seq IS NULL;
 
 -- Birthdays / anniversaries -------------------------------------------------
 -- One row per (chat_id, user_id, label). Year is optional; if set we can

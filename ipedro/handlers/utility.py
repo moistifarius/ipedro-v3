@@ -306,31 +306,55 @@ def build_router(rt: Runtime) -> Router:
 
     @r.message(Command("quote"))
     async def quote(msg: Message) -> None:
-        """/quote (reply to a message) saves it; /quote on its own = random quote."""
+        """/quote (reply to a text message) saves it; /quote alone = random quote."""
         await get_or_create_chat_config(rt, msg)
-        if msg.reply_to_message and (
-            msg.reply_to_message.text or msg.reply_to_message.caption
-        ):
-            target = msg.reply_to_message
+        target = msg.reply_to_message
+        if target is not None:
+            # Saving mode. Reject two kinds of junk that used to sail through:
+            #  1. The bot's own messages — replying /quote to my /quotes list
+            #     used to save the whole list back into itself (quote-ception:
+            #     "📜 #2 Dale: 📜 #12 Matt: …").
+            #  2. Non-text messages (stickers, un-captioned photos) — these used
+            #     to fall through to random-quote mode, so a user trying to save
+            #     a sticker got a random old quote dumped on them instead.
+            if target.from_user and target.from_user.is_bot:
+                await msg.reply(
+                    "I can only save what people say — not my own messages.",
+                    disable_notification=True,
+                )
+                return
             body = (target.text or target.caption or "").strip()
+            if not body:
+                await msg.reply(
+                    "Nothing to quote there — reply to a message with actual "
+                    "words (plain text or a captioned photo).",
+                    disable_notification=True,
+                )
+                return
             qname = display_name(target.from_user) if target.from_user else "anonymous"
-            qid = await rt.db.fetchval(
-                "INSERT INTO quotes (chat_id, quoted_user_id, quoted_name, "
+            # Allocate the next per-chat number atomically inside the INSERT so
+            # each chat gets contiguous #1, #2, #3… instead of the global id.
+            seq = await rt.db.fetchval(
+                "INSERT INTO quotes (chat_id, seq, quoted_user_id, quoted_name, "
                 "                    text, saved_by, source_message_id) "
-                "VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+                "VALUES ($1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM quotes "
+                "             WHERE chat_id = $1), $2, $3, $4, $5, $6) "
+                "RETURNING seq",
                 msg.chat.id,
                 target.from_user.id if target.from_user else None,
                 qname, body[:2000],
                 msg.from_user.id if msg.from_user else None,
                 target.message_id,
             )
+            snippet = body[:80] + ("…" if len(body) > 80 else "")
             await msg.reply(
-                f"📜 Saved as quote #{qid}.", disable_notification=True,
+                f"📜 Saved #{seq} — {qname}: \"{snippet}\"",
+                disable_notification=True,
             )
             return
         # No reply → random quote
         row = await rt.db.fetchrow(
-            "SELECT id, quoted_name, text FROM quotes "
+            "SELECT seq, quoted_name, text FROM quotes "
             " WHERE chat_id = $1 ORDER BY random() LIMIT 1",
             msg.chat.id,
         )
@@ -341,7 +365,7 @@ def build_router(rt: Runtime) -> Router:
             )
             return
         await msg.reply(
-            f"📜 #{row['id']} — {row['quoted_name']}:\n\"{row['text']}\"",
+            f"📜 #{row['seq']} — {row['quoted_name']}:\n\"{row['text']}\"",
             disable_notification=True,
         )
 
@@ -349,34 +373,43 @@ def build_router(rt: Runtime) -> Router:
     async def quotes_list(msg: Message) -> None:
         await get_or_create_chat_config(rt, msg)
         rows = await rt.db.fetch(
-            "SELECT id, quoted_name, text FROM quotes "
-            " WHERE chat_id = $1 ORDER BY id DESC LIMIT 20",
+            "SELECT seq, quoted_name, text FROM quotes "
+            " WHERE chat_id = $1 ORDER BY seq DESC LIMIT 20",
             msg.chat.id,
         )
         if not rows:
-            await msg.reply("No quotes yet.", disable_notification=True)
+            await msg.reply(
+                "No quotes yet. Reply to a message with /quote to save one.",
+                disable_notification=True,
+            )
             return
-        lines = [f"📜 #{r['id']} {r['quoted_name']}: {r['text'][:120]}" for r in rows]
+        lines = [f"📜 #{r['seq']} {r['quoted_name']}: {r['text'][:120]}" for r in rows]
         await msg.reply("\n".join(lines)[:4000], disable_notification=True)
 
     @r.message(Command("unquote"))
     async def unquote(msg: Message) -> None:
+        await get_or_create_chat_config(rt, msg)
         parts = (msg.text or "").split()
         if len(parts) < 2:
-            await msg.reply("Usage: /unquote <id>", disable_notification=True)
+            await msg.reply(
+                "Usage: /unquote <#>  (the number shown in /quotes)",
+                disable_notification=True,
+            )
             return
+        # Tolerate a leading "#" so users can paste "/unquote #3" straight from
+        # the list.
         try:
-            qid = int(parts[1])
+            seq = int(parts[1].lstrip("#"))
         except ValueError:
-            await msg.reply("Bad id.", disable_notification=True)
+            await msg.reply("Bad number. Try /unquote 3", disable_notification=True)
             return
         res = await rt.db.execute(
-            "DELETE FROM quotes WHERE id = $1 AND chat_id = $2",
-            qid, msg.chat.id,
+            "DELETE FROM quotes WHERE seq = $1 AND chat_id = $2",
+            seq, msg.chat.id,
         )
         deleted = int(res.split()[-1]) if res else 0
         await msg.reply(
-            "Deleted." if deleted else "Not found in this chat.",
+            f"🗑 Deleted #{seq}." if deleted else "No quote with that number here.",
             disable_notification=True,
         )
 
