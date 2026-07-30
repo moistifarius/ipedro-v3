@@ -421,3 +421,14 @@ CREATE TABLE IF NOT EXISTS disgust_test_results (
 
 CREATE INDEX IF NOT EXISTS disgust_results_board_idx
     ON disgust_test_results (chat_id, overall_score DESC);
+
+-- Cached per-question illustrations. The 16 quiz items are fixed, so each
+-- image is generated once (via the image model) and reused for every taker
+-- in every chat — the quiz shows real pictures with no per-test cost or
+-- latency. Generated lazily/by /disgust_warmup; the quiz falls back to an
+-- emoji text flow until all 16 are present.
+CREATE TABLE IF NOT EXISTS disgust_item_images (
+    item_key   TEXT PRIMARY KEY,
+    png        BYTEA NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

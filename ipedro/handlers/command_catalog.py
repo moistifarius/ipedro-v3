@@ -150,6 +150,11 @@ COMMANDS: tuple[Command, ...] = (
     Command("disgustboard", "ai", "/disgustboard",
             "/disgustboard",
             "Leaderboard of who's the most easily grossed out here."),
+    Command("disgust_warmup", "ai", "/disgust_warmup",
+            "/disgust_warmup  (admin, DM)",
+            "Pre-generate & cache the 16 question illustrations so the test "
+            "runs in picture mode. Shows how many are cached; makes the rest "
+            "in the background."),
 
     # ── Duckhunt ─────────────────────────────────────────────────────────
     Command("duckhunt",     "duckhunt", "/duckhunt",

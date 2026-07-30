@@ -129,6 +129,31 @@ def _mean(xs: list[int] | list[float]) -> float:
     return sum(xs) / len(xs) if xs else 0.0
 
 
+def progress_bar(position: int, total: int, width: int = 10) -> str:
+    """A ▰▱ bar for 'you're on question `position` of `total`'."""
+    filled = max(0, min(width, round(position / total * width)))
+    return "▰" * filled + "▱" * (width - filled)
+
+
+def meter(score: float, width: int = 10) -> str:
+    """Render a 1-6 score as a ▰▱ bar."""
+    frac = (score - SCALE_MIN) / (SCALE_MAX - SCALE_MIN)
+    filled = max(0, min(width, round(frac * width)))
+    return "▰" * filled + "▱" * (width - filled)
+
+
+def item_image_prompt(item: "Item") -> str:
+    """Prompt for a single question's cached illustration. Deliberately
+    lighthearted and text/gore-free — image models render text poorly and the
+    scenes must stay safe to generate and post."""
+    return (
+        "Funny lighthearted flat-vector cartoon sticker illustrating this "
+        f"scene: {item.text}. Bold clean outlines, soft muted palette, a single "
+        "clear subject centered on a plain background, no text, no words, no "
+        "letters, not graphic, not gory, wholesome cartoon style."
+    )
+
+
 def band(score: float) -> str:
     """Map a 1-6 mean to a qualitative, non-diagnostic band label."""
     if score < 2.0:
@@ -237,17 +262,31 @@ def fallback_verdict(result: DisgustResult, name: str) -> str:
             f"Everything is an ick. Stay strong out there.")
 
 
-def result_caption(result: DisgustResult, name: str, verdict: str) -> str:
-    """The photo caption / text result. Kept under Telegram's 1024-char cap."""
+def result_caption(
+    result: DisgustResult, name: str, verdict: str,
+    *, percentile: int | None = None,
+) -> str:
+    """The photo caption / text result. Kept under Telegram's 1024-char cap.
+
+    `percentile`, when given, is the share of others in this chat whose overall
+    score is lower than this taker's ("grosser than X%").
+    """
     fe = BAND_EMOJI.get(result.food_band, "")
     ge = BAND_EMOJI.get(result.general_band, "")
     lines = [
         f"🧫 {name}'s Disgust Profile",
         "",
-        f"🍽 Food disgust: {result.food_score}/6 — {result.food_band} {fe}",
-        f"🧠 General disgust: {result.general_score}/6 — {result.general_band} {ge}",
-        f"    · core {result.core_score} · animal-reminder {result.animal_score} "
-        f"· contamination {result.contam_score}",
+        f"🍽 Food     {meter(result.food_score)} {result.food_score}/6 · "
+        f"{result.food_band} {fe}",
+        f"🧠 General  {meter(result.general_score)} {result.general_score}/6 · "
+        f"{result.general_band} {ge}",
+        f"     core {meter(result.core_score, 6)} · "
+        f"animal {meter(result.animal_score, 6)} · "
+        f"contam {meter(result.contam_score, 6)}",
+    ]
+    if percentile is not None:
+        lines.append(f"🩸 Grosser than {percentile}% of this chat")
+    lines += [
         "",
         f"Biggest ick: {result.biggest_ick_label} {result.biggest_ick_emoji}   "
         f"Iron stomach: {result.iron_stomach_label} {result.iron_stomach_emoji}",
@@ -261,9 +300,12 @@ def result_caption(result: DisgustResult, name: str, verdict: str) -> str:
         # Trim the verdict rather than drop the citation/scores.
         overflow = len(caption) - 1024 + 1
         trimmed = verdict.strip()[: max(0, len(verdict.strip()) - overflow - 1)] + "…"
-        lines[-3] = trimmed
+        try:
+            lines[lines.index(verdict.strip())] = trimmed
+        except ValueError:
+            pass
         caption = "\n".join(lines)
-    return caption[:1024]
+    return caption[:1024]      # hard cap regardless of the trim above
 
 
 def image_prompt(result: DisgustResult) -> str:

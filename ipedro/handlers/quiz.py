@@ -1,30 +1,41 @@
 """Interactive disgust personality test (/disgusttest).
 
 A 16-question Likert quiz adapted from validated disgust instruments (see
-`ipedro.disgust_test` for the item bank and citations). Each question is one
-self-editing message with six tap-buttons; progress is stored durably per
-(chat, user) so concurrent takers never collide and double-taps can't
-double-count. The result is a generated illustration whose caption carries the
-deterministic scores plus a persona-voiced verdict.
+`ipedro.disgust_test` for the item bank and citations). Progress is stored
+durably per (chat, user) so concurrent takers never collide and double-taps
+can't double-count.
+
+Each of the 16 items has a fixed cartoon illustration, generated once via the
+image model and cached in `disgust_item_images` (shared across every chat/user).
+When all 16 are cached the quiz runs as a single evolving *photo* message
+(`edit_media` per answer); until then it falls back to an emoji text flow and
+kicks a background warm-up. The result adds bar-chart meters, a chat percentile,
+a persona-voiced verdict, a generated result card, and a Retake button.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import (
     BufferedInputFile, CallbackQuery, InlineKeyboardButton,
-    InlineKeyboardMarkup, Message,
+    InlineKeyboardMarkup, InputMediaPhoto, Message,
 )
 
 from ipedro import disgust_test as dt
-from ipedro.handlers.common import display_name, get_or_create_chat_config
+from ipedro.handlers.common import (
+    display_name, get_or_create_chat_config, require_admin,
+)
 from ipedro.personas import current_master_prompt
 from ipedro.runtime import Runtime
 
 log = logging.getLogger(__name__)
+
+_ITEM_KEYS = [it.key for it in dt.ALL_ITEMS]
 
 _VERDICT_INSTRUCTION = (
     "The user just finished a tongue-in-cheek disgust-sensitivity personality "
@@ -34,12 +45,18 @@ _VERDICT_INSTRUCTION = (
     "markdown, no emoji spam."
 )
 
+# Only one background image warm-up runs at a time, process-wide.
+_warmup_lock = asyncio.Lock()
 
-def _question_text(idx: int) -> str:
+
+# --------------------------------------------------------------- rendering
+def _question_caption(idx: int) -> str:
     item = dt.ALL_ITEMS[idx]
     section = "Food disgust" if item.section == "food" else "General disgust"
+    bar = dt.progress_bar(idx + 1, dt.N_ITEMS)
     return (
-        f"🧪 <b>Disgust Test</b> · {idx + 1}/{dt.N_ITEMS} · {section}\n\n"
+        f"🧪 <b>Disgust Test</b>  {bar}  {idx + 1}/{dt.N_ITEMS}\n"
+        f"<i>{section}</i>\n\n"
         f"{item.emoji}  How grossed out would you be by…\n\n"
         f"<b>{item.text}?</b>\n\n"
         f"<i>{dt.SCALE_LEGEND}</i>"
@@ -57,6 +74,136 @@ def _question_keyboard(owner_id: int, idx: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[rating, cancel])
 
 
+def _retake_keyboard(owner_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🔁 Retake", callback_data=f"dqx:{owner_id}"),
+    ]])
+
+
+async def _set_message(
+    cb: CallbackQuery, text: str, *, reply_markup=None, parse_mode: str | None = "HTML",
+) -> None:
+    """Edit the flow message's text/caption, whichever it has. A photo message
+    can't be edited with edit_text (and vice versa), so pick by type."""
+    m = cb.message
+    try:
+        if getattr(m, "photo", None):
+            await m.edit_caption(caption=text, reply_markup=reply_markup,
+                                 parse_mode=parse_mode)
+        else:
+            await m.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except TelegramBadRequest:
+        pass
+
+
+# --------------------------------------------------------------- image cache
+async def _all_images_cached(rt: Runtime) -> bool:
+    n = await rt.db.fetchval(
+        "SELECT COUNT(*) FROM disgust_item_images WHERE item_key = ANY($1::text[])",
+        _ITEM_KEYS,
+    )
+    return int(n or 0) >= dt.N_ITEMS
+
+
+async def _get_item_image(rt: Runtime, key: str) -> bytes | None:
+    png = await rt.db.fetchval(
+        "SELECT png FROM disgust_item_images WHERE item_key = $1", key,
+    )
+    return bytes(png) if png is not None else None
+
+
+def _kick_warmup(rt: Runtime) -> None:
+    """Fire-and-forget the image warm-up, if one isn't already running."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:  # no loop (shouldn't happen in the bot) — skip
+        return
+    if _warmup_lock.locked():
+        return
+    loop.create_task(_warm_item_images(rt))
+
+
+async def _warm_item_images(rt: Runtime) -> None:
+    """Generate and cache any missing per-item illustrations. Best-effort:
+    each failure is logged and skipped so the next run retries it."""
+    if _warmup_lock.locked():
+        return
+    async with _warmup_lock:
+        for item in dt.ALL_ITEMS:
+            if await rt.db.fetchval(
+                "SELECT 1 FROM disgust_item_images WHERE item_key = $1", item.key,
+            ):
+                continue
+            try:
+                png = await rt.openai.generate_image(dt.item_image_prompt(item))
+            except Exception as exc:
+                log.warning("disgust warmup: image failed for %s: %s", item.key, exc)
+                continue
+            if png:
+                await rt.db.execute(
+                    "INSERT INTO disgust_item_images (item_key, png) "
+                    "VALUES ($1, $2) ON CONFLICT (item_key) DO NOTHING",
+                    item.key, png,
+                )
+    log.info("disgust warmup pass complete")
+
+
+# --------------------------------------------------------------- flow
+async def _begin(rt: Runtime, target, chat_id: int, uid: int) -> None:
+    """Send question 1 and (re)create the session. `target` exposes .answer /
+    .answer_photo (a Message, or the message under a callback for retakes)."""
+    img = await _get_item_image(rt, dt.ALL_ITEMS[0].key) \
+        if await _all_images_cached(rt) else None
+    if img:
+        sent = await target.answer_photo(
+            BufferedInputFile(img, filename="q1.png"),
+            caption=_question_caption(0),
+            reply_markup=_question_keyboard(uid, 0),
+            parse_mode="HTML", disable_notification=True,
+        )
+    else:
+        sent = await target.answer(
+            _question_caption(0),
+            reply_markup=_question_keyboard(uid, 0),
+            parse_mode="HTML", disable_notification=True,
+        )
+        _kick_warmup(rt)   # populate the cache so the next run is picture-mode
+    await rt.db.execute(
+        "INSERT INTO disgust_test_sessions (chat_id, user_id, message_id, "
+        "                                   answers, started_at) "
+        "VALUES ($1, $2, $3, '{}', NOW()) "
+        "ON CONFLICT (chat_id, user_id) DO UPDATE "
+        "   SET answers = '{}', message_id = EXCLUDED.message_id, "
+        "       started_at = NOW()",
+        chat_id, uid, sent.message_id,
+    )
+
+
+async def _render_next_question(
+    rt: Runtime, cb: CallbackQuery, owner_id: int, next_idx: int,
+) -> None:
+    caption = _question_caption(next_idx)
+    kb = _question_keyboard(owner_id, next_idx)
+    if getattr(cb.message, "photo", None):
+        img = await _get_item_image(rt, dt.ALL_ITEMS[next_idx].key)
+        if img:
+            try:
+                await cb.message.edit_media(
+                    InputMediaPhoto(
+                        media=BufferedInputFile(img, filename=f"q{next_idx + 1}.png"),
+                        caption=caption, parse_mode="HTML",
+                    ),
+                    reply_markup=kb,
+                )
+                return
+            except TelegramBadRequest:
+                pass
+        # No image this step — keep the current picture, refresh the caption.
+        await _set_message(cb, caption, reply_markup=kb)
+    else:
+        await _set_message(cb, caption, reply_markup=kb)
+
+
 def build_router(rt: Runtime) -> Router:
     r = Router(name="quiz")
 
@@ -65,23 +212,7 @@ def build_router(rt: Runtime) -> Router:
         await get_or_create_chat_config(rt, msg)
         if not msg.from_user:
             return
-        uid = msg.from_user.id
-        sent = await msg.answer(
-            _question_text(0),
-            reply_markup=_question_keyboard(uid, 0),
-            parse_mode="HTML",
-            disable_notification=True,
-        )
-        # One session per (chat, user); starting again wipes prior progress.
-        await rt.db.execute(
-            "INSERT INTO disgust_test_sessions (chat_id, user_id, message_id, "
-            "                                   answers, started_at) "
-            "VALUES ($1, $2, $3, '{}', NOW()) "
-            "ON CONFLICT (chat_id, user_id) DO UPDATE "
-            "   SET answers = '{}', message_id = EXCLUDED.message_id, "
-            "       started_at = NOW()",
-            msg.chat.id, uid, sent.message_id,
-        )
+        await _begin(rt, msg, msg.chat.id, msg.from_user.id)
 
     @r.callback_query(F.data.startswith("dq:"))
     async def on_answer(cb: CallbackQuery) -> None:
@@ -107,7 +238,8 @@ def build_router(rt: Runtime) -> Router:
                 "DELETE FROM disgust_test_sessions WHERE chat_id=$1 AND user_id=$2",
                 chat_id, owner_id,
             )
-            await cb.message.edit_text("✖ Disgust test cancelled.")
+            await _set_message(cb, "✖ Disgust test cancelled.",
+                               reply_markup=None, parse_mode=None)
             await cb.answer("cancelled")
             return
 
@@ -148,17 +280,45 @@ def build_router(rt: Runtime) -> Router:
 
         answers = list(row["answers"])
         if len(answers) < dt.N_ITEMS:
-            await cb.message.edit_text(
-                _question_text(len(answers)),
-                reply_markup=_question_keyboard(owner_id, len(answers)),
-                parse_mode="HTML",
-            )
+            await _render_next_question(rt, cb, owner_id, len(answers))
             await cb.answer(f"{value} · {dt.SCALE_WORDS[value]}")
             return
 
         # Completed — finalize.
         await cb.answer("crunching the numbers 🔬")
         await _finalize(rt, cb, owner_id, answers)
+
+    @r.callback_query(F.data.startswith("dqx:"))
+    async def on_retake(cb: CallbackQuery) -> None:
+        if not cb.from_user or cb.message is None:
+            await cb.answer()
+            return
+        try:
+            owner_id = int(cb.data.split(":")[1])
+        except (IndexError, ValueError):
+            await cb.answer()
+            return
+        if cb.from_user.id != owner_id:
+            await cb.answer("not your test 🙅", show_alert=False)
+            return
+        await cb.answer("restarting 🔁")
+        await _begin(rt, cb.message, cb.message.chat.id, owner_id)
+
+    @r.message(Command("disgust_warmup"))
+    async def disgust_warmup(msg: Message) -> None:
+        if not await require_admin(msg, rt.settings.admin_ids):
+            return
+        n = await rt.db.fetchval(
+            "SELECT COUNT(*) FROM disgust_item_images "
+            " WHERE item_key = ANY($1::text[])",
+            _ITEM_KEYS,
+        )
+        _kick_warmup(rt)
+        await msg.reply(
+            f"🖼 Disgust images: {int(n or 0)}/{dt.N_ITEMS} cached. "
+            "Generating any missing ones in the background — re-run to check.",
+            disable_notification=True,
+        )
 
     @r.message(Command("disgustboard", "ickboard"))
     async def leaderboard(msg: Message) -> None:
@@ -191,6 +351,23 @@ def build_router(rt: Runtime) -> Router:
     return r
 
 
+async def _chat_percentile(
+    rt: Runtime, chat_id: int, user_id: int, score: float,
+) -> int | None:
+    """Share of OTHER takers in this chat scoring lower than `score`. None when
+    nobody else has taken it (nothing to compare against)."""
+    row = await rt.db.fetchrow(
+        "SELECT COUNT(*) AS total, "
+        "       COUNT(*) FILTER (WHERE overall_score < $2) AS below "
+        "  FROM disgust_test_results "
+        " WHERE chat_id = $1 AND user_id <> $3",
+        chat_id, score, user_id,
+    )
+    if not row or not row["total"]:
+        return None
+    return round(row["below"] / row["total"] * 100)
+
+
 async def _finalize(
     rt: Runtime, cb: CallbackQuery, owner_id: int, answers: list[int],
 ) -> None:
@@ -199,21 +376,22 @@ async def _finalize(
     try:
         result = dt.score(answers)
     except ValueError:
-        # Corrupt session — reset so the user can cleanly retry.
         await rt.db.execute(
             "DELETE FROM disgust_test_sessions WHERE chat_id=$1 AND user_id=$2",
             chat_id, owner_id,
         )
-        await cb.message.edit_text(
-            "Something went wrong scoring that. Send /disgusttest to try again."
+        await _set_message(
+            cb, "Something went wrong scoring that. Send /disgusttest to try again.",
+            parse_mode=None,
         )
         return
 
-    # Feedback while the (slow) image generates.
-    await cb.message.edit_text(f"🔬 Crunching {name}'s results…")
+    # Feedback while the (slow) result image generates.
+    await _set_message(cb, f"🔬 Crunching {name}'s results…", parse_mode=None)
 
     verdict = await _persona_verdict(rt, chat_id, result, name)
-    caption = dt.result_caption(result, name, verdict)
+    percentile = await _chat_percentile(rt, chat_id, owner_id, result.overall_score)
+    caption = dt.result_caption(result, name, verdict, percentile=percentile)
 
     # Persist the result (latest per user) and clear the session.
     await rt.db.execute(
@@ -243,16 +421,32 @@ async def _finalize(
     except Exception as exc:  # image gen is best-effort flavour
         log.warning("disgust result image failed: %s", exc)
 
-    if image:
-        await cb.message.answer_photo(
-            BufferedInputFile(image, filename="disgust.png"),
-            caption=caption,
-            disable_notification=True,
-        )
-        await cb.message.edit_text(f"🧫 {name}'s disgust profile 👇")
+    kb = _retake_keyboard(owner_id)
+    if getattr(cb.message, "photo", None):
+        # The flow message is already a photo — swap in the result card.
+        if image:
+            try:
+                await cb.message.edit_media(
+                    InputMediaPhoto(
+                        media=BufferedInputFile(image, filename="result.png"),
+                        caption=caption,
+                    ),
+                    reply_markup=kb,
+                )
+                return
+            except TelegramBadRequest:
+                pass
+        await _set_message(cb, caption, reply_markup=kb, parse_mode=None)
     else:
-        # No image — the caption carries everything, so show it as the result.
-        await cb.message.edit_text(caption)
+        if image:
+            await cb.message.answer_photo(
+                BufferedInputFile(image, filename="result.png"),
+                caption=caption, reply_markup=kb, disable_notification=True,
+            )
+            await _set_message(cb, f"🧫 {name}'s disgust profile 👇", parse_mode=None)
+        else:
+            # No image — the caption carries everything, so show it as the result.
+            await _set_message(cb, caption, reply_markup=kb, parse_mode=None)
 
 
 async def _persona_verdict(
