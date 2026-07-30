@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import logging
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
 from ipedro.auth import is_admin_user
+from ipedro.db.chat_migration import migrate_chat
 from ipedro.handlers.common import get_or_create_chat_config
 from ipedro.runtime import Runtime
 
@@ -161,6 +162,28 @@ HELP_TEXT_ADMIN = (
 
 def build_router(rt: Runtime) -> Router:
     r = Router(name="basics")
+
+    @r.message(F.migrate_to_chat_id.is_not(None))
+    async def on_chat_migration(msg: Message) -> None:
+        """Telegram upgraded this group to a supergroup and gave it a new id.
+        Move all chat-scoped data across so stats/config/memory don't vanish.
+        Registered first (this router loads before the catch-all) so the
+        service message is handled here, not swallowed by chat handling."""
+        old_id = msg.chat.id
+        new_id = msg.migrate_to_chat_id
+        if new_id is None or new_id == old_id:
+            return
+        try:
+            moved = await migrate_chat(rt.db, old_id, new_id)
+            log.info(
+                "Supergroup migration: re-keyed chat %s -> %s (%s)",
+                old_id, new_id,
+                ", ".join(f"{t}:{n}" for t, n in moved.items()) or "nothing",
+            )
+        except Exception:
+            log.exception(
+                "Supergroup migration re-key failed %s -> %s", old_id, new_id,
+            )
 
     @r.message(Command("start"))
     async def start(msg: Message) -> None:

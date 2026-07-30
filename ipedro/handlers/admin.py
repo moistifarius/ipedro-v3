@@ -2757,13 +2757,54 @@ def build_router(rt: Runtime) -> Router:
     async def on_dsr_user_picked(cb: CallbackQuery) -> None:
         if not await _gate_callback(cb):
             return
-        try:
-            _, chat_id_s, user_id_s = cb.data.split(":", 2)
-            chat_id = int(chat_id_s)
-            user_id = int(user_id_s)
-        except (ValueError, IndexError):
+        # dsru:CHAT:USER                 → prompt confirmation
+        # dsru:CHAT:USER:confirm|cancel  → execute / abort
+        # Deleting a user's row is irreversible, and this picker looks
+        # identical to the (safe) /duckstats_edit picker — so require a
+        # confirm tap, matching the reset-ALL flow, instead of wiping on the
+        # first tap.
+        parts = cb.data.split(":")
+        if len(parts) < 3:
             await cb.answer(_expired("duckstats_reset"), show_alert=True)
             return
+        try:
+            chat_id = int(parts[1])
+            user_id = int(parts[2])
+        except ValueError:
+            await cb.answer(_expired("duckstats_reset"), show_alert=True)
+            return
+        if len(parts) == 3:
+            row = await rt.db.fetchrow(
+                "SELECT display_name, points FROM duck_stats "
+                " WHERE chat_id = $1 AND user_id = $2",
+                chat_id, user_id,
+            )
+            who = (row["display_name"] if row else None) or str(user_id)
+            pts = row["points"] if row else 0
+            body = (
+                f"Reset duck_stats for {who} (user {user_id}) in chat {chat_id}?\n"
+                f"This deletes their row — {pts} point(s) gone for good."
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_text(
+                        body,
+                        reply_markup=_confirmation_keyboard(
+                            f"dsru:{chat_id}:{user_id}"),
+                    )
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        if parts[3] == "cancel":
+            if cb.message:
+                try:
+                    await cb.message.edit_text("Cancelled. Nothing changed.")
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        # confirm
         n = await _do_reset_user_stats(chat_id, user_id)
         body = (
             f"Reset duck_stats for user {user_id} in chat {chat_id} "
