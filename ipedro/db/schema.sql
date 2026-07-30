@@ -388,3 +388,36 @@ CREATE TABLE IF NOT EXISTS bef_challenges (
 
 CREATE INDEX IF NOT EXISTS bef_challenges_prompt_idx
     ON bef_challenges (chat_id, prompt_message_id);
+
+-- Disgust personality test -------------------------------------------------
+-- In-progress quiz state: one session per (chat, user), so concurrent takers
+-- never collide and re-taking simply overwrites. `answers` accumulates the
+-- ordered 1-6 ratings; cardinality(answers) is the current question index.
+CREATE TABLE IF NOT EXISTS disgust_test_sessions (
+    chat_id     BIGINT NOT NULL,
+    user_id     BIGINT NOT NULL,
+    message_id  BIGINT,                              -- the quiz message being edited
+    answers     INTEGER[] NOT NULL DEFAULT '{}',
+    started_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (chat_id, user_id)
+);
+
+-- Latest result per (chat, user). Overwritten on re-take. Scores are 1-6
+-- means; overall_score drives the /disgustboard leaderboard.
+CREATE TABLE IF NOT EXISTS disgust_test_results (
+    chat_id       BIGINT NOT NULL,
+    user_id       BIGINT NOT NULL,
+    display_name  TEXT NOT NULL,
+    food_score    REAL NOT NULL,
+    general_score REAL NOT NULL,
+    core_score    REAL,
+    animal_score  REAL,
+    contam_score  REAL,
+    overall_score REAL NOT NULL,
+    biggest_ick   TEXT,
+    taken_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (chat_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS disgust_results_board_idx
+    ON disgust_test_results (chat_id, overall_score DESC);

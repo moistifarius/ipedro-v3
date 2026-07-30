@@ -27,6 +27,7 @@ from ipedro.handlers import duckhunt as duck_h
 from ipedro.handlers import ether as ether_h
 from ipedro.handlers import karma as karma_h
 from ipedro.handlers import mod as mod_h
+from ipedro.handlers import quiz as quiz_h
 from ipedro.handlers import utility as utility_h
 from ipedro.logging_setup import configure_logging
 from ipedro.celebrations import run_celebrations_loop
@@ -130,6 +131,7 @@ def build_dispatcher(rt: Runtime) -> Dispatcher:
     dp.include_router(utility_h.build_router(rt))
     dp.include_router(karma_h.build_router(rt))
     dp.include_router(ai_h.build_router(rt))
+    dp.include_router(quiz_h.build_router(rt))
     dp.include_router(duck_h.build_router(rt))
     dp.include_router(ether_h.build_router(rt))
     dp.include_router(chat_h.build_router(rt))

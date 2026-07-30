@@ -142,6 +142,14 @@ COMMANDS: tuple[Command, ...] = (
             "/ether <text> | /ether (reply to voice)",
             "Transmit a message as staticky shortwave-voice into another "
             "ether-tuned chat."),
+    Command("disgusttest",  "ai", "/disgusttest",
+            "/disgusttest  (or /icktest)",
+            "A 16-question disgust personality test (tap 1-6), scored into a "
+            "profile with a generated result card. Based on the Food Disgust "
+            "Scale & Disgust Scale-Revised; for fun, not a diagnosis."),
+    Command("disgustboard", "ai", "/disgustboard",
+            "/disgustboard",
+            "Leaderboard of who's the most easily grossed out here."),
 
     # ── Duckhunt ─────────────────────────────────────────────────────────
     Command("duckhunt",     "duckhunt", "/duckhunt",
