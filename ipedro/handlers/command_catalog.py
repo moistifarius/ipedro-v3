@@ -142,19 +142,30 @@ COMMANDS: tuple[Command, ...] = (
             "/ether <text> | /ether (reply to voice)",
             "Transmit a message as staticky shortwave-voice into another "
             "ether-tuned chat."),
+    Command("tests",        "ai", "/tests",
+            "/tests  (or /quiz)",
+            "Menu of personality tests — tap one to take it. Each is a picture "
+            "per question, tap the scale, scored profile + result card + "
+            "Retake. Based on validated, cited scales; for fun, not diagnoses."),
     Command("disgusttest",  "ai", "/disgusttest",
             "/disgusttest  (or /icktest)",
-            "A 16-question disgust personality test (tap 1-6), scored into a "
-            "profile with a generated result card. Based on the Food Disgust "
-            "Scale & Disgust Scale-Revised; for fun, not a diagnosis."),
-    Command("disgustboard", "ai", "/disgustboard",
-            "/disgustboard",
-            "Leaderboard of who's the most easily grossed out here."),
-    Command("disgust_warmup", "ai", "/disgust_warmup",
-            "/disgust_warmup  (admin, DM)",
-            "Pre-generate & cache the 16 question illustrations so the test "
-            "runs in picture mode. Shows how many are cached; makes the rest "
-            "in the background."),
+            "How easily grossed out you are — food + the macabre (Food Disgust "
+            "Scale + Disgust Scale-Revised)."),
+    Command("darktriad",    "ai", "/darktriad",
+            "/darktriad  (or /villain)",
+            "How much of a bastard you are: Machiavellianism, psychopathy, "
+            "narcissism (Dirty Dozen)."),
+    Command("foodtest",     "ai", "/foodtest",
+            "/foodtest  (or /neophobia)",
+            "Picky vs adventurous eater (Food Neophobia Scale)."),
+    Command("bigfive",      "ai", "/bigfive",
+            "/bigfive  (or /personality)",
+            "Your OCEAN personality profile (Ten-Item Personality Inventory)."),
+    Command("quiz_warmup",  "ai", "/quiz_warmup",
+            "/quiz_warmup  (admin, DM)",
+            "Pre-generate & cache every quiz's question illustrations so the "
+            "tests run in picture mode. Shows cache counts; makes the rest in "
+            "the background."),
 
     # ── Duckhunt ─────────────────────────────────────────────────────────
     Command("duckhunt",     "duckhunt", "/duckhunt",

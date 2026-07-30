@@ -432,3 +432,59 @@ CREATE TABLE IF NOT EXISTS disgust_item_images (
     png        BYTEA NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Generic quiz engine ------------------------------------------------------
+-- Multiple personality quizzes (disgust, dark triad, food neophobia, big
+-- five, …) share these tables, keyed by quiz_id. The disgust_* tables above
+-- predate the engine; their data is migrated in below and they go vestigial.
+CREATE TABLE IF NOT EXISTS quiz_sessions (
+    quiz_id     TEXT NOT NULL,
+    chat_id     BIGINT NOT NULL,
+    user_id     BIGINT NOT NULL,
+    message_id  BIGINT,
+    answers     INTEGER[] NOT NULL DEFAULT '{}',
+    started_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (quiz_id, chat_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS quiz_results (
+    quiz_id        TEXT NOT NULL,
+    chat_id        BIGINT NOT NULL,
+    user_id        BIGINT NOT NULL,
+    display_name   TEXT NOT NULL,
+    headline_score REAL NOT NULL,
+    summary        TEXT,
+    detail         JSONB,
+    taken_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (quiz_id, chat_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS quiz_results_board_idx
+    ON quiz_results (quiz_id, chat_id, headline_score DESC);
+
+CREATE TABLE IF NOT EXISTS quiz_item_images (
+    quiz_id    TEXT NOT NULL,
+    item_key   TEXT NOT NULL,
+    png        BYTEA NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (quiz_id, item_key)
+);
+
+-- One-time migration of the standalone disgust data into the generic tables.
+-- Idempotent (ON CONFLICT DO NOTHING), so it's a no-op on every later startup.
+INSERT INTO quiz_results (quiz_id, chat_id, user_id, display_name,
+                          headline_score, summary, detail, taken_at)
+SELECT 'disgust', chat_id, user_id, display_name, overall_score,
+       CASE WHEN overall_score < 2 THEN 'iron-stomached'
+            WHEN overall_score < 3 THEN 'pretty unbothered'
+            WHEN overall_score < 4 THEN 'middle of the road'
+            WHEN overall_score < 5 THEN 'squeamish'
+            ELSE 'can barely cope' END,
+       jsonb_build_object('food', food_score, 'general', general_score,
+                          'overall', overall_score, 'biggest_ick', biggest_ick),
+       taken_at
+  FROM disgust_test_results
+ON CONFLICT (quiz_id, chat_id, user_id) DO NOTHING;
+
+INSERT INTO quiz_item_images (quiz_id, item_key, png, created_at)
+SELECT 'disgust', item_key, png, created_at FROM disgust_item_images
+ON CONFLICT (quiz_id, item_key) DO NOTHING;
