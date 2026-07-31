@@ -21,6 +21,7 @@ class QuizItem:
     section: str = ""   # optional header label (e.g. "Food disgust")
     trait: str = ""     # which subscale/trait this item loads on
     reverse: bool = False   # reverse-keyed (high rating = low trait)
+    image_query: str = ""   # web-search term for its illustration (falls back to text)
 
 
 @dataclass(frozen=True)
@@ -52,8 +53,6 @@ class Quiz:
     citation: str                # short "based on …" line
     verdict_instruction: str     # system instruction shaping the persona verdict
     score: Callable[[list[int]], QuizResult]
-    item_image_prompt: Callable[["Quiz", QuizItem], str]
-    result_image_prompt: Callable[[QuizResult], str]
 
     @property
     def n_items(self) -> int:
@@ -72,14 +71,3 @@ def agreement_words(scale_max: int) -> dict[int, str]:
         4: "neutral", 5: "slightly agree", 6: "agree", 7: "strongly agree",
     }
     return {k: v for k, v in words.items() if k <= scale_max}
-
-
-def default_item_image_prompt(quiz: Quiz, item: QuizItem) -> str:
-    """Generic per-item illustration prompt: a lighthearted, text-free cartoon
-    of whatever the item describes."""
-    return (
-        "Funny lighthearted flat-vector cartoon sticker illustrating: "
-        f"{item.text}. Bold clean outlines, soft muted palette, a single clear "
-        "subject centered on a plain background, no text, no words, no letters, "
-        "not graphic, not gory, wholesome cartoon style."
-    )

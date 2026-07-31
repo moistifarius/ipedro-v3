@@ -14,33 +14,30 @@ score — so there's no leaderboard. For fun, not a diagnosis.
 
 from __future__ import annotations
 
-from ipedro.quizzes.types import (
-    Quiz, QuizItem, QuizResult, agreement_words, default_item_image_prompt,
-    reverse_value,
-)
+from ipedro.quizzes.types import Quiz, QuizItem, QuizResult, agreement_words, reverse_value
 
 _SCALE_MAX = 7
 
 # TIPI order. reverse flags per the scoring key (items 2,4,6,8,10 are reverse).
 _ITEMS = (
-    QuizItem("tipi1", "🎉", "Extraverted, enthusiastic.", trait="E"),
-    QuizItem("tipi2", "😤", "Critical, quarrelsome.", trait="A", reverse=True),
-    QuizItem("tipi3", "📋", "Dependable, self-disciplined.", trait="C"),
-    QuizItem("tipi4", "😰", "Anxious, easily upset.", trait="S", reverse=True),
-    QuizItem("tipi5", "🎨", "Open to new experiences, complex.", trait="O"),
-    QuizItem("tipi6", "🤐", "Reserved, quiet.", trait="E", reverse=True),
-    QuizItem("tipi7", "🫶", "Sympathetic, warm.", trait="A"),
-    QuizItem("tipi8", "🌪️", "Disorganized, careless.", trait="C", reverse=True),
-    QuizItem("tipi9", "🧘", "Calm, emotionally stable.", trait="S"),
-    QuizItem("tipi10", "🧱", "Conventional, uncreative.", trait="O", reverse=True),
+    QuizItem("tipi1", "🎉", "Extraverted, enthusiastic.", trait="E", image_query="party celebration"),
+    QuizItem("tipi2", "😤", "Critical, quarrelsome.", trait="A", reverse=True, image_query="argument"),
+    QuizItem("tipi3", "📋", "Dependable, self-disciplined.", trait="C", image_query="checklist planner"),
+    QuizItem("tipi4", "😰", "Anxious, easily upset.", trait="S", reverse=True, image_query="worried face"),
+    QuizItem("tipi5", "🎨", "Open to new experiences, complex.", trait="O", image_query="art palette"),
+    QuizItem("tipi6", "🤐", "Reserved, quiet.", trait="E", reverse=True, image_query="quiet library"),
+    QuizItem("tipi7", "🫶", "Sympathetic, warm.", trait="A", image_query="helping hands"),
+    QuizItem("tipi8", "🌪️", "Disorganized, careless.", trait="C", reverse=True, image_query="messy desk"),
+    QuizItem("tipi9", "🧘", "Calm, emotionally stable.", trait="S", image_query="meditation calm"),
+    QuizItem("tipi10", "🧱", "Conventional, uncreative.", trait="O", reverse=True, image_query="brick wall"),
 )
 
 _LABEL = {
-    "O": ("🎨 Openness      ", "Free Spirit 🎨"),
-    "C": ("📋 Conscientious ", "Organizer 📋"),
-    "E": ("🎉 Extraversion  ", "Extravert 🎉"),
-    "A": ("🫶 Agreeableness ", "Sweetheart 🫶"),
-    "S": ("🧘 Stability     ", "Unshakeable 🧘"),
+    "O": ("🎨 Openness      ", "Free Spirit 🎨", "art palette"),
+    "C": ("📋 Conscientious ", "Organizer 📋", "checklist planner"),
+    "E": ("🎉 Extraversion  ", "Extravert 🎉", "party celebration"),
+    "A": ("🫶 Agreeableness ", "Sweetheart 🫶", "helping hands"),
+    "S": ("🧘 Stability     ", "Unshakeable 🧘", "meditation calm"),
 }
 
 
@@ -68,22 +65,13 @@ def _score(answers: list[int]) -> QuizResult:
             for t in ("O", "C", "E", "A", "S")
         ],
         extras=[f"Strongest trait: {_LABEL[dominant][1]}"],
-        image_subject=_LABEL[dominant][1],
+        image_subject=_LABEL[dominant][2],
         verdict_payload=(
             "Big Five (1-7): Openness {O}, Conscientiousness {C}, Extraversion "
             "{E}, Agreeableness {A}, Emotional Stability {S}. Strongest: "
             f"{dominant}.".format(**traits)
         ),
         detail=traits,
-    )
-
-
-def _result_image_prompt(result: QuizResult) -> str:
-    return (
-        "A cartoonish flat-vector personality 'badge' illustration for someone "
-        f"whose strongest trait makes them a '{result.summary}'. Friendly modern "
-        "style, soft gradient palette, a single expressive character centered, "
-        "no text, no words, wholesome sticker style."
     )
 
 
@@ -107,6 +95,4 @@ BIG_FIVE = Quiz(
         "strongest trait. Plain text, no markdown."
     ),
     score=_score,
-    item_image_prompt=default_item_image_prompt,
-    result_image_prompt=_result_image_prompt,
 )

@@ -1,8 +1,8 @@
 """The disgust test, expressed as a Quiz on the engine.
 
-The scoring, item bank, citations and image prompts still live in
-`ipedro.disgust_test` (and keep their own unit tests); this module just adapts
-them to the generic engine.
+Scoring, item bank and citations live in `ipedro.disgust_test` (with their own
+unit tests); this module adapts them to the generic engine and attaches a
+web-image search term to each item.
 """
 
 from __future__ import annotations
@@ -18,11 +18,31 @@ _VERDICT_INSTRUCTION = (
     "markdown, no emoji spam."
 )
 
+# Concrete web-image search term per item (falls back to the scenario text).
+_QUERIES = {
+    "cartilage": "chicken cartilage", "silverware": "dirty cutlery",
+    "shared_spoon": "soup spoon", "mould_cheese": "mouldy cheese",
+    "brown_apple": "sliced apple", "brown_avocado": "brown avocado",
+    "fish_texture": "raw fish fillet", "salad_snail": "snail leaf",
+    "maggots": "maggots", "bin_stench": "garbage bin",
+    "vomit": "sick bucket", "hand_jar": "specimen jar",
+    "dead_body": "morgue", "glass_eye": "glass eye",
+    "shared_glass": "drinking glass", "worn_shirt": "old shirt",
+}
+
+# Search term for the result-card image, by which food subscale iced them most.
+_SUBSCALE_QUERY = {
+    "animal_flesh": "raw meat", "poor_hygiene": "dirty dishes",
+    "human_contamination": "shared spoon", "mould": "mouldy cheese",
+    "decaying_fruit": "rotten fruit", "decaying_vegetables": "brown avocado",
+    "fish": "raw fish", "living_contaminants": "snail",
+}
+
 _ITEMS = tuple(
     QuizItem(
         key=it.key, emoji=it.emoji, text=it.text,
         section="Food disgust" if it.section == "food" else "General disgust",
-        trait=it.subscale,
+        trait=it.subscale, image_query=_QUERIES.get(it.key, it.text),
     )
     for it in dt.ALL_ITEMS
 )
@@ -46,7 +66,7 @@ def _score(answers: list[int]) -> QuizResult:
             f"Biggest ick: {r.biggest_ick_label} {r.biggest_ick_emoji}   "
             f"Iron stomach: {r.iron_stomach_label} {r.iron_stomach_emoji}",
         ],
-        image_subject=f"{r.biggest_ick_emoji} {r.biggest_ick_label}",
+        image_subject=_SUBSCALE_QUERY.get(r.biggest_ick_key, r.biggest_ick_label),
         verdict_payload=(
             f"Overall: {r.overall_band} ({r.overall_score}/6). Food disgust "
             f"{r.food_score}/6 ({r.food_band}). General {r.general_score}/6 "
@@ -58,21 +78,6 @@ def _score(answers: list[int]) -> QuizResult:
             "animal": r.animal_score, "contam": r.contam_score,
             "overall": r.overall_score, "biggest_ick": r.biggest_ick_label,
         },
-    )
-
-
-def _item_image_prompt(quiz: Quiz, item: QuizItem) -> str:
-    src = next((x for x in dt.ALL_ITEMS if x.key == item.key), None)
-    return dt.item_image_prompt(src) if src else item.text
-
-
-def _result_image_prompt(result: QuizResult) -> str:
-    return (
-        "A clean cartoonish flat-vector 'lab report' badge illustration for "
-        f"someone who is '{result.summary}' about disgusting things, with a "
-        f"playful motif of {result.image_subject}. Muted mint-and-cream lab "
-        "palette, a small specimen jar and clipboard, friendly and clinical, "
-        "centered, no text, no words, no gore, sticker style."
     )
 
 
@@ -92,6 +97,4 @@ DISGUST = Quiz(
     citation=dt.CITATION_SHORT,
     verdict_instruction=_VERDICT_INSTRUCTION,
     score=_score,
-    item_image_prompt=_item_image_prompt,
-    result_image_prompt=_result_image_prompt,
 )

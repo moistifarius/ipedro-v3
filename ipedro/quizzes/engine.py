@@ -26,7 +26,7 @@ from ipedro.handlers.common import (
     display_name, get_or_create_chat_config, require_admin,
 )
 from ipedro.personas import current_master_prompt
-from ipedro.quizzes import registry
+from ipedro.quizzes import image_fetch, registry
 from ipedro.quizzes.types import Quiz, QuizResult
 from ipedro.runtime import Runtime
 
@@ -155,12 +155,7 @@ async def _warm_item_images(rt: Runtime, quiz: Quiz) -> None:
                 " WHERE quiz_id = $1 AND item_key = $2", quiz.id, item.key,
             ):
                 continue
-            try:
-                png = await rt.openai.generate_image(quiz.item_image_prompt(quiz, item))
-            except Exception as exc:
-                log.warning("quiz warmup: %s/%s image failed: %s",
-                            quiz.id, item.key, exc)
-                continue
+            png = await image_fetch.fetch(item.image_query or item.text)
             if png:
                 await rt.db.execute(
                     "INSERT INTO quiz_item_images (quiz_id, item_key, png) "
@@ -294,11 +289,7 @@ async def _finalize(
         quiz.id, chat_id, owner_id,
     )
 
-    image = None
-    try:
-        image = await rt.openai.generate_image(quiz.result_image_prompt(result))
-    except Exception as exc:
-        log.warning("quiz result image failed (%s): %s", quiz.id, exc)
+    image = await image_fetch.fetch(result.image_subject)
 
     kb = _retake_keyboard(quiz, owner_id)
     if getattr(cb.message, "photo", None):
@@ -507,6 +498,6 @@ async def warmup_command(rt: Runtime, msg: Message) -> None:
         _kick_warmup(rt, quiz)
     await msg.reply(
         "🖼 Cached illustrations:\n" + "\n".join(parts) +
-        "\n\nGenerating any missing in the background — re-run to check.",
+        "\n\nFetching any missing from the web in the background — re-run to check.",
         disable_notification=True,
     )

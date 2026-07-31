@@ -21,8 +21,11 @@ DARK = registry.get("darktriad")
 
 
 @pytest.fixture(autouse=True)
-def _no_background_warmup(monkeypatch):
+def _quiz_env(monkeypatch):
+    # No real background warm-up, and the web image fetch returns bytes by
+    # default (tests that need the text path override it to None).
     monkeypatch.setattr(engine, "_kick_warmup", lambda rt, quiz: None)
+    monkeypatch.setattr(engine.image_fetch, "fetch", AsyncMock(return_value=b"IMG"))
 
 
 class _FakeDB:
@@ -94,7 +97,7 @@ def _seed_images(db, quiz):
         db.images[(quiz.id, it.key)] = b"IMG"
 
 
-def _rt(db, *, image=b"PNG", verdict="you gross freak", admin=frozenset()):
+def _rt(db, *, verdict="you gross freak", admin=frozenset()):
     cfg = SimpleNamespace()
     chats = SimpleNamespace(upsert_chat=AsyncMock(),
                             get_config=AsyncMock(return_value=cfg),
@@ -102,8 +105,7 @@ def _rt(db, *, image=b"PNG", verdict="you gross freak", admin=frozenset()):
     return SimpleNamespace(
         settings=SimpleNamespace(admin_ids=admin),
         db=db, chats=chats, users=SimpleNamespace(upsert_user=AsyncMock()),
-        openai=SimpleNamespace(chat=AsyncMock(return_value=verdict),
-                               generate_image=AsyncMock(return_value=image)),
+        openai=SimpleNamespace(chat=AsyncMock(return_value=verdict)),
         bot=SimpleNamespace(),
     )
 
@@ -231,7 +233,7 @@ async def test_cancel_clears_session():
 async def test_finalize_image_result_and_store():
     db = _FakeDB()
     db.sessions[("disgust", 100, 7)] = {"answers": [3] * 15, "message_id": 5}
-    rt = _rt(db, image=b"RES")
+    rt = _rt(db)                        # fetch returns bytes → photo result
     cb = _cb(100, 7, "q:disgust:7:15:3")
     await engine.on_answer(rt, cb)
 
@@ -245,10 +247,11 @@ async def test_finalize_image_result_and_store():
 
 
 @pytest.mark.asyncio
-async def test_finalize_text_fallback_when_no_image():
+async def test_finalize_text_fallback_when_no_image(monkeypatch):
+    monkeypatch.setattr(engine.image_fetch, "fetch", AsyncMock(return_value=None))
     db = _FakeDB()
     db.sessions[("disgust", 100, 7)] = {"answers": [3] * 15, "message_id": 5}
-    rt = _rt(db, image=None)
+    rt = _rt(db)
     cb = _cb(100, 7, "q:disgust:7:15:3")
     await engine.on_answer(rt, cb)
     cb.message.answer_photo.assert_not_awaited()
@@ -257,26 +260,28 @@ async def test_finalize_text_fallback_when_no_image():
 
 
 @pytest.mark.asyncio
-async def test_percentile_line_for_ranked_quiz():
+async def test_percentile_line_for_ranked_quiz(monkeypatch):
+    monkeypatch.setattr(engine.image_fetch, "fetch", AsyncMock(return_value=None))
     db = _FakeDB()
     db.results[("disgust", 100, 1)] = {
         "display_name": "Lo", "headline_score": 1.0, "summary": "x"}
     db.results[("disgust", 100, 2)] = {
         "display_name": "Mid", "headline_score": 2.0, "summary": "y"}
     db.sessions[("disgust", 100, 7)] = {"answers": [6] * 15, "message_id": 5}
-    rt = _rt(db, image=None)
+    rt = _rt(db)
     cb = _cb(100, 7, "q:disgust:7:15:6")
     await engine.on_answer(rt, cb)
     assert "Ranks above 100% of this chat" in cb.message.edit_text.await_args.args[0]
 
 
 @pytest.mark.asyncio
-async def test_unranked_quiz_has_no_percentile():
+async def test_unranked_quiz_has_no_percentile(monkeypatch):
+    monkeypatch.setattr(engine.image_fetch, "fetch", AsyncMock(return_value=None))
     db = _FakeDB()
     db.results[("bigfive", 100, 1)] = {
         "display_name": "A", "headline_score": 1.0, "summary": "x"}
     db.sessions[("bigfive", 100, 7)] = {"answers": [5] * 9, "message_id": 5}
-    rt = _rt(db, image=None)
+    rt = _rt(db)
     cb = _cb(100, 7, "q:bigfive:7:9:5")                         # the 10th answer
     await engine.on_answer(rt, cb)
     assert ("bigfive", 100, 7) in db.results
@@ -324,12 +329,12 @@ async def test_retake_rejects_other_user():
 
 # --------------------------------------------------------------- warm-up
 @pytest.mark.asyncio
-async def test_warmup_generates_and_caches():
+async def test_warmup_fetches_and_caches():
     db = _FakeDB()
-    rt = _rt(db, image=b"IMG")
-    await engine._warm_item_images(rt, DARK)
+    rt = _rt(db)
+    await engine._warm_item_images(rt, DARK)   # engine.image_fetch.fetch → b"IMG"
     assert sum(1 for (qid, _k) in db.images if qid == "darktriad") == DARK.n_items
-    assert rt.openai.generate_image.await_count == DARK.n_items
+    assert engine.image_fetch.fetch.await_count == DARK.n_items
 
 
 # --------------------------------------------------------------- leaderboard

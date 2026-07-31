@@ -13,25 +13,28 @@ Disgust Test. For fun, not a diagnosis.
 
 from __future__ import annotations
 
-from ipedro.quizzes.types import (
-    Quiz, QuizItem, QuizResult, agreement_words, default_item_image_prompt,
-    reverse_value,
-)
+from ipedro.quizzes.types import Quiz, QuizItem, QuizResult, agreement_words, reverse_value
 
 _SCALE_MAX = 7
 
 _ITEMS = (
-    QuizItem("fns1", "🍢", "I am constantly sampling new and different foods.", reverse=True),
-    QuizItem("fns2", "🤨", "I don't trust new foods.", reverse=False),
-    QuizItem("fns3", "🕵️", "If I don't know what's in a food, I won't try it.", reverse=False),
-    QuizItem("fns4", "🌏", "I like foods from different countries.", reverse=True),
-    QuizItem("fns5", "😬", "Foreign food looks too weird to eat.", reverse=False),
-    QuizItem("fns6", "🥂", "At dinner parties, I'll try a new food.", reverse=True),
-    QuizItem("fns7", "😰", "I'm afraid to eat things I've never had before.", reverse=False),
-    QuizItem("fns8", "📋", "I am very particular about the foods I'll eat.", reverse=False),
-    QuizItem("fns9", "😋", "I will eat almost anything.", reverse=True),
-    QuizItem("fns10", "🍜", "I like to try new restaurants.", reverse=True),
+    QuizItem("fns1", "🍢", "I am constantly sampling new and different foods.", reverse=True, image_query="street food skewers"),
+    QuizItem("fns2", "🤨", "I don't trust new foods.", image_query="suspicious food"),
+    QuizItem("fns3", "🕵️", "If I don't know what's in a food, I won't try it.", image_query="mystery dish"),
+    QuizItem("fns4", "🌏", "I like foods from different countries.", reverse=True, image_query="international cuisine"),
+    QuizItem("fns5", "😬", "Foreign food looks too weird to eat.", image_query="exotic food"),
+    QuizItem("fns6", "🥂", "At dinner parties, I'll try a new food.", reverse=True, image_query="dinner party food"),
+    QuizItem("fns7", "😰", "I'm afraid to eat things I've never had before.", image_query="scared eating"),
+    QuizItem("fns8", "📋", "I am very particular about the foods I'll eat.", image_query="plain meal"),
+    QuizItem("fns9", "😋", "I will eat almost anything.", reverse=True, image_query="buffet food"),
+    QuizItem("fns10", "🍜", "I like to try new restaurants.", reverse=True, image_query="ramen restaurant"),
 )
+
+_BAND_QUERY = {
+    "Adventurous Eater 🌏": "street food market",
+    "Middle-of-the-menu 🍽": "dinner plate",
+    "Picky Eater 🙅": "plain toast",
+}
 
 
 def _band(score: float) -> str:
@@ -51,30 +54,22 @@ def _score(answers: list[int]) -> QuizResult:
     ]
     neo = round(sum(scored) / len(scored), 2)
     adventure = round(_SCALE_MAX + 1 - neo, 2)
+    band = _band(neo)
     return QuizResult(
         headline=neo,
         headline_max=float(_SCALE_MAX),
-        summary=_band(neo),
+        summary=band,
         meters=[
             ("🙅 Pickiness     ", neo / _SCALE_MAX, f"{neo}/7"),
             ("🌏 Adventurousness", adventure / _SCALE_MAX, f"{adventure}/7"),
         ],
         extras=[],
-        image_subject=_band(neo),
+        image_subject=_BAND_QUERY.get(band, "food plate"),
         verdict_payload=(
-            f"Food neophobia {neo}/7 ({_band(neo)}); adventurousness {adventure}/7. "
+            f"Food neophobia {neo}/7 ({band}); adventurousness {adventure}/7. "
             "Higher neophobia = pickier / more suspicious of unfamiliar food."
         ),
         detail={"neophobia": neo, "adventurousness": adventure},
-    )
-
-
-def _result_image_prompt(result: QuizResult) -> str:
-    return (
-        "A cartoonish flat-vector food 'badge' illustration for an eater who is "
-        f"'{result.summary}'. A plate with a mix of familiar and exotic foods, "
-        "warm friendly palette, centered, no text, no words, wholesome sticker "
-        "style."
     )
 
 
@@ -98,6 +93,4 @@ NEOPHOBIA = Quiz(
         "fussy an eater they are. Plain text, no markdown."
     ),
     score=_score,
-    item_image_prompt=default_item_image_prompt,
-    result_image_prompt=_result_image_prompt,
 )

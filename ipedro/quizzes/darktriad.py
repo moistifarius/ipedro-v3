@@ -12,29 +12,28 @@ not a diagnosis.
 
 from __future__ import annotations
 
-from ipedro.quizzes.types import (
-    Quiz, QuizItem, QuizResult, agreement_words, default_item_image_prompt,
-)
+from ipedro.quizzes.types import Quiz, QuizItem, QuizResult, agreement_words
 
 _SCALE_MAX = 7
 
-# key, trait, emoji, statement
+# key, emoji, statement, section, trait, image search term
 _ITEMS = (
-    QuizItem("dd_mach1", "🎭", "I tend to manipulate others to get my way.", section="Machiavellianism", trait="mach"),
-    QuizItem("dd_mach2", "🃏", "I have used deceit or lied to get my way.", section="Machiavellianism", trait="mach"),
-    QuizItem("dd_mach3", "🍯", "I have used flattery to get my way.", section="Machiavellianism", trait="mach"),
-    QuizItem("dd_mach4", "♟️", "I tend to exploit others toward my own ends.", section="Machiavellianism", trait="mach"),
-    QuizItem("dd_psy1", "🧊", "I tend to lack remorse.", section="Psychopathy", trait="psy"),
-    QuizItem("dd_psy2", "😶", "I tend to be unconcerned with the morality of my actions.", section="Psychopathy", trait="psy"),
-    QuizItem("dd_psy3", "🪨", "I tend to be callous or insensitive.", section="Psychopathy", trait="psy"),
-    QuizItem("dd_psy4", "🙄", "I tend to be cynical.", section="Psychopathy", trait="psy"),
-    QuizItem("dd_narc1", "✨", "I tend to want others to admire me.", section="Narcissism", trait="narc"),
-    QuizItem("dd_narc2", "📣", "I tend to want others to pay attention to me.", section="Narcissism", trait="narc"),
-    QuizItem("dd_narc3", "👑", "I tend to seek prestige or status.", section="Narcissism", trait="narc"),
-    QuizItem("dd_narc4", "🎁", "I tend to expect special favors from others.", section="Narcissism", trait="narc"),
+    QuizItem("dd_mach1", "🎭", "I tend to manipulate others to get my way.", section="Machiavellianism", trait="mach", image_query="puppet strings"),
+    QuizItem("dd_mach2", "🃏", "I have used deceit or lied to get my way.", section="Machiavellianism", trait="mach", image_query="joker card"),
+    QuizItem("dd_mach3", "🍯", "I have used flattery to get my way.", section="Machiavellianism", trait="mach", image_query="honey jar"),
+    QuizItem("dd_mach4", "♟️", "I tend to exploit others toward my own ends.", section="Machiavellianism", trait="mach", image_query="chess pieces"),
+    QuizItem("dd_psy1", "🧊", "I tend to lack remorse.", section="Psychopathy", trait="psy", image_query="ice cube"),
+    QuizItem("dd_psy2", "😶", "I tend to be unconcerned with the morality of my actions.", section="Psychopathy", trait="psy", image_query="blank mask"),
+    QuizItem("dd_psy3", "🪨", "I tend to be callous or insensitive.", section="Psychopathy", trait="psy", image_query="boulder rock"),
+    QuizItem("dd_psy4", "🙄", "I tend to be cynical.", section="Psychopathy", trait="psy", image_query="storm cloud"),
+    QuizItem("dd_narc1", "✨", "I tend to want others to admire me.", section="Narcissism", trait="narc", image_query="applause crowd"),
+    QuizItem("dd_narc2", "📣", "I tend to want others to pay attention to me.", section="Narcissism", trait="narc", image_query="megaphone"),
+    QuizItem("dd_narc3", "👑", "I tend to seek prestige or status.", section="Narcissism", trait="narc", image_query="gold crown"),
+    QuizItem("dd_narc4", "🎁", "I tend to expect special favors from others.", section="Narcissism", trait="narc", image_query="gift box"),
 )
 
 _TRAIT_LABEL = {"mach": "Schemer 🎭", "psy": "Cold Operator 🧊", "narc": "Spotlight Hog ✨"}
+_TRAIT_QUERY = {"mach": "theatre mask", "psy": "iceberg", "narc": "gold crown"}
 
 
 def _mean(xs: list[int]) -> float:
@@ -68,22 +67,13 @@ def _score(answers: list[int]) -> QuizResult:
             ("✨ Narcissism   ", narc / _SCALE_MAX, f"{narc}/7"),
         ],
         extras=[f"Darkest streak: {_TRAIT_LABEL[dominant]}"],
-        image_subject=_TRAIT_LABEL[dominant],
+        image_subject=_TRAIT_QUERY[dominant],
         verdict_payload=(
             f"Overall darkness {overall}/7 ({level}). Machiavellianism {mach}/7, "
             f"psychopathy {psy}/7, narcissism {narc}/7. Dominant: {dominant}."
         ),
         detail={"mach": mach, "psy": psy, "narc": narc, "overall": overall,
                 "dominant": dominant},
-    )
-
-
-def _result_image_prompt(result: QuizResult) -> str:
-    return (
-        "A cartoonish flat-vector villain 'trading card' badge for a character "
-        f"described as '{result.summary}'. Playful comic-book style, dramatic "
-        "spotlight, deep purples and reds, centered, no text, no words, not "
-        "gory, sticker style."
     )
 
 
@@ -108,6 +98,4 @@ DARK_TRIAD = Quiz(
         "dominates. Plain text, no markdown."
     ),
     score=_score,
-    item_image_prompt=default_item_image_prompt,
-    result_image_prompt=_result_image_prompt,
 )
