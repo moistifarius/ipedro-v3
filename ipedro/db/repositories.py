@@ -352,11 +352,18 @@ class EmbeddingRepo:
         try:
             rows = await self.db.fetch(
                 """
-                SELECT ref_kind, ref_id, content,
-                       1 - (embedding <=> $2) AS similarity
-                  FROM embeddings
-                 WHERE chat_id = $1 AND embedding IS NOT NULL
-                 ORDER BY embedding <=> $2
+                SELECT e.ref_kind, e.ref_id, e.content,
+                       1 - (e.embedding <=> $2) AS similarity,
+                       COALESCE(
+                           NULLIF(TRIM(CONCAT_WS(' ', u.first_name, u.last_name)), ''),
+                           u.username
+                       ) AS author_name
+                  FROM embeddings e
+                  LEFT JOIN messages m
+                         ON e.ref_kind = 'message' AND m.id = e.ref_id
+                  LEFT JOIN users u ON u.user_id = m.user_id
+                 WHERE e.chat_id = $1 AND e.embedding IS NOT NULL
+                 ORDER BY e.embedding <=> $2
                  LIMIT $3
                 """,
                 chat_id, list(embedding), k,

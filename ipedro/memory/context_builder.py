@@ -55,14 +55,28 @@ _NAME_PREFIX_SYSTEM = (
 def _label_user_content(content: str, author_name: str | None) -> str:
     """Prefix a user-role message with its speaker name (one-time;
     don't double-prefix something that already starts with the same
-    label, e.g. on re-record paths)."""
-    name = (author_name or "").strip()
-    if not name:
-        return content
+    label, e.g. on re-record paths).
+
+    A user turn is NEVER left unlabeled: an unlabeled turn gets merged into an
+    adjacent speaker's turn (the Claude path concatenates consecutive user
+    messages) and misattributed, so a nameless author falls back to 'someone'.
+    """
+    name = (author_name or "").strip() or "someone"
     expected = f"{name}: "
     if content.startswith(expected):
         return content
     return f"{expected}{content}"
+
+
+def _retrieved_line(hit: dict) -> str:
+    """Render one semantic-recall hit. A recalled MESSAGE is shown with the
+    speaker's name so it can't be attributed to whoever's talking now;
+    non-message refs (summaries, facts) carry no single author."""
+    text = (hit.get("content") or "")[:300]
+    author = (hit.get("author_name") or "").strip()
+    if hit.get("ref_kind") == "message" and author:
+        return f"- {author}: {text}"
+    return f"- ({hit.get('ref_kind', 'note')}) {text}"
 
 
 def _aware(dt: datetime | None) -> datetime | None:
@@ -220,8 +234,10 @@ async def build_context(
             )
             hits = [h for h in hits if h.get("similarity", 0) >= 0.25]
             if hits:
-                retrieved = "Potentially relevant prior context:\n" + "\n".join(
-                    f"- ({h['ref_kind']}) {h['content'][:300]}" for h in hits
+                retrieved = (
+                    "Potentially relevant things said earlier (the name is who "
+                    "said it — attribute accordingly):\n"
+                    + "\n".join(_retrieved_line(h) for h in hits)
                 )
                 _add({"role": "system", "content": retrieved})
 

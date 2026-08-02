@@ -116,6 +116,30 @@ async def test_semantic_hits_above_threshold_are_included():
 
 
 @pytest.mark.asyncio
+async def test_semantic_message_hits_show_the_speaker():
+    """A recalled MESSAGE must carry its speaker's name so it can't be pinned
+    on whoever is talking now; a non-message ref (summary) stays unauthored."""
+    store = FakeStore(
+        recent=[_msg("x")],
+        semantic=[
+            {"ref_kind": "message", "ref_id": 7,
+             "content": "spicy noodles are elite", "similarity": 0.5,
+             "author_name": "Luke"},
+            {"ref_kind": "summary", "ref_id": 9,
+             "content": "the group argued about films", "similarity": 0.5,
+             "author_name": None},
+        ],
+    )
+    built = await build_context(
+        store=store, settings=_settings(), chat_id=1,
+        persona="pedro", persona_custom=None, latest_user_text="noodles",
+    )
+    blob = "\n".join(m["content"] for m in built.messages)
+    assert "Luke: spicy noodles are elite" in blob
+    assert "(summary) the group argued about films" in blob
+
+
+@pytest.mark.asyncio
 async def test_token_budget_caps_output():
     # Tiny budget should drop the recent messages from the tail.
     s = _settings()
@@ -156,10 +180,10 @@ async def test_messages_always_end_with_user_when_text_is_set():
     built = await build_context(
         store=store, settings=_settings(), chat_id=1,
         persona="dude", persona_custom=None,
-        latest_user_text="what time is it",
+        latest_user_text="what time is it", latest_user_name="Bob",
     )
     assert built.messages[-1]["role"] == "user"
-    assert built.messages[-1]["content"] == "what time is it"
+    assert built.messages[-1]["content"] == "Bob: what time is it"
 
 
 @pytest.mark.asyncio
@@ -235,19 +259,19 @@ async def test_user_turns_are_prefixed_with_speaker_name():
 
 
 @pytest.mark.asyncio
-async def test_user_turn_without_author_name_falls_through_unlabeled():
-    """Old rows that pre-date the JOIN won't have an author_name. They
-    should still appear (just unlabeled) — not crash and not get a stray
-    colon."""
+async def test_user_turn_without_author_name_is_labeled_someone():
+    """A user turn with no resolvable author must NOT be left bare — an
+    unlabeled turn gets merged into a neighbour's and misattributed. It's
+    labeled 'someone:' instead."""
     store = FakeStore(recent=[_msg("legacy line", author_name=None)])
     built = await build_context(
         store=store, settings=_settings(), chat_id=1,
         persona="dude", persona_custom=None,
         latest_user_text="now", latest_user_name=None,
     )
-    contents = [m["content"] for m in built.messages if m["role"] == "user"]
-    assert "legacy line" in contents
-    assert "now" in contents
+    joined = "\n".join(m["content"] for m in built.messages if m["role"] == "user")
+    assert "someone: legacy line" in joined
+    assert "someone: now" in joined
 
 
 @pytest.mark.asyncio
