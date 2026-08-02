@@ -168,6 +168,17 @@ ON_THIS_DAY_PROMPT = (
     "Messages:\n{messages}"
 )
 
+MONTHLY_RECAP_PROMPT = (
+    "Below are real messages from a group chat over the past month ({month}). "
+    "Write a short, in-character 'month in review' — 2 to 4 sentences capturing "
+    "the vibe, the running jokes, and the standout moments. Refer to people BY "
+    "NAME. The name before each message is EXACTLY who said it — attribute "
+    "things to the right person and never put one person's words in another's "
+    "mouth. Be wry and affectionate, not a dry summary. Output ONLY the recap, "
+    "no preamble, no bullet list.\n\n"
+    "Messages:\n{messages}"
+)
+
 MEME_QUERIES_PROMPT = (
     "Below are the latest messages from a group chat. Output THREE "
     "alternative reddit search queries for finding a meme about what the "

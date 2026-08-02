@@ -29,6 +29,7 @@ class ChatConfig:
     ether_enabled: bool = False
     duck_names_public: bool = True
     on_this_day_enabled: bool = True
+    monthly_recap_enabled: bool = True
 
 
 class ChatRepo:
@@ -75,6 +76,7 @@ class ChatRepo:
             ether_enabled=bool(row["ether_enabled"]),
             duck_names_public=bool(row["duck_names_public"]),
             on_this_day_enabled=bool(row["on_this_day_enabled"]),
+            monthly_recap_enabled=bool(row["monthly_recap_enabled"]),
         )
 
     async def upsert_default_config(
@@ -114,6 +116,7 @@ class ChatRepo:
             ether_enabled=bool(row["ether_enabled"]),
             duck_names_public=bool(row["duck_names_public"]),
             on_this_day_enabled=bool(row["on_this_day_enabled"]),
+            monthly_recap_enabled=bool(row["monthly_recap_enabled"]),
         )
 
     async def update_config(self, chat_id: int, **fields: Any) -> None:
@@ -122,6 +125,7 @@ class ChatRepo:
             "duckhunt_enabled", "voice_transcribe", "memory_enabled",
             "share_photo_enabled", "comic_enabled", "fortune_enabled",
             "ether_enabled", "duck_names_public", "on_this_day_enabled",
+            "monthly_recap_enabled",
         }
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:

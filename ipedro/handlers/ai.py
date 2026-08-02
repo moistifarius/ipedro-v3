@@ -132,7 +132,8 @@ def build_router(rt: Runtime) -> Router:
                 f"Memory enabled: {cfg.memory_enabled}\n"
                 f"Ether enabled: {cfg.ether_enabled}\n"
                 f"Duck names public: {cfg.duck_names_public}\n"
-                f"On this day: {cfg.on_this_day_enabled}\n\n"
+                f"On this day: {cfg.on_this_day_enabled}\n"
+                f"Monthly recap: {cfg.monthly_recap_enabled}\n\n"
                 "Set a field: /chat_config <field> <value>\n"
                 "  policy     commands|mention|reply|ambient|always\n"
                 "  ambient    <0.0-1.0>\n"
@@ -203,6 +204,8 @@ def build_router(rt: Runtime) -> Router:
             updates["duck_names_public"] = raw.lower() in ("on", "true", "1", "yes")
         elif field in ("onthisday", "on_this_day", "on_this_day_enabled"):
             updates["on_this_day_enabled"] = raw.lower() in ("on", "true", "1", "yes")
+        elif field in ("monthlyrecap", "monthly_recap", "monthly_recap_enabled"):
+            updates["monthly_recap_enabled"] = raw.lower() in ("on", "true", "1", "yes")
         else:
             await msg.reply("Unknown field.", disable_notification=True)
             return

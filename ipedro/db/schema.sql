@@ -365,6 +365,14 @@ ALTER TABLE chat_config
 ALTER TABLE chat_state
     ADD COLUMN IF NOT EXISTS last_on_this_day_date DATE;
 
+-- Monthly recap — a 'month in review' best-of, posted at the start of each new
+-- local month for the month just finished. On by default; last_monthly_recap
+-- holds the first day of the most recently recapped month (restart-safe).
+ALTER TABLE chat_config
+    ADD COLUMN IF NOT EXISTS monthly_recap_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE chat_state
+    ADD COLUMN IF NOT EXISTS last_monthly_recap DATE;
+
 -- Generic key/value store for global tunables (e.g. the master Pedro prompt).
 CREATE TABLE IF NOT EXISTS kv_store (
     key        TEXT PRIMARY KEY,
