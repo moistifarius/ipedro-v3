@@ -48,14 +48,13 @@ RARITY_BY_NAME: dict[str, tuple[float, int]] = {
 FLAT_DUCK_POINTS = 1
 
 # --------------------------------------------------------------- difficulty
-# Tuned hard — bang misses bite, bef refuses outright more often than
-# not, and most misses snowball into a captcha that the user must clear
-# before they can shoot again. Streak still meaningfully lifts the hit
-# chance so chaining good shots feels rewarding.
-BANG_BASE_HIT = 0.40          # 60% miss rate at streak 0
-BANG_HIT_CAP = 0.70           # max effective hit chance
-BANG_STREAK_BONUS = 0.04      # per streak point, capped at the streak cap
-BANG_STREAK_CAP = 5           # max effective hit at full streak: 0.60
+# Tuned forgiving — shooting a duck should feel good, not like a chore.
+# A clean shot lands most of the time, and a streak takes it to near-certain.
+# Streak still meaningfully lifts the hit chance so chaining shots is rewarding.
+BANG_BASE_HIT = 0.65          # 35% miss rate at streak 0
+BANG_HIT_CAP = 0.90           # max effective hit chance
+BANG_STREAK_BONUS = 0.05      # per streak point, capped at the streak cap
+BANG_STREAK_CAP = 5           # max effective hit at full streak: 0.90
 
 # Probability the AI's verdict gets bypassed in favour of an outright
 # refusal — the duck doesn't even hear you out. The AI can still refuse
@@ -63,9 +62,10 @@ BANG_STREAK_CAP = 5           # max effective hit at full streak: 0.60
 BEF_REFUSE_RATE = 0.55
 
 # When a bang misses, the chance the duck "spooks" you into a follow-up
-# captcha/trivia/recipe challenge. The challenge gates further bangs
+# captcha/trivia/recipe challenge. Kept low so a miss usually just means
+# "try again", not "now solve a puzzle" — the challenge gates further bangs
 # until cleared (same plumbing the bef refusal uses).
-MISS_CHALLENGE_RATE = 0.65
+MISS_CHALLENGE_RATE = 0.25
 
 # (month, day) -> (event name, hint flavor used in the quack line)
 HOLIDAYS: dict[tuple[int, int], tuple[str, str]] = {
@@ -256,15 +256,13 @@ def ignore_outcome(rarity: str, rng: random.Random | None = None) -> ActionOutco
 
 # ----------------------------------------------------------- challenge clock
 # How long a player has to answer each challenge kind before the clock runs
-# out. Tight on trivia so they can't open a tab and Google it — the trivia
-# generator is tuned to ask game-show questions a knowledgeable person can
-# recall in seconds, so if you actually know it you have plenty of time, and
-# if you're searching for it you don't. Captcha (Googling doesn't help) and
-# recipe (creative typing takes longer) get more room.
+# out. Roomy on purpose — a challenge should be a light speed bump, not a
+# pop quiz you can flunk by being slow. Captcha (Googling doesn't help) and
+# recipe (creative typing takes longer) get the most room.
 CHALLENGE_TIME_LIMITS: dict[str, int] = {
-    "trivia": 30,
-    "captcha": 45,
-    "recipe": 75,
+    "trivia": 60,
+    "captcha": 60,
+    "recipe": 90,
 }
 _DEFAULT_CHALLENGE_TIME_LIMIT = 45
 

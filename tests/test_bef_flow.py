@@ -576,5 +576,5 @@ def test_clock_caption_states_the_time_limit():
         assert str(secs) in cap
         assert "⏱" in cap
         assert "on the clock" in cap
-    # Trivia's clock is the headline 30s.
-    assert _clock_caption("trivia") == "⏱ 30 seconds on the clock."
+    # Trivia's clock is the headline 60s.
+    assert _clock_caption("trivia") == "⏱ 60 seconds on the clock."

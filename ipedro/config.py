@@ -120,7 +120,9 @@ class Settings(BaseSettings):
     # check. With ~4h half-life and the default 24h cap, ~98% of ducks have
     # wandered off by the time they hit the cap.
     duckhunt_duck_half_life_seconds: int = 14_400
-    duckhunt_action_cooldown_seconds: int = 15
+    # Min seconds between a user's duck actions — just enough to stop button
+    # mashing, not enough to feel like a punishment.
+    duckhunt_action_cooldown_seconds: int = 4
 
     # Share-photo idle behavior. Same Poisson shape as duckhunt: each enabled
     # chat rolls per tick. Default mean is 1 day because image generation is
