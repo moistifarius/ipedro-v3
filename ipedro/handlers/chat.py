@@ -154,6 +154,32 @@ _KYS_RESPONSE = (
     "call or text 988. UK & ROI: 116 123 (Samaritans). rough patches pass. 💛"
 )
 
+# The "Google en passant / Holy hell" Anarchy Chess reply chain.
+_HOLY_HELL_CHAIN = (
+    "Holy hell!\n"
+    "New response just dropped\n"
+    "Actual zombie\n"
+    "Call the exorcist!\n"
+    "Bishop goes on vacation, never comes back\n"
+    "Google en passant"
+)
+
+# The "don't care + ratio" pile-on (racial/slur variants intentionally dropped).
+_L_RATIO_COPYPASTA = (
+    "don't care + didn't ask + cry about it + stay mad + get real + L + mald "
+    "seethe cope harder + hoes mad + basic + skill issue + ratio + you fell "
+    "off + the audacity + triggered + any askers + redpilled + get a life + "
+    "ok and? + cringe + touch grass + not based + not funny didn't laugh + "
+    "you're* + grammar issue + go outside + get good + reported + ad hominem + GG!"
+)
+
+# 'copium' → one of a few interchangeable bits (exercises the tuple branch).
+_COPIUM_LINES = (
+    "*inhales from the copium tank* 🛢️😤",
+    "maximum copium levels detected",
+    "you're gonna need a bigger copium tank for this one",
+)
+
 # AutoModerator-style canned responses (real r/shitposting bits). First match
 # wins; checked before the normal AI reply. Each entry is (compiled regex,
 # response), where response is a single string or a tuple of strings (one
@@ -164,10 +190,17 @@ _AUTOMOD_TRIGGERS: tuple[tuple["re.Pattern[str]", "str | tuple[str, ...]"], ...]
     (_GAY_RE, _GAY_COPYPASTA),
     (re.compile(r"\bamong\s*us\b|\bamogus\b|\bsussy\b", re.IGNORECASE),
      _AMONG_US_COPYPASTA),
+    (re.compile(r"\bholy\s+hell\b|\ben\s+passant\b", re.IGNORECASE),
+     _HOLY_HELL_CHAIN),
+    # 'ratio' alone is too common (aspect ratio, math); only the taunt forms fire.
+    (re.compile(r"\bl\s*\+\s*ratio\b|\bratio(?:ed|'?d)\b", re.IGNORECASE),
+     _L_RATIO_COPYPASTA),
     (re.compile(r"\bbased\b", re.IGNORECASE), "Based? Based on what?"),
     (re.compile(r"\bsneed\b", re.IGNORECASE), "Formerly Chuck's."),
     (re.compile(r"\btrans rights\b", re.IGNORECASE),
      "🏳️‍⚧️ trans rights are human rights."),
+    (re.compile(r"\bnl\b", re.IGNORECASE), "Never lucky."),
+    (re.compile(r"\bcopium\b", re.IGNORECASE), _COPIUM_LINES),
     (re.compile(r"(?<!\d)69(?!\d)"), "nice"),
     (re.compile(r"(?<!\d)420(?!\d)"), "blaze it 🔥"),
 )

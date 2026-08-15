@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import random
+
 from ipedro.handlers.chat import (
-    _AMONG_US_COPYPASTA, _AUTOMOD_TRIGGERS, _GAY_COPYPASTA, _KYS_RESPONSE,
-    _automod_response,
+    _AMONG_US_COPYPASTA, _AUTOMOD_TRIGGERS, _COPIUM_LINES, _GAY_COPYPASTA,
+    _HOLY_HELL_CHAIN, _KYS_RESPONSE, _L_RATIO_COPYPASTA, _automod_response,
 )
 
 
@@ -51,6 +53,55 @@ def test_kys_gets_the_sincere_response_and_wins_priority():
     assert _automod_response("kys you gay loser") == _KYS_RESPONSE
     # not a false positive on unrelated 'kill' phrasing
     assert _automod_response("that joke killed me lol") != _KYS_RESPONSE
+
+
+def test_holy_hell_summons_the_google_en_passant_chain():
+    assert _automod_response("holy hell") == _HOLY_HELL_CHAIN
+    assert _automod_response("google en passant").startswith("Holy hell!")
+    assert "Google en passant" in _automod_response("HOLY HELL what is that")
+    # needs the whole phrase, not a bare 'hell'
+    assert _automod_response("what the hell") != _HOLY_HELL_CHAIN
+
+
+def test_l_ratio_fires_only_on_the_taunt_forms():
+    assert _automod_response("L + ratio") == _L_RATIO_COPYPASTA
+    assert _automod_response("l+ratio bozo") == _L_RATIO_COPYPASTA
+    assert _automod_response("you just got ratioed").startswith("don't care")
+    assert _automod_response("get ratio'd") == _L_RATIO_COPYPASTA
+    # bare 'ratio' is far too common (aspect ratio, gear ratio, math) to fire
+    assert _automod_response("what's the aspect ratio") is None
+    assert _automod_response("a 16:9 ratio") is None
+    assert _automod_response("the gear ratios spin") is None
+    # a stray 'l' before an unrelated 'ratio' must not trip it either
+    assert _automod_response("cool aspect ratio") is None
+
+
+def test_nl_never_lucky_is_a_standalone_token():
+    assert _automod_response("nl") == "Never lucky."
+    assert _automod_response("man, nl") == "Never lucky."
+    # must be its own word, not a substring of ordinary English
+    assert _automod_response("only kidding") is None
+    assert _automod_response("channel surfing") is None
+
+
+def test_copium_draws_from_the_tuple_branch():
+    # Every draw is a real member of the tuple...
+    for seed in range(30):
+        out = _automod_response("massive copium", random.Random(seed))
+        assert out in _COPIUM_LINES
+    # ...and it genuinely varies (exercises r.choice, not a fixed return).
+    seen = {_automod_response("copium", random.Random(s)) for s in range(30)}
+    assert len(seen) > 1
+    # boundary: not a substring match
+    assert _automod_response("copiumm") is None
+
+
+def test_every_response_fits_the_telegram_message_limit():
+    # Telegram hard-caps a text message at 4096 chars; keep headroom.
+    for _pattern, response in _AUTOMOD_TRIGGERS:
+        variants = response if isinstance(response, tuple) else (response,)
+        for v in variants:
+            assert isinstance(v, str) and 0 < len(v) <= 4000, v[:60]
 
 
 def test_no_trigger_returns_none():
