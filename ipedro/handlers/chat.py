@@ -17,7 +17,9 @@ from ipedro.duckhunt.captcha_gen import matches as captcha_matches
 from ipedro.duckhunt.debug_toggles import is_on as debug_is_on
 from ipedro.duckhunt.scoring import challenge_is_over_time, over_time_line
 from ipedro.duckhunt.verdicts import parse_verdict
-from ipedro.handlers.common import catify, display_name, get_or_create_chat_config
+from ipedro.handlers.common import (
+    catify, display_name, fallback_cat_fact, get_or_create_chat_config,
+)
 from ipedro.impersonate import build_impersonation_prompt, resolve_impersonation
 from ipedro.meme_finder import (
     classify_meme_request, derive_topic_queries, find_relevant_meme,
@@ -117,6 +119,46 @@ _THANKS_PEDRO_LINES = (
     "filed under: favors rendered",
     "don't get used to it",
 )
+
+# "gay" → a fixed copypasta bit. Matches the standalone word only.
+_GAY_RE = re.compile(r"\bgays?\b", re.IGNORECASE)
+_GAY_COPYPASTA = (
+    "Yeah can you imagine being gay lol? Like seriously honest to god wanting "
+    "to kiss boys. Putting your lips on another dude’s lips unironically. "
+    "Holding his face in your hands to feel his skin on yours just for the "
+    "comfort of knowing he’s there. Looking into his eyes and realizing for "
+    "all that you dream you are that you are only human and that your heart "
+    "burns for just a chance at a life with him. Clasping your fingers in his "
+    "and holding so tight you feel like you might never let go to ground "
+    "yourself because this might be the last time you ever get to hold him. "
+    "Crying yourself to sleep at night because you know in a different life "
+    "you could have been sleeping in his arms.\n\nCouldn’t be me lmao."
+)
+
+# AutoModerator-style canned responses (r/shitposting vibe). First match wins;
+# checked before the normal AI reply. Each entry is (compiled regex, response),
+# where response is a single string or a tuple of strings (one picked at
+# random). THIS TABLE IS THE WHOLE EXTENSION POINT — add a bit by adding a row.
+_AUTOMOD_TRIGGERS: tuple[tuple["re.Pattern[str]", "str | tuple[str, ...]"], ...] = (
+    (_GAY_RE, _GAY_COPYPASTA),
+    (re.compile(r"\bbased\b", re.IGNORECASE), "Based on what?"),
+    (re.compile(r"(?<!\d)69(?!\d)"), "nice"),
+    (re.compile(r"(?<!\d)420(?!\d)"), "blaze it 🔥"),
+    (re.compile(r"\btrans rights\b", re.IGNORECASE), "🏳️‍⚧️ trans rights"),
+)
+
+
+def _automod_response(text: str | None, rng: random.Random | None = None) -> str | None:
+    """First matching AutoMod-style canned response for `text`, or None."""
+    if not text:
+        return None
+    r = rng or random
+    for pattern, response in _AUTOMOD_TRIGGERS:
+        if pattern.search(text):
+            return response if isinstance(response, str) else r.choice(response)
+    return None
+
+
 _CAT_WORD_RE = re.compile(
     r"\b("
     r"cats?|kitt(y|ies|en|ens)|felines?|"
@@ -583,6 +625,17 @@ def build_router(rt: Runtime) -> Router:
                 )
             return
 
+        # AutoModerator-style canned responses (e.g. 'gay' → the copypasta).
+        # Fixed intercept; skip the AI reply. Not written to memory — these are
+        # canned bits, not conversational context worth keeping.
+        automod = (
+            _automod_response(text) if cfg.response_policy != "commands" else None
+        )
+        if automod is not None:
+            sent = await msg.reply(automod, disable_notification=True)
+            track(msg.chat.id, sent.message_id, automod)
+            return
+
         # Ambient emoji reaction (rare, never on commands or our own intercepts).
         if (
             cfg.response_policy != "commands"
@@ -606,7 +659,7 @@ def build_router(rt: Runtime) -> Router:
         if _mentions_cat(text) and _MEME_WORD_RE.search(text) is None:
             await rt.bot.send_chat_action(msg.chat.id, "typing")
             fact = await rt.openai.cheap_completion(CAT_FACT_PROMPT, max_tokens=120)
-            reply_text = catify(fact or "🐈")
+            reply_text = catify(fact or fallback_cat_fact())
             sent = await msg.reply(reply_text, disable_notification=True)
             track(msg.chat.id, sent.message_id, reply_text)
             if cfg.memory_enabled:
