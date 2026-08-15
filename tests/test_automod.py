@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import random
+import re
 
 from ipedro.handlers.chat import (
-    _AMONG_US_COPYPASTA, _AUTOMOD_TRIGGERS, _COPIUM_LINES, _GAY_COPYPASTA,
-    _HOLY_HELL_CHAIN, _KYS_RESPONSE, _L_RATIO_COPYPASTA, _automod_response,
+    _ALL_YOUR_BASE, _AMONG_US_COPYPASTA, _AUTOMOD_TRIGGERS, _COPIUM_LINES,
+    _GAY_COPYPASTA, _GNU_LINUX_PASTA, _HOLY_HELL_CHAIN, _KYS_LINES,
+    _L_RATIO_COPYPASTA, _RIZZ_LINES, _automod_response,
 )
 
 
@@ -45,14 +47,20 @@ def test_number_jokes_need_boundaries():
     assert _automod_response("that costs 4200") is None
 
 
-def test_kys_gets_the_sincere_response_and_wins_priority():
+def test_kys_gets_a_deflection_and_wins_priority():
     for t in ("kys", "kill yourself", "just neck yourself", "i want to kill myself",
               "killurself", "kill ur self"):
-        assert _automod_response(t) == _KYS_RESPONSE, t
-    # sincere response takes priority even alongside a joke trigger
-    assert _automod_response("kys you gay loser") == _KYS_RESPONSE
+        assert _automod_response(t, random.Random(0)) in _KYS_LINES, t
+    # kys intercepts first — a joke trigger in the same message can't win
+    assert _automod_response("kys you gay loser", random.Random(0)) in _KYS_LINES
+    assert _automod_response("kys you gay loser") != _GAY_COPYPASTA
+    # deflection register only — never an actual instruction to self-harm.
+    # Word-boundaried so "skill issue" (contains 'kill') is allowed.
+    banned = re.compile(r"\b(kill|kys|die|neck|rope)\b", re.IGNORECASE)
+    for line in _KYS_LINES:
+        assert not banned.search(line), line
     # not a false positive on unrelated 'kill' phrasing
-    assert _automod_response("that joke killed me lol") != _KYS_RESPONSE
+    assert _automod_response("that joke killed me lol") not in _KYS_LINES
 
 
 def test_holy_hell_summons_the_google_en_passant_chain():
@@ -94,6 +102,30 @@ def test_copium_draws_from_the_tuple_branch():
     assert len(seen) > 1
     # boundary: not a substring match
     assert _automod_response("copiumm") is None
+
+
+def test_scraped_copypastas_fire_verbatim():
+    assert _automod_response("all your base are belong to us") == _ALL_YOUR_BASE
+    assert "For great justice." in _automod_response("ALL YOUR BASE")
+    assert _automod_response("i use linux btw") == _GNU_LINUX_PASTA
+    assert _automod_response("linux").startswith("I'd just like to interject")
+
+
+def test_brainrot_reactions_and_their_boundaries():
+    assert _automod_response("it's morbin time") == "It's Morbin' Time."
+    assert _automod_response("morbius sweep") == "It's Morbin' Time."
+    assert _automod_response("skibidi toilet") == "skibidi bop bop yes yes 🚽"
+    assert _automod_response("that's so ohio") == "only in Ohio 💀"
+    assert _automod_response("what the sigma") == "what the sigma?"
+    assert _automod_response("bro has mad rizz", random.Random(0)) in _RIZZ_LINES
+    assert _automod_response("we live in a society").startswith("🃏")
+    # bare 'society' is too common to fire the full-phrase trigger
+    assert _automod_response("in modern society") is None
+    # single-word triggers stay word-boundaried
+    assert _automod_response("the stigma around it") is None
+    assert _automod_response("morbid curiosity") is None
+    assert _automod_response("ohioan pride") is None
+    assert _automod_response("rizzling up") is None
 
 
 def test_every_response_fits_the_telegram_message_limit():

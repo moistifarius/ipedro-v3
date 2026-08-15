@@ -147,11 +147,14 @@ _AMONG_US_COPYPASTA = (
     "I go, \"Penis? More like pen-sus!\" Aaaaaaargh!"
 )
 
-# 'kys'-type triggers get a sincere response, not a bit — the one automod
-# behaviour worth keeping straight-faced.
-_KYS_RESPONSE = (
-    "hey — if that's not a joke, you matter and you're not alone. US/Canada: "
-    "call or text 988. UK & ROI: 116 123 (Samaritans). rough patches pass. 💛"
+# 'kys'-type triggers get a deflection, not a straight answer — reversal /
+# non-sequitur register, one picked at random. Never instructs self-harm.
+_KYS_LINES = (
+    "no ❤️",
+    "no u",
+    "counteroffer: no",
+    "skill issue",
+    "have you tried logging off instead",
 )
 
 # The "Google en passant / Holy hell" Anarchy Chess reply chain.
@@ -180,13 +183,67 @@ _COPIUM_LINES = (
     "you're gonna need a bigger copium tank for this one",
 )
 
+# The Zero Wing intro (1992), "All your base are belong to us" — verbatim.
+_ALL_YOUR_BASE = (
+    "Narrator: In A.D. 2101, war was beginning.\n"
+    "Captain: What happen?\n"
+    "Mechanic: Somebody set up us the bomb.\n"
+    "Operator: We get signal.\n"
+    "Captain: What!\n"
+    "Operator: Main screen turn on.\n"
+    "Captain: It's you!!\n"
+    "CATS: How are you gentlemen!!\n"
+    "CATS: All your base are belong to us.\n"
+    "CATS: You are on the way to destruction.\n"
+    "Captain: What you say!!\n"
+    "CATS: You have no chance to survive make your time.\n"
+    "CATS: Ha Ha Ha Ha....\n"
+    "Operator: Captain!!\n"
+    "Captain: Take off every 'Zig'!!\n"
+    "Captain: You know what you doing.\n"
+    "Captain: Move 'Zig'.\n"
+    "Captain: For great justice."
+)
+
+# The Richard Stallman "I'd just like to interject for a moment" GNU/Linux
+# copypasta. Fires on any bare mention of 'linux' — that's the whole joke.
+_GNU_LINUX_PASTA = (
+    "I'd just like to interject for a moment. What you're referring to as "
+    "Linux, is in fact, GNU/Linux, or as I've recently taken to calling it, "
+    "GNU plus Linux. Linux is not an operating system unto itself, but rather "
+    "another free component of a fully functioning GNU system made useful by "
+    "the GNU corelibs, shell utilities and vital system components comprising "
+    "a full OS as defined by POSIX.\n\n"
+    "Many computer users run a modified version of the GNU system every day, "
+    "without realizing it. Through a peculiar turn of events, the version of "
+    "GNU which is widely used today is often called \"Linux\", and many of its "
+    "users are not aware that it is basically the GNU system, developed by the "
+    "GNU Project.\n\n"
+    "There really is a Linux, and these people are using it, but it is just a "
+    "part of the system they use. Linux is the kernel: the program in the "
+    "system that allocates the machine's resources to the other programs that "
+    "you run. The kernel is an essential part of an operating system, but "
+    "useless by itself; it can only function in the context of a complete "
+    "operating system. Linux is normally used in combination with the GNU "
+    "operating system: the whole system is basically GNU with Linux added, or "
+    "GNU/Linux. All the so-called \"Linux\" distributions are really "
+    "distributions of GNU/Linux."
+)
+
+# 'rizz' → one of a few interchangeable brainrot bits.
+_RIZZ_LINES = (
+    "W rizz 😤",
+    "unspoken rizz detected",
+    "certified rizzler moment",
+)
+
 # AutoModerator-style canned responses (real r/shitposting bits). First match
 # wins; checked before the normal AI reply. Each entry is (compiled regex,
 # response), where response is a single string or a tuple of strings (one
 # picked at random). THIS TABLE IS THE WHOLE EXTENSION POINT — add a row.
 _AUTOMOD_TRIGGERS: tuple[tuple["re.Pattern[str]", "str | tuple[str, ...]"], ...] = (
     (re.compile(r"\bkys\b|(kill|neck)\s*(your|my|ur|yr)\s*self", re.IGNORECASE),
-     _KYS_RESPONSE),
+     _KYS_LINES),
     (_GAY_RE, _GAY_COPYPASTA),
     (re.compile(r"\bamong\s*us\b|\bamogus\b|\bsussy\b", re.IGNORECASE),
      _AMONG_US_COPYPASTA),
@@ -201,6 +258,15 @@ _AUTOMOD_TRIGGERS: tuple[tuple["re.Pattern[str]", "str | tuple[str, ...]"], ...]
      "🏳️‍⚧️ trans rights are human rights."),
     (re.compile(r"\bnl\b", re.IGNORECASE), "Never lucky."),
     (re.compile(r"\bcopium\b", re.IGNORECASE), _COPIUM_LINES),
+    (re.compile(r"\ball your base\b", re.IGNORECASE), _ALL_YOUR_BASE),
+    (re.compile(r"\blinux\b", re.IGNORECASE), _GNU_LINUX_PASTA),
+    (re.compile(r"\bmorb(?:ius|in|ing)\b", re.IGNORECASE), "It's Morbin' Time."),
+    (re.compile(r"\bskibidi\b", re.IGNORECASE), "skibidi bop bop yes yes 🚽"),
+    (re.compile(r"\bohio\b", re.IGNORECASE), "only in Ohio 💀"),
+    (re.compile(r"\bsigma\b", re.IGNORECASE), "what the sigma?"),
+    (re.compile(r"\brizz\b", re.IGNORECASE), _RIZZ_LINES),
+    (re.compile(r"\bwe live in a society\b", re.IGNORECASE),
+     "🃏 we live in one. gamers, rise up."),
     (re.compile(r"(?<!\d)69(?!\d)"), "nice"),
     (re.compile(r"(?<!\d)420(?!\d)"), "blaze it 🔥"),
 )
