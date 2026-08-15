@@ -135,16 +135,41 @@ _GAY_COPYPASTA = (
     "you could have been sleeping in his arms.\n\nCouldn’t be me lmao."
 )
 
-# AutoModerator-style canned responses (r/shitposting vibe). First match wins;
-# checked before the normal AI reply. Each entry is (compiled regex, response),
-# where response is a single string or a tuple of strings (one picked at
-# random). THIS TABLE IS THE WHOLE EXTENSION POINT — add a bit by adding a row.
+# The "Stop Posting About Among Us" copypasta (biggayrapper, 2021) — verbatim.
+_AMONG_US_COPYPASTA = (
+    "Stop posting about Among Us! I'm tired of seeing it! My friends on TikTok "
+    "send me memes, on Discord it's fucking memes! I was in a server, right? "
+    "And all of the channels are just Among Us stuff. I showed my Champion "
+    "underwear to my girlfriend and the logo, I flipped it and I said, \"Hey, "
+    "babe, when the underwear is sus!\" Haha, ding ding ding ding ding ding "
+    "ding, ding-ding-ding! I fucking looked at a trashcan and I said, \"That's "
+    "a bit sussy!\" I looked at my penis, I think of an astronaut's helmet and "
+    "I go, \"Penis? More like pen-sus!\" Aaaaaaargh!"
+)
+
+# 'kys'-type triggers get a sincere response, not a bit — the one automod
+# behaviour worth keeping straight-faced.
+_KYS_RESPONSE = (
+    "hey — if that's not a joke, you matter and you're not alone. US/Canada: "
+    "call or text 988. UK & ROI: 116 123 (Samaritans). rough patches pass. 💛"
+)
+
+# AutoModerator-style canned responses (real r/shitposting bits). First match
+# wins; checked before the normal AI reply. Each entry is (compiled regex,
+# response), where response is a single string or a tuple of strings (one
+# picked at random). THIS TABLE IS THE WHOLE EXTENSION POINT — add a row.
 _AUTOMOD_TRIGGERS: tuple[tuple["re.Pattern[str]", "str | tuple[str, ...]"], ...] = (
+    (re.compile(r"\bkys\b|(kill|neck)\s*(your|my|ur|yr)\s*self", re.IGNORECASE),
+     _KYS_RESPONSE),
     (_GAY_RE, _GAY_COPYPASTA),
-    (re.compile(r"\bbased\b", re.IGNORECASE), "Based on what?"),
+    (re.compile(r"\bamong\s*us\b|\bamogus\b|\bsussy\b", re.IGNORECASE),
+     _AMONG_US_COPYPASTA),
+    (re.compile(r"\bbased\b", re.IGNORECASE), "Based? Based on what?"),
+    (re.compile(r"\bsneed\b", re.IGNORECASE), "Formerly Chuck's."),
+    (re.compile(r"\btrans rights\b", re.IGNORECASE),
+     "🏳️‍⚧️ trans rights are human rights."),
     (re.compile(r"(?<!\d)69(?!\d)"), "nice"),
     (re.compile(r"(?<!\d)420(?!\d)"), "blaze it 🔥"),
-    (re.compile(r"\btrans rights\b", re.IGNORECASE), "🏳️‍⚧️ trans rights"),
 )
 
 
