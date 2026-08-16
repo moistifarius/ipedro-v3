@@ -168,6 +168,38 @@ def test_quote_triggers_stay_bounded():
         assert _automod_response(t) is None, t
 
 
+def test_second_wave_quote_pairs_fire():
+    cases = {
+        "luke i am your father": "I am your father",
+        "there is no try": "no try",
+        "this is the way": "This is the Way",
+        "hasta la vista baby": "Hasta la vista",
+        "you can't handle the truth": "handle the truth",
+        "we're gonna need a bigger boat": "bigger boat",
+        "houston we have a problem": "Houston",
+        "get in loser": "loser",
+        "what are those": "THOOOSE",
+        "leeroy jenkins": "JENKINS",
+        "you must construct additional pylons": "pylons",
+        "it's-a me mario": "It's-a me",
+        "kamehameha": "KAAA",
+        "yare yare daze": "Yare yare",
+        "task failed successfully": "Task failed successfully",
+        "that's a fat gyatt": "GYATT",
+        "deez nuts lol": "Got 'em",
+        "you talking to me punk": "talkin'",
+    }
+    for text, needle in cases.items():
+        out = _automod_response(text)
+        assert out is not None and needle in out, (text, out)
+
+
+def test_second_wave_negatives():
+    for t in ("come over here now", "box of crayons", "these are not the same",
+              "the infinity gauntlet"):
+        assert _automod_response(t) is None, t
+
+
 def test_every_response_fits_the_telegram_message_limit():
     # Telegram hard-caps a text message at 4096 chars; keep headroom.
     for _pattern, response in _AUTOMOD_TRIGGERS:
