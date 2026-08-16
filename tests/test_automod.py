@@ -5,10 +5,10 @@ from __future__ import annotations
 import random
 import re
 
-from ipedro.handlers.chat import (
+from ipedro.handlers.automod import (
     _ALL_YOUR_BASE, _AMONG_US_COPYPASTA, _AUTOMOD_TRIGGERS, _COPIUM_LINES,
-    _GAY_COPYPASTA, _GNU_LINUX_PASTA, _HOLY_HELL_CHAIN, _KYS_LINES,
-    _L_RATIO_COPYPASTA, _RIZZ_LINES, _automod_response,
+    _GAY_COPYPASTA, _GNU_LINUX_PASTA, _HOLY_HELL_CHAIN, _JACKDAW_PASTA,
+    _KYS_LINES, _L_RATIO_COPYPASTA, _RIZZ_LINES, _automod_response,
 )
 
 
@@ -126,6 +126,46 @@ def test_brainrot_reactions_and_their_boundaries():
     assert _automod_response("morbid curiosity") is None
     assert _automod_response("ohioan pride") is None
     assert _automod_response("rizzling up") is None
+
+
+def test_jackdaw_fires_verbatim():
+    out = _automod_response("well actually a jackdaw is a crow")
+    assert out == _JACKDAW_PASTA
+    assert out.startswith("Here's the thing.")
+    assert out.rstrip().endswith("you know?")
+
+
+def test_quote_reply_pairs_fire():
+    cases = {
+        "hello there": "General Kenobi",
+        "i have the high ground now": "the high ground",
+        "one does not simply walk in": "Mordor",
+        "YOU SHALL NOT PASS": "YOU SHALL NOT PASS",
+        "and my axe": "my axe",
+        "that's what she said": "she said",
+        "war never changes": "War never changes",
+        "would you kindly": "A man chooses",
+        "i took an arrow to the knee": "arrow to the knee",
+        "praise the sun brother": "Praise the Sun",
+        "objection!": "OBJECTION",
+        "it's over 9000": "9000",
+        "is this a jojo reference": "JoJo reference",
+        "plus ultra baby": "PLUS ULTRA",
+        "the cake is a lie": "cake is a lie",
+        "sir this is a wendy's": "Wendy's",
+        "never gonna give you up": "Never gonna",
+        "somebody once told me": "gonna roll me",
+    }
+    for text, needle in cases.items():
+        out = _automod_response(text)
+        assert out is not None and needle in out, (text, out)
+
+
+def test_quote_triggers_stay_bounded():
+    # phrase triggers must not fire on ordinary nearby words
+    for t in ("i objected to the plan", "the highest grounds coffee",
+              "a wednesday afternoon off", "wendys and mcdonalds"):
+        assert _automod_response(t) is None, t
 
 
 def test_every_response_fits_the_telegram_message_limit():
