@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, timezone
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -78,7 +78,7 @@ class _RecapFakeDB:
         self.stamped: list = []
 
     async def fetch(self, query, *args):
-        if "GROUP BY u.user_id" in query:
+        if "GROUP BY m.user_id" in query:
             return self._stats
         if "SELECT quoted_name AS name" in query:
             return [{"name": n, "text": t} for n, t in self._saved]
@@ -152,8 +152,59 @@ async def test_loop_posts_and_stamps():
     )
     bot = SimpleNamespace(send_message=AsyncMock(
         return_value=SimpleNamespace(message_id=7)))
-    await mr._maybe_post(bot, db, _openai(), _settings())
+    settings = _settings()
+    await mr._maybe_post(bot, db, _openai(), settings,
+                         now=datetime(2026, 8, 2, 10, 0, tzinfo=settings.tzinfo))
     bot.send_message.assert_awaited_once()
     body = bot.send_message.await_args.args[1]
     assert "in review" in body
     assert db.stamped                      # chat was stamped so it won't repeat
+
+
+@pytest.mark.asyncio
+async def test_loop_waits_for_a_civilised_hour():
+    """No recap at midnight the moment the month rolls over."""
+    db = _RecapFakeDB(
+        stats_rows=[{"name": "Matt", "n": 10}], quotes_count=1,
+        saved=[("Matt", "quote")], longs=[("Matt", "long message here yep")],
+        pool=[("Matt", "hi")], eligible=(100,),
+    )
+    bot = SimpleNamespace(send_message=AsyncMock())
+    settings = _settings()
+    await mr._maybe_post(bot, db, _openai(), settings,
+                         now=datetime(2026, 8, 1, 0, 30, tzinfo=settings.tzinfo))
+    bot.send_message.assert_not_awaited()
+    assert not db.stamped
+
+
+@pytest.mark.asyncio
+async def test_loop_stamps_on_permanent_send_failure():
+    """A chat the bot was kicked from must stop costing an AI call hourly."""
+    from aiogram.exceptions import TelegramForbiddenError
+
+    db = _RecapFakeDB(
+        stats_rows=[{"name": "Matt", "n": 10}], quotes_count=1,
+        saved=[("Matt", "quote")], longs=[("Matt", "long message here yep")],
+        pool=[("Matt", "hi")], eligible=(100,),
+    )
+    bot = SimpleNamespace(send_message=AsyncMock(
+        side_effect=TelegramForbiddenError(
+            method=SimpleNamespace(), message="Forbidden: bot was kicked")))
+    settings = _settings()
+    await mr._maybe_post(bot, db, _openai(), settings,
+                         now=datetime(2026, 8, 2, 10, 0, tzinfo=settings.tzinfo))
+    assert db.stamped            # stamped despite the failed send
+
+
+@pytest.mark.asyncio
+async def test_loop_does_not_stamp_on_transient_send_failure():
+    db = _RecapFakeDB(
+        stats_rows=[{"name": "Matt", "n": 10}], quotes_count=1,
+        saved=[("Matt", "quote")], longs=[("Matt", "long message here yep")],
+        pool=[("Matt", "hi")], eligible=(100,),
+    )
+    bot = SimpleNamespace(send_message=AsyncMock(side_effect=RuntimeError("blip")))
+    settings = _settings()
+    await mr._maybe_post(bot, db, _openai(), settings,
+                         now=datetime(2026, 8, 2, 10, 0, tzinfo=settings.tzinfo))
+    assert not db.stamped        # retries next tick

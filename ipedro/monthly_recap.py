@@ -18,11 +18,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timezone
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
 from ipedro.bot_messages import track
 from ipedro.config import Settings
@@ -85,7 +85,7 @@ async def _fetch_stats(db: Database, chat_id: int, start_utc, end_utc) -> RecapS
           LEFT JOIN users u ON u.user_id = m.user_id
          WHERE m.chat_id = $1 AND m.role = 'user'
            AND m.created_at >= $2 AND m.created_at < $3
-         GROUP BY u.user_id, u.first_name, u.last_name, u.username
+         GROUP BY m.user_id, u.first_name, u.last_name, u.username
          ORDER BY n DESC
         """,
         chat_id, start_utc, end_utc,
@@ -273,8 +273,14 @@ async def _stamp(db: Database, chat_id: int, prev_first: date) -> None:
 
 async def _maybe_post(
     bot: Bot, db: Database, openai: OpenAIClient, settings: Settings,
+    now: datetime | None = None,
 ) -> None:
-    today = datetime.now(settings.tzinfo).date()
+    now = now or datetime.now(settings.tzinfo)
+    if now.hour < 9:
+        # Don't post a recap at midnight the moment the month rolls over —
+        # wait for a civilised local hour.
+        return
+    today = now.date()
     _label, prev_first, _cur_first, _s, _e = _prev_month_bounds(today, settings.tzinfo)
     for chat_id in await _eligible_chats(db, prev_first):
         try:
@@ -291,10 +297,15 @@ async def _maybe_post(
                 chat_id, text, disable_notification=is_silenced(chat_id),
             )
             track(chat_id, sent.message_id, text)
-            await _stamp(db, chat_id, prev_first)
             log.info("monthly recap posted in chat %s (%s).", chat_id, result.month_label)
+        except (TelegramForbiddenError, TelegramBadRequest) as exc:
+            # Permanent failure (kicked/blocked): stamp anyway so this chat
+            # stops costing 4 queries + an AI call every hour for 45 days.
+            log.warning("monthly-recap undeliverable for %s (stamping): %s", chat_id, exc)
         except Exception as exc:  # pragma: no cover - defensive
-            log.warning("monthly-recap send failed for %s: %s", chat_id, exc)
+            log.warning("monthly-recap send failed for %s (will retry): %s", chat_id, exc)
+            continue
+        await _stamp(db, chat_id, prev_first)
 
 
 async def run_monthly_recap_loop(

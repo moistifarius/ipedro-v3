@@ -2,8 +2,9 @@
 
 - Confession surfacing: every ~1h, with low probability, pick an unsurfaced
   confession and post it into a random known chat.
-- Yearly retrospective: when the date is Dec 31 (UTC) and a chat hasn't
-  had a retrospective yet this year, post one.
+- Yearly retrospective: when the LOCAL date (settings.tzinfo) is Dec 31
+  and a chat hasn't had a retrospective yet this year, post one.
+- Daily fortune: once per local day per opted-in chat.
 """
 
 from __future__ import annotations
@@ -11,11 +12,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from datetime import datetime, timezone
+from datetime import datetime
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
 from ipedro.bot_messages import track
+from ipedro.config import Settings
 from ipedro.db.pool import Database
 from ipedro.openai_client import OpenAIClient
 from ipedro.prompts import FORTUNE_PROMPT, YEAR_RETRO_PROMPT
@@ -60,9 +63,9 @@ async def _maybe_surface_confession(bot: Bot, db: Database) -> None:
 
 
 async def _maybe_yearly_retro(
-    bot: Bot, db: Database, openai: OpenAIClient,
+    bot: Bot, db: Database, openai: OpenAIClient, settings: Settings,
 ) -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(settings.tzinfo)
     if now.month != 12 or now.day != 31:
         return
     year = now.year
@@ -97,23 +100,27 @@ async def _maybe_yearly_retro(
                 disable_notification=is_silenced(chat_id),
             )
             track(chat_id, sent.message_id, text)
-            await db.execute(
-                "INSERT INTO chat_state (chat_id, last_retrospective_year) "
-                "VALUES ($1, $2) "
-                "ON CONFLICT (chat_id) DO UPDATE "
-                "SET last_retrospective_year = EXCLUDED.last_retrospective_year",
-                chat_id, year,
-            )
-            log.info("Posted %d retrospective in chat %s.", year, chat_id)
+        except (TelegramForbiddenError, TelegramBadRequest) as exc:
+            # Permanent (kicked/blocked/bad chat): stamp anyway so we stop
+            # burning a 600-token AI call on this chat every hour.
+            log.warning("Retro undeliverable for %s (stamping): %s", chat_id, exc)
         except Exception as exc:  # pragma: no cover
-            log.warning("Retro send failed for %s: %s", chat_id, exc)
+            log.warning("Retro send failed for %s (will retry): %s", chat_id, exc)
+            continue
+        await db.execute(
+            "INSERT INTO chat_state (chat_id, last_retrospective_year) "
+            "VALUES ($1, $2) "
+            "ON CONFLICT (chat_id) DO UPDATE "
+            "SET last_retrospective_year = EXCLUDED.last_retrospective_year",
+            chat_id, year,
+        )
 
 
 async def _maybe_daily_fortune(
-    bot: Bot, db: Database, openai: OpenAIClient,
+    bot: Bot, db: Database, openai: OpenAIClient, settings: Settings,
 ) -> None:
-    """Once per UTC day per opted-in chat, post a short fortune."""
-    today = datetime.now(timezone.utc).date()
+    """Once per LOCAL day per opted-in chat, post a short fortune."""
+    today = datetime.now(settings.tzinfo).date()
     chats = await db.fetch(
         "SELECT c.chat_id FROM chats c "
         "JOIN chat_config cfg ON cfg.chat_id = c.chat_id "
@@ -136,27 +143,32 @@ async def _maybe_daily_fortune(
                 disable_notification=is_silenced(chat_id),
             )
             track(chat_id, sent.message_id, text)
-            await db.execute(
-                "INSERT INTO chat_state (chat_id, last_fortune_date) "
-                "VALUES ($1, $2) "
-                "ON CONFLICT (chat_id) DO UPDATE "
-                "SET last_fortune_date = EXCLUDED.last_fortune_date",
-                chat_id, today,
-            )
-            log.info("Fortune posted in chat %s.", chat_id)
+        except (TelegramForbiddenError, TelegramBadRequest) as exc:
+            # Permanent failure: stamp anyway so a chat the bot was kicked
+            # from stops costing an AI call every hour, forever.
+            log.warning("Fortune undeliverable for %s (stamping): %s", chat_id, exc)
         except Exception as exc:  # pragma: no cover
-            log.warning("Fortune send failed for %s: %s", chat_id, exc)
+            log.warning("Fortune send failed for %s (will retry): %s", chat_id, exc)
+            continue
+        await db.execute(
+            "INSERT INTO chat_state (chat_id, last_fortune_date) "
+            "VALUES ($1, $2) "
+            "ON CONFLICT (chat_id) DO UPDATE "
+            "SET last_fortune_date = EXCLUDED.last_fortune_date",
+            chat_id, today,
+        )
 
 
 async def run_ambient_loops(
-    bot: Bot, db: Database, openai: OpenAIClient, stop: asyncio.Event,
+    bot: Bot, db: Database, openai: OpenAIClient, settings: Settings,
+    stop: asyncio.Event,
 ) -> None:
     log.info("Ambient loops running.")
     while not stop.is_set():
         try:
             await _maybe_surface_confession(bot, db)
-            await _maybe_yearly_retro(bot, db, openai)
-            await _maybe_daily_fortune(bot, db, openai)
+            await _maybe_yearly_retro(bot, db, openai, settings)
+            await _maybe_daily_fortune(bot, db, openai, settings)
             wait = _TICK_SECONDS
         except Exception as exc:
             log.exception("Ambient loop iteration failed: %s", exc)
