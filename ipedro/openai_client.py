@@ -432,8 +432,25 @@ class AIClient:
             return None
 
     # ----------------------------------------------------------- embeddings (OpenAI only)
-    @retry(**_OPENAI_RETRY)  # type: ignore[arg-type]
     async def embed(
+        self, text: str, *, chat_id: int | None = None,
+    ) -> list[float] | None:
+        """Embed ``text``; never raises.
+
+        Transient failures retry inside ``_embed_with_retry``; whatever
+        survives exhaustion (tenacity's RetryError — the retry config has
+        reraise=False — or a non-retryable APIError like a 429) is
+        converted to None here so callers (memory/store.py record paths)
+        degrade gracefully.
+        """
+        try:
+            return await self._embed_with_retry(text, chat_id=chat_id)
+        except Exception as exc:
+            log.warning("Embedding final failure: %s", exc)
+            return None
+
+    @retry(**_OPENAI_RETRY)  # type: ignore[arg-type]
+    async def _embed_with_retry(
         self, text: str, *, chat_id: int | None = None,
     ) -> list[float] | None:
         if self._openai is None:
@@ -455,6 +472,10 @@ class AIClient:
                 prompt_tokens=pt, cost_usd=(pt / 1000) * rate,
             )
             return list(resp.data[0].embedding)
+        except OpenAIAPIError:
+            # Let tenacity's @retry see this and retry; the wrapping
+            # embed() catches whatever survives exhaustion.
+            raise
         except Exception as exc:
             log.warning("OpenAI embedding error: %s", exc)
             return None

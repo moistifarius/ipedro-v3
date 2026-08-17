@@ -247,7 +247,12 @@ async def build_context(
         # '[⏳ … later]' marker folded into its content (a system message
         # can't carry positional meaning — the Claude normalizer hoists
         # all system turns out of order — so it must live in the content).
+        # Rendering happens oldest-first (gap markers need the chronological
+        # neighbour), but the budget is applied NEWEST-first: when tokens
+        # run out it's the oldest turns that fall off, not the fresh
+        # context the model actually needs to answer.
         recent = await store.recent_messages(chat_id, settings.context_recent_messages)
+        rendered: list[dict[str, Any]] = []
         prev_ts: datetime | None = None
         for m in recent:
             role = _role_for(m)
@@ -259,8 +264,22 @@ async def build_context(
             if marker:
                 content = f"{marker}\n{content}"
             prev_ts = _aware(m.created_at)
-            if not _add({"role": role, "content": content}):
+            rendered.append({"role": role, "content": content})
+        kept: list[dict[str, Any]] = []
+        for msg in reversed(rendered):
+            cost = count_tokens(msg["content"])
+            if used + cost > budget:
                 break
+            kept.append(msg)
+            used += cost
+        if len(kept) < len(rendered):
+            log.debug(
+                "Context budget truncated recent history for chat %s: "
+                "dropped %d oldest of %d message(s).",
+                chat_id, len(rendered) - len(kept), len(rendered),
+            )
+        kept.reverse()  # back to chronological order
+        messages.extend(kept)
 
     # 6. Ensure the conversation ends with a user message containing the
     # current input. When memory is enabled the just-recorded user

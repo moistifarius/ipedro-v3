@@ -22,7 +22,3 @@ def count_tokens(text: str) -> int:
         # ~4 chars per token is a reasonable rough estimate.
         return max(1, len(text) // 4)
     return len(_ENC.encode(text))
-
-
-def count_messages_tokens(messages: list[dict]) -> int:
-    return sum(count_tokens(m.get("content", "")) for m in messages)

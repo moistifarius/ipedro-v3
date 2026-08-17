@@ -72,14 +72,25 @@ async def maybe_summarize(
             messages=msg_block,
         ),
         max_tokens=400,
+        chat_id=chat_id,
     )
-    if summary_text:
-        await store.add_summary(chat_id, summary_text, batch[-1].id)
-        log.info("Stored new summary for chat %s covering up to msg %s.", chat_id, batch[-1].id)
+    if not summary_text:
+        # No summary → covers_until_id doesn't advance, so this SAME batch
+        # re-triggers on the next message. Extracting facts anyway would
+        # re-insert identical facts on every pass (the facts table has no
+        # unique constraint) — skip the whole pass and retry next time.
+        log.warning(
+            "Summarizer returned no text for chat %s; skipping fact "
+            "extraction until the batch summarizes.", chat_id,
+        )
+        return
+    await store.add_summary(chat_id, summary_text, batch[-1].id)
+    log.info("Stored new summary for chat %s covering up to msg %s.", chat_id, batch[-1].id)
 
     # Extract durable facts in the same pass.
     facts_text = await openai.short_completion(
         FACT_EXTRACT_PROMPT.format(messages=msg_block), max_tokens=200,
+        chat_id=chat_id,
     )
     log.info("Fact extraction for chat %s returned: %r", chat_id, facts_text)
     if facts_text and facts_text.strip().upper() != "NONE":
@@ -132,6 +143,7 @@ async def force_summarize(
                 messages=msg_block,
             ),
             max_tokens=400,
+            chat_id=chat_id,
         )
         new_summary_id: int | None = None
         if summary_text:
@@ -143,6 +155,7 @@ async def force_summarize(
         facts_added: list[str] = []
         facts_text = await openai.short_completion(
             FACT_EXTRACT_PROMPT.format(messages=msg_block), max_tokens=200,
+            chat_id=chat_id,
         )
         log.info("Fact extraction for chat %s returned: %r", chat_id, facts_text)
         if facts_text and facts_text.strip().upper() != "NONE":

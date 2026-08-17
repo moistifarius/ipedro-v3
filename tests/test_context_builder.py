@@ -157,6 +157,38 @@ async def test_token_budget_caps_output():
 
 
 @pytest.mark.asyncio
+async def test_budget_truncation_drops_oldest_keeps_newest_in_order():
+    """When the budget can't hold all recent messages, the OLDEST must
+    fall off — not the newest (regression: the loop used to add
+    oldest-first and break when the budget ran out, so exactly the fresh
+    messages the model needed were the ones dropped). Survivors stay in
+    chronological order."""
+    s = _settings()
+    s.context_max_tokens = 250
+    old_blob = "old stuff that should be dropped " * 30  # ~240+ tokens each
+    store = FakeStore(recent=[
+        _msg(old_blob, "user", mid=1),
+        _msg(old_blob, "user", mid=2),
+        _msg("recent alpha", "user", mid=3),
+        _msg("recent beta", "user", mid=4),
+    ])
+    built = await build_context(
+        store=store, settings=s, chat_id=1,
+        persona="dude", persona_custom="Test persona.",
+        latest_user_text="recent beta", latest_user_name="Matt",
+    )
+    convo = [m["content"] for m in built.messages if m["role"] != "system"]
+    # The newest messages survived…
+    assert "Matt: recent alpha" in convo
+    assert "Matt: recent beta" in convo
+    # …the oldest were the ones dropped…
+    assert all("old stuff" not in c for c in convo)
+    # …and the kept tail is back in chronological order, within budget.
+    assert convo.index("Matt: recent alpha") < convo.index("Matt: recent beta")
+    assert built.tokens <= s.context_max_tokens
+
+
+@pytest.mark.asyncio
 async def test_custom_persona_takes_precedence():
     store = FakeStore(recent=[_msg("hi")])
     built = await build_context(

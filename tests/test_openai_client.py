@@ -102,6 +102,51 @@ async def test_embed_returns_none_for_empty_text():
     assert out is None
 
 
+class _FlakyEmbeddings:
+    """Fails once with the given error, then succeeds."""
+
+    def __init__(self, exc):
+        self._exc = exc
+        self.calls = 0
+
+    async def create(self, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise self._exc
+        return _FakeEmbeddingResponse([0.5, 0.6])
+
+
+@pytest.mark.asyncio
+async def test_embed_retries_transient_connection_error():
+    """A retryable error (connection drop) must actually reach tenacity's
+    @retry — the old blanket `except Exception: return None` swallowed it
+    on the first attempt so the decorator never fired."""
+    from openai import APIConnectionError
+
+    class _ConnError(APIConnectionError):
+        def __init__(self):  # skip the SDK's required httpx request arg
+            pass
+
+    client = OpenAIClient(api_key="x", text_provider="openai")
+    flaky = _FlakyEmbeddings(_ConnError())
+    client._client.embeddings = flaky
+    out = await client.embed("hello")
+    assert out == [0.5, 0.6]
+    assert flaky.calls == 2  # first attempt failed, retry succeeded
+
+
+@pytest.mark.asyncio
+async def test_embed_swallows_unexpected_errors_without_retry():
+    """A non-API error isn't transient — no retry, and embed still returns
+    None instead of raising (callers in memory/store.py rely on that)."""
+    flaky = _FlakyEmbeddings(RuntimeError("boom"))
+    client = OpenAIClient(api_key="x", text_provider="openai")
+    client._client.embeddings = flaky
+    out = await client.embed("hello")
+    assert out is None
+    assert flaky.calls == 1
+
+
 # ----------------------------------------------------------------- TTS / speech
 class _FakeSpeechContent:
     """Mimics the binary speech response that exposes ``.content``."""
