@@ -72,6 +72,7 @@ def _rt_with(
         duckhunt_enabled=duckhunt_enabled, memory_enabled=False,
         voice_transcribe=False, response_policy="always",
         ambient_probability=0.0, persona="dude", persona_custom=None,
+        automod_enabled=True,
     )
     chats = SimpleNamespace(
         upsert_chat=AsyncMock(),

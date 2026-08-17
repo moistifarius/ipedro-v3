@@ -1007,6 +1007,7 @@ def build_router(rt: Runtime) -> Router:
             "ducknames": ("duck_names_public", not cfg.duck_names_public),
             "onthisday": ("on_this_day_enabled", not cfg.on_this_day_enabled),
             "monthlyrecap": ("monthly_recap_enabled", not cfg.monthly_recap_enabled),
+            "automod": ("automod_enabled", not cfg.automod_enabled),
         }
         if field in toggles:
             col, new_val = toggles[field]
@@ -1099,6 +1100,7 @@ def _config_wizard_header(cfg, target_chat_id: int, *, is_dm_scoped: bool) -> st
         f"   {on if cfg.duck_names_public else off} duck-names public\n"
         f"   {on if cfg.on_this_day_enabled else off} on-this-day"
         f"   {on if cfg.monthly_recap_enabled else off} monthly-recap\n"
+        f"   {on if cfg.automod_enabled else off} automod\n"
     )
 
 
@@ -1183,6 +1185,10 @@ def _config_keyboard(cfg, *, target_chat_id: int) -> InlineKeyboardMarkup:
         [
             b(f"🗓️ Monthly recap: {on if cfg.monthly_recap_enabled else off}",
               "monthlyrecap"),
+        ],
+        [
+            b(f"🤖 Automod bits: {on if cfg.automod_enabled else off}",
+              "automod"),
         ],
         [
             b("commands", "policy:commands"),

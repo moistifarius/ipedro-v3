@@ -622,7 +622,9 @@ def build_router(rt: Runtime) -> Router:
         # 'stonks' → the actual image). Fixed intercept; skip the AI reply.
         # Not written to memory — canned bits aren't conversational context.
         automod = (
-            _automod_response(text) if cfg.response_policy != "commands" else None
+            _automod_response(text)
+            if cfg.automod_enabled and cfg.response_policy != "commands"
+            else None
         )
         if automod is not None:
             if isinstance(automod, MediaResponse):

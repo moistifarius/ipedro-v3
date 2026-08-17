@@ -345,6 +345,41 @@ async def test_media_send_failure_falls_back_to_text(monkeypatch):
     msg.reply.assert_awaited_with("fell back", disable_notification=True)
 
 
+# ── the per-chat kill switch (chat.py gate) ──────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_automod_disabled_chat_gets_no_canned_reply():
+    from ipedro.handlers.chat import build_router
+    from tests.test_captcha_intercept import _msg, _rt_with
+
+    rt = _rt_with()
+    kenobi = "General Kenobi! You are a bold one. ⚔️"
+
+    rt.chats.get_config.return_value.automod_enabled = True
+    router = build_router(rt)
+    handler = next(h.callback for h in router.observers["message"].handlers
+                   if h.callback.__name__ == "on_message")
+    msg = _msg(text="hello there")
+    await handler(msg)
+    assert any(c.args[0] == kenobi for c in msg.reply.await_args_list)
+
+    # Disabled: same trigger text produces no canned reply. (Policy 'mention'
+    # so the fall-through stops at should_respond instead of the AI pipeline,
+    # which this stub doesn't model — automod itself fires under 'mention'.)
+    cfg = rt.chats.get_config.return_value
+    cfg.automod_enabled = False
+    cfg.response_policy = "mention"
+    msg2 = _msg(text="hello there")
+    await handler(msg2)
+    msg2.reply.assert_not_awaited()
+
+    # sanity: under 'mention' policy the canned reply DOES fire when enabled
+    cfg.automod_enabled = True
+    msg3 = _msg(text="hello there")
+    await handler(msg3)
+    assert any(c.args[0] == kenobi for c in msg3.reply.await_args_list)
+
+
 # ── boundaries & misc ────────────────────────────────────────────────────────
 
 def test_word_boundaries_hold():

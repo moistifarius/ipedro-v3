@@ -373,6 +373,11 @@ ALTER TABLE chat_config
 ALTER TABLE chat_state
     ADD COLUMN IF NOT EXISTS last_monthly_recap DATE;
 
+-- AutoMod canned responses (keyword -> copypasta / meme media). On by
+-- default; the per-chat kill switch for when the bit gets old.
+ALTER TABLE chat_config
+    ADD COLUMN IF NOT EXISTS automod_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+
 -- Generic key/value store for global tunables (e.g. the master Pedro prompt).
 CREATE TABLE IF NOT EXISTS kv_store (
     key        TEXT PRIMARY KEY,
