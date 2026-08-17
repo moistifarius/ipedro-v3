@@ -1,4 +1,4 @@
-"""AI command handlers: /a /askai /aigen /aiedit /aivar /aitranslate /beneficiality /catfact."""
+"""AI command handlers: /a /askai /aigen /aitranslate /beneficiality /catfact."""
 
 from __future__ import annotations
 
@@ -10,8 +10,6 @@ from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, Message
 
 from ipedro.handlers.common import catify, fallback_cat_fact, get_or_create_chat_config
-from ipedro.memory.context_builder import build_context
-from ipedro.memory.summarizer import maybe_summarize
 from ipedro.prompts import (
     BENEFICIALITY_PROMPT, CAT_FACT_PROMPT,
 )
@@ -57,23 +55,6 @@ def build_router(rt: Runtime) -> Router:
         await msg.reply_photo(
             BufferedInputFile(data, filename="aigen.png"),
             caption=prompt[:1000],
-            disable_notification=True,
-        )
-
-    @r.message(Command("aiedit"))
-    async def aiedit(msg: Message) -> None:
-        await msg.reply(
-            "Image editing requires an SDK-supported model and a mask. "
-            "This command is preserved but not currently wired to a backend. "
-            "Use /aigen for now.",
-            disable_notification=True,
-        )
-
-    @r.message(Command("aivar"))
-    async def aivar(msg: Message) -> None:
-        await msg.reply(
-            "Image variation requires an SDK-supported model. "
-            "Preserved for compatibility; not currently wired. Use /aigen.",
             disable_notification=True,
         )
 
@@ -137,7 +118,7 @@ def build_router(rt: Runtime) -> Router:
                 "Set a field: /chat_config <field> <value>\n"
                 "  policy     commands|mention|reply|ambient|always\n"
                 "  ambient    <0.0-1.0>\n"
-                "  persona    dude|neutral|<free-form>\n"
+                "  persona    dude|pedro|neutral, or <name> <prompt text> for custom\n"
                 "  duckhunt   on|off\n"
                 "  sharephoto on|off\n"
                 "  comic      on|off\n"
@@ -179,13 +160,24 @@ def build_router(rt: Runtime) -> Router:
                 await msg.reply("Invalid ambient probability.", disable_notification=True)
                 return
         elif field == "persona":
-            updates["persona"] = raw
             # Custom personas via the remaining argument tail.
             tail = (msg.text or "").split(None, 3)
-            if raw not in ("dude", "pedro", "neutral") and len(tail) == 4:
-                updates["persona_custom"] = tail[3]
-            elif raw in ("dude", "pedro", "neutral"):
+            if raw in ("dude", "pedro", "neutral"):
+                updates["persona"] = raw
                 updates["persona_custom"] = None
+            elif len(tail) == 4:
+                updates["persona"] = raw
+                updates["persona_custom"] = tail[3]
+            else:
+                # Unknown key with no custom text would silently resolve
+                # to the default prompt — refuse instead of lying "Updated."
+                await msg.reply(
+                    f"Unknown persona '{raw}'. Use dude, pedro, or neutral — "
+                    "or supply the custom prompt text after the name:\n"
+                    "/chat_config persona <name> <prompt text>",
+                    disable_notification=True,
+                )
+                return
         elif field == "duckhunt":
             updates["duckhunt_enabled"] = raw.lower() in ("on", "true", "1", "yes")
         elif field in ("sharephoto", "share_photo"):

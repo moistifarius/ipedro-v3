@@ -30,7 +30,7 @@ from ipedro.handlers.command_catalog import (
     commands_in_category,
 )
 from ipedro.handlers.common import require_admin
-from ipedro.kv import kv_delete, kv_get, kv_set
+from ipedro.kv import kv_delete, kv_set
 from ipedro.logging_setup import recent_log_lines
 from ipedro.memory.summarizer import force_summarize
 from ipedro.memory.tokens import count_tokens
@@ -470,8 +470,11 @@ _KNOWN_OPENAI_TEXT_MODELS: tuple[str, ...] = (
 
 
 # Pending custom-value entries for the /duckstats_edit "Set to custom…"
-# button. Keyed by admin user_id → (chat_id, user_id, field, ts).
-_PENDING_CUSTOM_VALUES: dict[int, tuple[int, int, str, float]] = {}
+# button. Keyed by admin user_id →
+# (chat_id, user_id, field, ts, source_chat_id) where source_chat_id is
+# the chat the "Send me the new value" prompt was shown in (the admin
+# DM) — only a plain message typed in that same chat is captured.
+_PENDING_CUSTOM_VALUES: dict[int, tuple[int, int, str, float, int]] = {}
 _CUSTOM_VALUE_TTL = 60.0  # seconds
 
 
@@ -479,10 +482,16 @@ def _has_parked_value(msg: "Message") -> bool:
     """Predicate for the custom-value DM handler.
 
     True only when (a) the sender has a parked entry, (b) the entry is
-    fresh (within ``_CUSTOM_VALUE_TTL``), and (c) the message is plain
-    text (no leading slash). When the entry has aged past the TTL we
-    drop it here so the message keeps propagating to the regular chat
-    router instead of being captured by a stale 'custom value' reply.
+    fresh (within ``_CUSTOM_VALUE_TTL``), (c) the message is plain
+    text (no leading slash), and (d) the message arrives in the same
+    chat where the value was parked. Without (d) an admin who tapped
+    "Set to custom…" in their DM and then chatted in a GROUP within the
+    TTL would have that group message swallowed and applied as a stat.
+    When the entry has aged past the TTL we drop it here so the message
+    keeps propagating to the regular chat router instead of being
+    captured by a stale 'custom value' reply. A wrong-chat message does
+    NOT pop the entry — the admin can still finish the flow where it
+    began.
     """
     if msg.from_user is None or msg.text is None:
         return False
@@ -492,9 +501,11 @@ def _has_parked_value(msg: "Message") -> bool:
     entry = _PENDING_CUSTOM_VALUES.get(uid)
     if entry is None:
         return False
-    _, _, _, ts = entry
+    _, _, _, ts, source_chat_id = entry
     if time.time() - ts > _CUSTOM_VALUE_TTL:
         _PENDING_CUSTOM_VALUES.pop(uid, None)
+        return False
+    if msg.chat is None or msg.chat.id != source_chat_id:
         return False
     return True
 
@@ -816,7 +827,6 @@ def build_router(rt: Runtime) -> Router:
                 disable_notification=True,
             )
             return
-        body = "\n".join(lines)
         # Telegram caps a single message at 4096 chars; chunk and send.
         chunks: list[str] = []
         buf = ""
@@ -1090,6 +1100,7 @@ def build_router(rt: Runtime) -> Router:
                 ambient_probability=s.default_ambient_probability,
                 persona=s.default_persona,
                 duckhunt_enabled=s.duckhunt_enabled_by_default,
+                share_photo_enabled=s.share_photo_enabled_by_default,
             )
         body = _config_wizard_header(cfg, target_chat_id, is_dm_scoped=True)
         kb = _config_keyboard(cfg, target_chat_id=target_chat_id)
@@ -1853,8 +1864,8 @@ def build_router(rt: Runtime) -> Router:
             if doc is None:
                 await msg.reply(
                     "Send the new prompt as a .txt file and either caption "
-                    "it `/master_prompt setfile` or reply to the file with "
-                    "`/master_prompt setfile`.",
+                    "it /master_prompt setfile or reply to the file with "
+                    "/master_prompt setfile.",
                     disable_notification=True,
                 )
                 return
@@ -3146,18 +3157,22 @@ def build_router(rt: Runtime) -> Router:
             if cb.from_user is None:
                 await cb.answer("Can't identify caller.", show_alert=True)
                 return
+            if cb.message is None:
+                # Without the prompt message we don't know which chat to
+                # listen in — refuse to park rather than capture blindly.
+                await cb.answer(_expired("duckstats_edit"), show_alert=True)
+                return
             _PENDING_CUSTOM_VALUES[cb.from_user.id] = (
-                chat_id, user_id, field, time.time(),
+                chat_id, user_id, field, time.time(), cb.message.chat.id,
             )
-            if cb.message:
-                try:
-                    await cb.message.edit_text(
-                        f"Send me the new value for `{field}` as your "
-                        "next message. I'll wait up to 60 seconds. "
-                        "(Send a non-number to cancel.)",
-                    )
-                except TelegramBadRequest:
-                    pass
+            try:
+                await cb.message.edit_text(
+                    f"Send me the new value for {field} as your "
+                    "next message. I'll wait up to 60 seconds. "
+                    "(Send a non-number to cancel.)",
+                )
+            except TelegramBadRequest:
+                pass
             await cb.answer()
             return
 
@@ -3227,7 +3242,7 @@ def build_router(rt: Runtime) -> Router:
         entry = _PENDING_CUSTOM_VALUES.pop(msg.from_user.id, None)
         if entry is None:
             return
-        chat_id, user_id, field, ts = entry
+        chat_id, user_id, field, ts, _source_chat_id = entry
         if time.time() - ts > _CUSTOM_VALUE_TTL:
             await msg.reply(
                 _expired("duckstats_edit"), disable_notification=True,

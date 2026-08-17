@@ -31,8 +31,6 @@ HELP_TEXT_PUBLIC = (
     "AI:\n"
     "/a, /askai, /ask <q> - quick AI answer (no memory write)\n"
     "/aigen, /generate <prompt> - generate an image\n"
-    "/aiedit <prompt> - edit a replied-to image (placeholder)\n"
-    "/aivar - variation of a replied-to image (placeholder)\n"
     "/aitranslate - translate a replied-to voice note\n"
     "/catfact - dubious cat fact\n"
     "/beneficiality - score whether I'd butt in right now\n"

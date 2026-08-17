@@ -77,8 +77,14 @@ COMMANDS: tuple[Command, ...] = (
             "Show or change this chat's settings (slash form)."),
     Command("config",       "basics", "/config",
             "/config",
-            "Inline-keyboard settings wizard for this chat.",
+            "Inline-keyboard settings wizard. From this menu it opens the "
+            "chat picker first (same as /config_for); run /config inside a "
+            "chat to configure that chat directly.",
             action="mgm:chats:config"),
+    Command("manage",       "basics", "/manage",
+            "/manage",
+            "This hub — every admin function, categorized (admin, DM).",
+            action="mgm:top"),
 
     # ── AI ───────────────────────────────────────────────────────────────
     Command("a",            "ai", "/a, /askai, /ask",
@@ -87,12 +93,6 @@ COMMANDS: tuple[Command, ...] = (
     Command("aigen",        "ai", "/aigen, /generate",
             "/aigen <prompt>",
             "Generate an image."),
-    Command("aiedit",       "ai", "/aiedit",
-            "/aiedit <prompt>",
-            "Edit a replied-to image (placeholder)."),
-    Command("aivar",        "ai", "/aivar",
-            "/aivar",
-            "Variation of a replied-to image (placeholder)."),
     Command("aitranslate",  "ai", "/aitranslate",
             "/aitranslate",
             "Translate a replied-to voice note."),
@@ -133,7 +133,7 @@ COMMANDS: tuple[Command, ...] = (
     Command("meme",         "ai", "/meme",
             "/meme top text | bottom text",
             "Generate a meme image."),
-    Command("redditmeme",   "ai", "/redditmeme",
+    Command("redditmeme",   "ai", "/redditmeme, /rmeme",
             "/redditmeme [topic]  (or /rmeme)",
             "No topic: a post from Reddit's r/popular. With a topic: search "
             "Reddit for a relevant meme. Caption is the post's top comment. "
@@ -142,8 +142,8 @@ COMMANDS: tuple[Command, ...] = (
             "/ether <text> | /ether (reply to voice)",
             "Transmit a message as staticky shortwave-voice into another "
             "ether-tuned chat."),
-    Command("tests",        "ai", "/tests",
-            "/tests  (or /quiz)",
+    Command("tests",        "ai", "/tests, /quiz, /quizzes",
+            "/tests  (or /quiz, /quizzes)",
             "Menu of personality tests — tap one to take it. Each is a picture "
             "per question, tap the scale, scored profile + result card + "
             "Retake. Based on validated, cited scales; for fun, not diagnoses."),
@@ -161,6 +161,15 @@ COMMANDS: tuple[Command, ...] = (
     Command("bigfive",      "ai", "/bigfive",
             "/bigfive  (or /personality)",
             "Your OCEAN personality profile (Ten-Item Personality Inventory)."),
+    Command("disgustboard", "ai", "/disgustboard",
+            "/disgustboard  (or /ickboard)",
+            "This chat's disgust-test leaderboard."),
+    Command("darktriadboard","ai", "/darktriadboard",
+            "/darktriadboard  (or /villainboard)",
+            "This chat's dark-triad leaderboard."),
+    Command("foodboard",    "ai", "/foodboard",
+            "/foodboard  (or /pickyboard)",
+            "This chat's food-neophobia leaderboard."),
     Command("quiz_warmup",  "ai", "/quiz_warmup",
             "/quiz_warmup  (admin, DM)",
             "Pre-generate & cache every quiz's question illustrations so the "
@@ -271,6 +280,10 @@ COMMANDS: tuple[Command, ...] = (
     Command("memory_facts", "memory", "/memory_facts",
             "/memory_facts [chat_id]",
             "Browse stored facts for a chat.",
+            action="mgm:memory:facts"),
+    Command("facts_chat",   "memory", "/facts_chat",
+            "/facts_chat",
+            "Legacy alias for /memory_facts (chat picker).",
             action="mgm:memory:facts"),
     Command("memory_facts_all", "memory", "/memory_facts_all",
             "/memory_facts_all",
