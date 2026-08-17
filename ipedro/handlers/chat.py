@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import random
@@ -200,13 +201,6 @@ async def _reply_automod_media(msg: Message, media: MediaResponse) -> None:
         track(msg.chat.id, sent.message_id, media.caption)
 
 
-def _bot_username(rt: Runtime) -> str | None:
-    me = getattr(rt.bot, "_me", None)
-    if me and getattr(me, "username", None):
-        return me.username
-    return None
-
-
 def _has_bot_mention(msg: Message, bot_username: str | None) -> bool:
     if not msg.text:
         return False
@@ -289,6 +283,27 @@ async def _record_bot_turn(rt: Runtime, cfg, chat_id: int, text: str) -> None:
         log.info("meme-turn memory record failed for %s: %s", chat_id, exc)
 
 
+async def _hunt_with_indicator(rt: Runtime, chat_id: int, coro):
+    """Await a slow meme hunt while keeping the chat-action indicator alive.
+
+    Telegram shows "sending a photo..." for ~5s per send_chat_action; a
+    judged hunt can take 30-60s, leaving the chat looking dead. Re-send
+    the action every ~4s until the hunt completes."""
+    async def _pulse() -> None:
+        while True:
+            await asyncio.sleep(4)
+            try:
+                await rt.bot.send_chat_action(chat_id, "upload_photo")
+            except Exception:  # indicator is cosmetic; never kill the hunt
+                pass
+
+    task = asyncio.create_task(_pulse())
+    try:
+        return await coro
+    finally:
+        task.cancel()
+
+
 async def _meme_subject(rt: Runtime, msg: Message, cfg, topic: str) -> str:
     """Resolve the subject for a meme: the explicit topic, else the first
     query distilled from the conversation ('' if nothing usable)."""
@@ -369,10 +384,10 @@ async def _handle_meme_request(
         # Explicit subject — judged search; a dry result (including the
         # judge deciding nothing found is a relevant MEME) is an honest
         # miss, not a cue to post something random.
-        meme = await find_relevant_meme(
+        meme = await _hunt_with_indicator(rt, msg.chat.id, find_relevant_meme(
             rt.openai, [topic], topic_label=topic,
             chat_id=msg.chat.id, **finder_creds,
-        )
+        ))
         if meme is None:
             miss = (
                 f"Sh-sha. Swept the feeds for “{topic}” — nothing usable. "
@@ -393,10 +408,10 @@ async def _handle_meme_request(
                 "meme request: derived queries %r for chat %s",
                 queries, msg.chat.id,
             )
-            meme = await find_relevant_meme(
+            meme = await _hunt_with_indicator(rt, msg.chat.id, find_relevant_meme(
                 rt.openai, queries, topic_label=queries[0],
                 chat_id=msg.chat.id, **finder_creds,
-            )
+            ))
         if meme is None:
             meme = await fetch_meme(**creds)
             if meme is None:
@@ -653,22 +668,39 @@ def build_router(rt: Runtime) -> Router:
         # AI reply so the bot doesn't both fact and chat. Meme requests
         # win though — "meme about cats" wants a meme, not a cat fact —
         # and any message that says 'meme' is left for the meme intercept
-        # (with its AI fallback) to evaluate.
-        if _mentions_cat(text) and _MEME_WORD_RE.search(text) is None:
+        # (with its AI fallback) to evaluate. Respects the commands-only
+        # opt-out; deliberately NOT gated on automod_enabled — that kill
+        # switch covers exactly the canned-response table, and cat facts
+        # are a separate ambient feature.
+        if (
+            cfg.response_policy != "commands"
+            and _mentions_cat(text)
+            and _MEME_WORD_RE.search(text) is None
+        ):
             await rt.bot.send_chat_action(msg.chat.id, "typing")
             fact = await rt.openai.cheap_completion(CAT_FACT_PROMPT, max_tokens=120)
             reply_text = catify(fact or fallback_cat_fact())
             sent = await msg.reply(reply_text, disable_notification=True)
             track(msg.chat.id, sent.message_id, reply_text)
+            # Post-send bookkeeping must never bubble: the user already saw
+            # the reply, so a DB hiccup here would only leave the turn out
+            # of history AND crash the handler (same spirit as
+            # _record_bot_turn, which we can't reuse — it drops message_id).
             if cfg.memory_enabled:
-                await rt.memory.record_message(
-                    chat_id=msg.chat.id,
-                    role="assistant",
-                    content=reply_text,
-                    message_id=sent.message_id,
-                    user_id=None,
-                )
-                await maybe_summarize(rt.memory, rt.openai, rt.settings, msg.chat.id)
+                try:
+                    await rt.memory.record_message(
+                        chat_id=msg.chat.id,
+                        role="assistant",
+                        content=reply_text,
+                        message_id=sent.message_id,
+                        user_id=None,
+                    )
+                    await maybe_summarize(rt.memory, rt.openai, rt.settings, msg.chat.id)
+                except Exception as exc:
+                    log.warning(
+                        "post-send memory record failed for %s: %s",
+                        msg.chat.id, exc,
+                    )
             return
 
         incoming = IncomingMessage(
@@ -790,14 +822,23 @@ def build_router(rt: Runtime) -> Router:
         sent = await msg.answer(reply, disable_notification=True)
         track(msg.chat.id, sent.message_id, reply)
 
+        # Post-send: never let a DB hiccup crash the handler after the user
+        # already saw the reply — log it and move on (else stored history
+        # shows the bot ignoring the user, and the model learns from that).
         if cfg.memory_enabled:
-            await rt.memory.record_message(
-                chat_id=msg.chat.id,
-                role="assistant",
-                content=reply,
-                message_id=sent.message_id,
-                user_id=None,
-            )
-            await maybe_summarize(rt.memory, rt.openai, rt.settings, msg.chat.id)
+            try:
+                await rt.memory.record_message(
+                    chat_id=msg.chat.id,
+                    role="assistant",
+                    content=reply,
+                    message_id=sent.message_id,
+                    user_id=None,
+                )
+                await maybe_summarize(rt.memory, rt.openai, rt.settings, msg.chat.id)
+            except Exception as exc:
+                log.warning(
+                    "post-send memory record failed for %s: %s",
+                    msg.chat.id, exc,
+                )
 
     return r
