@@ -24,7 +24,7 @@ from ipedro.impersonate import (
     ("pretend to be Luke", "Luke"),
     ("pretend you're luke", "luke"),
     ("write like Matt", "Matt"),
-    ("be Luke", "Luke"),
+    ("become Matt", "Matt"),
     ("channel Liz", "Liz"),
 ])
 def test_detect_extracts_name(text, expected):
@@ -47,6 +47,15 @@ def test_detect_ignores_non_requests(text):
 def test_detect_strips_article_and_trailing_clause():
     assert detect_impersonation_request("act like a Luke, it's funny") == "Luke"
     assert detect_impersonation_request("talk like the Sarah!") == "Sarah"
+
+
+@pytest.mark.parametrize("text", [
+    "be nice",
+    "be mat",                # would prefix-match a member named Matt
+    "be quiet please",
+])
+def test_detect_bare_be_is_not_a_trigger(text):
+    assert detect_impersonation_request(text) is None
 
 
 # ───────────────────────────── matching ───────────────────────────────────
@@ -147,6 +156,19 @@ async def test_resolve_pipeline_no_request_returns_none():
 async def test_resolve_pipeline_unknown_member_returns_none():
     db = _FakeDB(members=[Member(1, "Luke", "Luke", None)], samples={1: ["hi"] * 5})
     assert await resolve_impersonation(db, 1, "act like Gandalf") is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_pipeline_bare_be_does_not_hijack():
+    # "be mat" / "be nice" must not impersonate a member named Matt.
+    db = _FakeDB(
+        members=[Member(4, "Matt", "Matt", "matt")],
+        samples={4: ["yo", "lol", "nah", "fr", "wild"]},
+    )
+    assert await resolve_impersonation(db, 1, "be mat") is None
+    assert await resolve_impersonation(db, 1, "just be nice") is None
+    # "become Matt" is still an explicit request.
+    assert await resolve_impersonation(db, 1, "become Matt") is not None
 
 
 @pytest.mark.asyncio

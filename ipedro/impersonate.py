@@ -50,13 +50,14 @@ _PRETEND_RE = re.compile(
     r"\bpretend\s+(?:to\s+be|(?:you|u)\s*(?:'?re|\s+are))\s+(.+)",
     re.IGNORECASE,
 )
-# The bread-and-butter triggers — name is AFTER the trigger phrase. "be" and
-# "become" are intentionally loose; the member-resolution step gates out
-# false positives like "be quiet".
+# The bread-and-butter triggers — name is AFTER the trigger phrase. Bare
+# "be" is deliberately NOT a trigger: member matching is prefix-based, so
+# ordinary phrases like "be nice" / "be mat" would hijack into impersonating
+# a member (e.g. Matt). "become" is unambiguous enough to keep.
 _TRIGGER_RE = re.compile(
     r"\b(?:act|talk|speak|sound|write|reply|respond|type)\s+(?:like|as)\s+(.+)"
     r"|\b(?:impersonate|imitate|channel|emulate|mimic)\s+(.+)"
-    r"|\b(?:be|become)\s+(.+)",
+    r"|\bbecome\s+(.+)",
     re.IGNORECASE,
 )
 
@@ -92,7 +93,7 @@ def detect_impersonation_request(text: str | None) -> str | None:
             continue
         name = _LEADING_ARTICLE_RE.sub("", name.strip()).strip()
         # Trim trailing punctuation / connective tail ("luke, please").
-        name = re.split(r"[,.!?;:]", name, 1)[0].strip()
+        name = re.split(r"[,.!?;:]", name, maxsplit=1)[0].strip()
         # Peel off politeness/filler tails, repeatedly.
         prev = None
         while name and name != prev:

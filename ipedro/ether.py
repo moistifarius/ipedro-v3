@@ -21,7 +21,6 @@ human-triggered.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import random
 from dataclasses import dataclass

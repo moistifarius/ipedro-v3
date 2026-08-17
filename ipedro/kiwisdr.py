@@ -44,7 +44,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-import struct
 import time
 import urllib.parse
 from typing import Optional

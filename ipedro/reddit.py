@@ -479,7 +479,7 @@ def detect_meme_request(text: str | None) -> str | None:
     topic = (m.group("topic") or "").strip()
     # Trim at clause boundaries (commas included — "about cats, and also…"),
     # then peel politeness/time filler.
-    topic = re.split(r"[,?!.;:]", topic, 1)[0].strip()
+    topic = re.split(r"[,?!.;:]", topic, maxsplit=1)[0].strip()
     prev = None
     while topic and topic != prev:
         prev = topic
@@ -827,35 +827,6 @@ async def meme_for_post(
         headers=headers, timeout=timeout, follow_redirects=True,
     ) as client:
         return await _meme_from_post(client, base, json_suffix, post)
-
-
-async def fetch_meme_about(
-    topic: str,
-    rng: random.Random | None = None,
-    *,
-    timeout: float = 12.0,
-    user_agent: str | None = None,
-    client_id: str = "",
-    client_secret: str = "",
-) -> Meme | None:
-    """Search Reddit for a meme about ``topic`` and return it with its top
-    comment. Thin composition of search_meme_candidates + meme_for_post —
-    picks among the first few hits so repeat asks vary. The smarter
-    multi-source, AI-judged path lives in ipedro.meme_finder; this remains
-    the simple no-AI variant."""
-    topic = (topic or "").strip()
-    if not topic:
-        return None
-    r = rng or random
-    creds = dict(
-        timeout=timeout, user_agent=user_agent,
-        client_id=client_id, client_secret=client_secret,
-    )
-    candidates = await search_meme_candidates(topic, **creds)
-    if not candidates:
-        return None
-    post = r.choice(candidates)
-    return await meme_for_post(post, **creds)
 
 
 async def diagnose(
