@@ -2,25 +2,92 @@
 
 Keyword -> canned reply, in the spirit of the r/shitposting AutoModerator.
 First match wins; this is consulted before the normal AI reply. Each response
-is either a single string or a tuple of strings (one picked at random).
+is one of:
+  - a single string,
+  - a tuple of strings (one picked at random),
+  - a MediaResponse (the actual meme image/GIF, fetched by URL and sent as
+    a photo/animation; falls back to `fallback` text if the fetch or the
+    send fails).
 
 `_AUTOMOD_TRIGGERS` IS THE WHOLE EXTENSION POINT — add a (regex, response) row.
 
-Design notes:
-- Every pattern is anchored with word boundaries / lookarounds so common words
-  don't trip a wall of text (e.g. 'ratio' vs 'aspect ratio', standalone 'nl').
+House rules (enforced by tests/test_automod.py):
+- NO ECHOES. The bot never just repeats the trigger phrase back with an
+  emoji — every response is a continuation, punchline, retort, copypasta,
+  or the actual meme media. If a bit has no good non-echo response, it
+  doesn't get a row.
+- Every pattern is anchored with word boundaries / lookarounds so common
+  words don't trip a wall of text (e.g. 'ratio' vs 'aspect ratio').
 - Patterns use only simple alternations and bounded quantifiers — no nested
   quantifiers — so there is no catastrophic-backtracking (ReDoS) risk.
-- The one-time serious case ('kys') is deliberately NOT played straight; it
-  returns a deflection that never instructs self-harm. See `_KYS_LINES`.
-- Responses are static constants: no user input is ever interpolated, so there
-  is no injection surface.
+- The one-time serious case ('kys') gets a deflection that never instructs
+  self-harm. See `_KYS_LINES`.
+- Responses are static constants: no user input is ever interpolated.
+- Media URLs are pinned to stable hosts (imgflip templates, KYM entry icons,
+  giphy/tenor media) and were content-verified when added. A dead URL only
+  costs the image: the text fallback still fires.
 """
 
 from __future__ import annotations
 
+import logging
 import random
 import re
+from typing import NamedTuple
+
+import httpx
+
+log = logging.getLogger(__name__)
+
+
+class MediaResponse(NamedTuple):
+    """An automod reply that is an actual meme image ('photo') or GIF ('gif')."""
+
+    kind: str          # "photo" | "gif"
+    url: str           # pinned direct media URL (https)
+    caption: str       # sent with the media; also the tracked snippet
+    fallback: str      # text reply used when fetching/sending the media fails
+
+
+# In-process cache of fetched media bytes. The URL set is small and fixed
+# (~16 templates, ~10MB total worst case), so a plain dict is plenty.
+_MEDIA_CACHE: dict[str, bytes] = {}
+_MEDIA_TIMEOUT = 10.0
+_MEDIA_MAX_BYTES = 10_000_000
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+
+async def fetch_automod_media(media: MediaResponse) -> bytes | None:
+    """Download (and cache) the bytes for a MediaResponse. None on any failure."""
+    cached = _MEDIA_CACHE.get(media.url)
+    if cached is not None:
+        return cached
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True, timeout=_MEDIA_TIMEOUT,
+            headers={"User-Agent": _UA},
+        ) as client:
+            async with client.stream("GET", media.url) as resp:
+                resp.raise_for_status()
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if total > _MEDIA_MAX_BYTES:
+                        log.info("automod media too large: %s", media.url)
+                        return None
+                    chunks.append(chunk)
+        data = b"".join(chunks)
+        if data:
+            _MEDIA_CACHE[media.url] = data
+            return data
+    except Exception as exc:
+        log.info("automod media fetch failed %s: %s", media.url, exc)
+    return None
+
 
 # ── 'gay' → a fixed copypasta bit. Matches the standalone word only. ──────────
 _GAY_RE = re.compile(r"\bgays?\b", re.IGNORECASE)
@@ -155,17 +222,92 @@ _JACKDAW_PASTA = (
     "It's okay to just admit you're wrong, you know?"
 )
 
-# 'rizz' → one of a few interchangeable brainrot bits.
+# 'rizz' → interchangeable brainrot bits (none of them echo the word alone).
 _RIZZ_LINES = (
-    "W rizz 😤",
-    "unspoken rizz detected",
+    "unspoken rizz detected 🕴️",
     "certified rizzler moment",
+    "rizz level: unemployed",
 )
+
+# 'let him cook' → for/against, at random.
+_COOK_LINES = (
+    "*hands him the apron* 🧑‍🍳",
+    "he is NOT cooking. someone check the kitchen. 🚒",
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Media responses — the actual meme, verified content at pin time.
+# ─────────────────────────────────────────────────────────────────────────────
+_M_PIKACHU = MediaResponse(
+    "photo", "https://i.imgflip.com/2kbn1e.jpg",
+    "⚡", "*surprised Pikachu face* ⚡")
+_M_STONKS = MediaResponse(
+    "photo",
+    "https://i.kym-cdn.com/entries/icons/facebook/000/029/959/"
+    "Screen_Shot_2019-06-05_at_1.26.32_PM.jpg",
+    "📈", "📈 line goes up.")
+_M_PIGEON = MediaResponse(
+    "photo", "https://i.imgflip.com/1o00in.jpg",
+    "🦋", "🦋 is this a bug report?")
+_M_SAME_PICTURE = MediaResponse(
+    "photo", "https://i.imgflip.com/2za3u1.jpg",
+    "corporate needs you to find the differences between this picture "
+    "and this picture",
+    "corporate needs you to find the differences between this picture "
+    "and this picture. 📷 (it's the same picture.)")
+_M_HONEST_WORK = MediaResponse(
+    "photo", "https://i.kym-cdn.com/entries/icons/mobile/000/028/021/work.jpg",
+    "🌾", "🌾 Dave Brandt would be proud.")
+_M_SCIENTIST = MediaResponse(
+    "photo", "https://i.imgflip.com/27qxmb.jpg",
+    "🧪", "🧪 *Green Goblin cackling*")
+_M_DOUBT = MediaResponse(
+    "photo",
+    "https://i.kym-cdn.com/entries/icons/facebook/000/023/021/"
+    "e02e5ffb5f980cd8262cf7f0ae00a4a9_press-x-to-doubt-memes-memesuper-"
+    "la-noire-doubt-meme_419-238.jpg",
+    "🤨", "[X] Doubt 🤨")
+_M_WEDNESDAY = MediaResponse(
+    "photo",
+    "https://i.kym-cdn.com/entries/icons/facebook/000/020/016/"
+    "wednesdaymydudeswide.jpg",
+    "my dudes", "AAAAAAAAAAAAAA 🐸")
+_M_YOU_DIED = MediaResponse(
+    "photo",
+    "https://i.kym-cdn.com/entries/icons/facebook/000/029/198/"
+    "Dark_Souls_You_Died_Screen_-_Completely_Black_Screen_0-2_screenshot.jpg",
+    "bonfire ahead. try jumping.", "bonfire ahead. try jumping. 💀")
+_M_GIGACHAD = MediaResponse(
+    "photo",
+    "https://i.kym-cdn.com/photos/images/facebook/001/896/218/7d4.png",
+    "average iPedro enjoyer", "🗿")
+_M_MORDOR = MediaResponse(
+    "photo", "https://i.imgflip.com/1bij.jpg",
+    "🌋", "...walk into Mordor. 🌋")
+_M_RICKROLL = MediaResponse(
+    "gif", "https://media.giphy.com/media/Vuw9m5wXviFIQ/giphy.gif",
+    "never gonna let you down 🕺",
+    "never gonna let you down. never gonna run around and desert you. 🕺")
+_M_ROAD_WORK = MediaResponse(
+    "gif", "https://media1.tenor.com/m/la1OiXDLU4AAAAAd/road-work-ahead-vine.gif",
+    "uh yeah, I sure hope it does",
+    "uh yeah, I sure hope it does. 🚧")
+_M_HASTA = MediaResponse(
+    "gif", "https://media1.tenor.com/m/b2NZhgvJEUIAAAAd/terminator-okay.gif",
+    "👍", "*thumbs up, sinking into molten steel* 👍")
+_M_ZA_WARUDO = MediaResponse(
+    "gif", "https://media1.tenor.com/m/vqZK76FJbMYAAAAd/dio-time-stop.gif",
+    "TOKI YO TOMARE ⏱️", "*time stops for exactly nine seconds* ⏱️")
+_M_WHY_RUNNING = MediaResponse(
+    "gif", "https://media.tenor.com/1lUzcGrjPiwAAAAM/twgcf-jjkneko.gif",
+    "🏃", "*gun jams* 🏃")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # The trigger table. First match wins.
 # ─────────────────────────────────────────────────────────────────────────────
-_AUTOMOD_TRIGGERS: tuple[tuple["re.Pattern[str]", "str | tuple[str, ...]"], ...] = (
+_AUTOMOD_TRIGGERS: tuple[
+    tuple["re.Pattern[str]", "str | tuple[str, ...] | MediaResponse"], ...
+] = (
     # --- kys stays first: it must win over any joke trigger in the message ---
     (re.compile(r"\bkys\b|(kill|neck)\s*(your|my|ur|yr)\s*self", re.IGNORECASE),
      _KYS_LINES),
@@ -183,207 +325,197 @@ _AUTOMOD_TRIGGERS: tuple[tuple["re.Pattern[str]", "str | tuple[str, ...]"], ...]
     (re.compile(r"\blinux\b", re.IGNORECASE), _GNU_LINUX_PASTA),
     (re.compile(r"\bjackdaw\b", re.IGNORECASE), _JACKDAW_PASTA),
 
-    # --- short shitpost / brainrot one-liners ---
+    # --- the actual meme, as media ---
+    (re.compile(r"\bsurprised pikachu\b", re.IGNORECASE), _M_PIKACHU),
+    (re.compile(r"\bstonks\b", re.IGNORECASE), _M_STONKS),
+    (re.compile(r"\bis this a pigeon\b", re.IGNORECASE), _M_PIGEON),
+    (re.compile(r"\bsame picture\b", re.IGNORECASE), _M_SAME_PICTURE),
+    (re.compile(r"\bhonest work\b", re.IGNORECASE), _M_HONEST_WORK),
+    (re.compile(r"\bscientist myself\b", re.IGNORECASE), _M_SCIENTIST),
+    (re.compile(r"\bx to doubt\b", re.IGNORECASE), _M_DOUBT),
+    (re.compile(r"\bit'?s wednesday\b", re.IGNORECASE), _M_WEDNESDAY),
+    (re.compile(r"\byou died\b", re.IGNORECASE), _M_YOU_DIED),
+    (re.compile(r"\bgigachad\b", re.IGNORECASE), _M_GIGACHAD),
+    (re.compile(r"\bone does not simply\b", re.IGNORECASE), _M_MORDOR),
+    (re.compile(r"\bnever gonna give you up\b", re.IGNORECASE), _M_RICKROLL),
+    (re.compile(r"\broad work ahead\b", re.IGNORECASE), _M_ROAD_WORK),
+    (re.compile(r"\bhasta la vista\b", re.IGNORECASE), _M_HASTA),
+    (re.compile(r"\bza warudo\b", re.IGNORECASE), _M_ZA_WARUDO),
+    (re.compile(r"\bwhy are you running\b", re.IGNORECASE), _M_WHY_RUNNING),
+
+    # --- shitpost / brainrot one-liners (retorts & continuations only) ---
     (re.compile(r"\bbased\b", re.IGNORECASE), "Based? Based on what?"),
     (re.compile(r"\bsneed\b", re.IGNORECASE), "Formerly Chuck's."),
     (re.compile(r"\btrans rights\b", re.IGNORECASE),
      "🏳️‍⚧️ trans rights are human rights."),
     (re.compile(r"\bnl\b", re.IGNORECASE), "Never lucky."),
     (re.compile(r"\bcopium\b", re.IGNORECASE), _COPIUM_LINES),
-    (re.compile(r"\bmorb(?:ius|in|ing)\b", re.IGNORECASE), "It's Morbin' Time."),
-    (re.compile(r"\bskibidi\b", re.IGNORECASE), "skibidi bop bop yes yes 🚽"),
-    (re.compile(r"\bohio\b", re.IGNORECASE), "only in Ohio 💀"),
-    (re.compile(r"\bsigma\b", re.IGNORECASE), "what the sigma?"),
+    (re.compile(r"\bmorb(?:ius|in|ing)\b", re.IGNORECASE),
+     "*starts morbing* 🦇"),
+    (re.compile(r"\bskibidi\b", re.IGNORECASE), "bop bop bop bop yes yes 🚽"),
+    (re.compile(r"\bohio\b", re.IGNORECASE),
+     "you can't leave. it's Ohio. 💀"),
+    (re.compile(r"\bsigma\b", re.IGNORECASE), "sigma balls. 🥷"),
     (re.compile(r"\brizz\b", re.IGNORECASE), _RIZZ_LINES),
     (re.compile(r"\bwe live in a society\b", re.IGNORECASE),
      "🃏 we live in one. gamers, rise up."),
     (re.compile(r"\bmitochondria\b", re.IGNORECASE),
      "the powerhouse of the cell 🔬"),
-    (re.compile(r"\breduced to atoms\b", re.IGNORECASE),
-     "Gone. Reduced to atoms. ⚛️"),
+    (re.compile(r"\breduced to atoms\b", re.IGNORECASE), "*snaps fingers* 🫰"),
     (re.compile(r"\bnarwhal bacons\b", re.IGNORECASE), "🦄 ...at midnight."),
+    (re.compile(r"\bgyat+\b", re.IGNORECASE), "level 10 gyatt detected 🚨"),
+    (re.compile(r"\bfanum tax\b", re.IGNORECASE), "not the fanum tax 💀"),
+    (re.compile(r"\blet (?:him|her|them) cook\b", re.IGNORECASE), _COOK_LINES),
+    (re.compile(r"\breddit moment\b", re.IGNORECASE), "🤓 erm, ackshually"),
+    (re.compile(r"\bdeez nuts\b", re.IGNORECASE), "Ha! Got 'em. 🥜"),
+    (re.compile(r"\bok boomer\b", re.IGNORECASE), "ok zoomer 👵"),
+    (re.compile(r"\btask failed successfully\b", re.IGNORECASE),
+     "🪟 Error: The operation completed successfully."),
+    (re.compile(r"\btook that personally\b", re.IGNORECASE),
+     "*wins six championships about it* 🐐"),
+    (re.compile(r"\bmodern problems\b", re.IGNORECASE),
+     "...require modern solutions. 🧠"),
+    (re.compile(r"\bfollow the damn train\b", re.IGNORECASE),
+     "ah shit, here we go again. 🚂"),
 
-    # --- Star Wars ---
+    # --- Star Wars / Star Trek ---
     (re.compile(r"\bhello there\b", re.IGNORECASE),
      "General Kenobi! You are a bold one. ⚔️"),
     (re.compile(r"\bhigh ground\b", re.IGNORECASE),
      "It's over, Anakin. I have the high ground!"),
     (re.compile(r"\bi love democracy\b", re.IGNORECASE),
-     "I love democracy. I love the Republic. 🌌"),
+     "somehow, Palpatine returned. 👑"),
     (re.compile(r"\byou were the chosen one\b", re.IGNORECASE),
      "You were supposed to destroy the Sith, not join them!"),
     (re.compile(r"\bthis is where the fun begins\b", re.IGNORECASE),
-     "This is where the fun begins. 🚀"),
+     "*spins* ...that's a good trick. 🌀"),
+    (re.compile(r"\bi am your father\b", re.IGNORECASE), "NOOOOOOO!"),
+    (re.compile(r"\bthere is no try\b", re.IGNORECASE), "Do. Or do not. 🐸"),
+    (re.compile(r"\black of faith\b", re.IGNORECASE), "*force-chokes* 🖤"),
+    (re.compile(r"\bthese aren'?t the droids\b", re.IGNORECASE),
+     "move along. move along. 👋"),
+    (re.compile(r"\bthis is the way\b", re.IGNORECASE), "I have spoken. 🪖"),
+    (re.compile(r"\blive long and prosper\b", re.IGNORECASE),
+     "🖖 peace and long life."),
+    (re.compile(r"\bresistance is futile\b", re.IGNORECASE),
+     "You will be assimilated. 🤖"),
 
-    # --- Lord of the Rings ---
-    (re.compile(r"\bone does not simply\b", re.IGNORECASE),
-     "...walk into Mordor. 🌋"),
-    (re.compile(r"\byou shall not pass\b", re.IGNORECASE), "🧙 YOU SHALL NOT PASS!"),
-    (re.compile(r"\band my axe\b", re.IGNORECASE), "And my bow! ...And my axe! 🪓"),
-    (re.compile(r"\bfly,?\s+you fools\b", re.IGNORECASE), "Fly, you fools! 🧙"),
+    # --- LOTR ---
+    (re.compile(r"\byou shall not pass\b", re.IGNORECASE), "None shall pass. 🐴"),
+    (re.compile(r"\band my axe\b", re.IGNORECASE),
+     "You have my sword. And my bow. 🏹"),
+    (re.compile(r"\bfly,?\s+you fools\b", re.IGNORECASE),
+     "*eagle screech in the distance* 🦅"),
 
     # --- The Office ---
     (re.compile(r"\bhow the turntables\b", re.IGNORECASE),
-     "Well, well, well. How the turntables..."),
+     "*looks directly into the camera* 📷"),
     (re.compile(r"\bthat'?s what she said\b", re.IGNORECASE),
-     "That's what she said. 😏"),
+     "— Michael Scott, probably 📎"),
     (re.compile(r"\bbears\.?\s*beets\b", re.IGNORECASE),
-     "Bears. Beets. Battlestar Galactica."),
+     "Battlestar Galactica. 🐻"),
     (re.compile(r"\bidentity theft\b", re.IGNORECASE),
      "Identity theft is not a joke, Jim! Millions of families suffer every "
      "year! 📠"),
 
-    # --- video games ---
-    (re.compile(r"\bwar never changes\b", re.IGNORECASE),
-     "War. War never changes. ☢️"),
-    (re.compile(r"\bwould you kindly\b", re.IGNORECASE),
-     "A man chooses; a slave obeys. 🌊"),
-    (re.compile(r"\bfinally awake\b", re.IGNORECASE),
-     "Hey, you. You're finally awake. 🐴"),
-    (re.compile(r"\barrow (?:in|to) the knee\b", re.IGNORECASE),
-     "I used to be an adventurer like you. Then I took an arrow to the knee. 🏹"),
-    (re.compile(r"\bpraise the sun\b", re.IGNORECASE), r"\[T]/ Praise the Sun! ☀️"),
-    (re.compile(r"\byou died\b", re.IGNORECASE), "YOU DIED 💀"),
-    (re.compile(r"\bfinish him\b", re.IGNORECASE), "FINISH HIM! 🩸"),
-    (re.compile(r"\bbarrel roll\b", re.IGNORECASE), "Do a barrel roll! 🚀"),
-    (re.compile(r"\bdangerous to go alone\b", re.IGNORECASE),
-     "It's dangerous to go alone! Take this. 🗡️"),
-    (re.compile(r"\bobjection\b", re.IGNORECASE), "OBJECTION! ⚖️"),
-
-    # --- anime ---
-    (re.compile(r"\bover 9000\b", re.IGNORECASE),
-     "WHAT?! 9000?! There's no way that can be right! 🔥"),
-    (re.compile(r"\bjojo reference\b", re.IGNORECASE),
-     "Is this a JoJo reference?! 🕶️"),
-    (re.compile(r"\bnothing personnel\b", re.IGNORECASE),
-     "*teleports behind you* Nothing personnel, kid. 🌀"),
-    (re.compile(r"\bomae wa mou\b", re.IGNORECASE),
-     "お前はもう死んでいる。\n\nNANI?! 💥"),
-    (re.compile(r"\bplus ultra\b", re.IGNORECASE), "PLUS ULTRA! 💪"),
-
-    # --- other classics ---
-    (re.compile(r"\bthe cake is a lie\b", re.IGNORECASE), "The cake is a lie. 🎂"),
-    (re.compile(r"\bwhy so serious\b", re.IGNORECASE), "Why so serious? 🃏"),
-    (re.compile(r"\bwake me up inside\b", re.IGNORECASE), "(I can't wake up) 🎸"),
-    (re.compile(r"\bnever gonna give you up\b", re.IGNORECASE),
-     "Never gonna let you down. Never gonna run around and desert you. 🕺"),
-    (re.compile(r"\bsomebody once told me\b", re.IGNORECASE),
-     "the world is gonna roll me 🌍"),
-    (re.compile(r"\bogres are like onions\b", re.IGNORECASE),
-     "Ogres have layers. Onions have layers. 🧅"),
-    (re.compile(r"\bthis is a wendy'?s\b", re.IGNORECASE), "Sir, this is a Wendy's. 🍔"),
-    (re.compile(r"\bit'?s wednesday\b", re.IGNORECASE),
-     "It is Wednesday, my dudes. 🐸 AAAAAAAAAAAAAA"),
-    (re.compile(r"\bi also choose this guy\b", re.IGNORECASE),
-     "...and I also choose this guy's dead wife."),
-
-    # --- more Star Wars / Star Trek ---
-    (re.compile(r"\bi am your father\b", re.IGNORECASE), "No. I am your father. ⚡"),
-    (re.compile(r"\bthere is no try\b", re.IGNORECASE),
-     "Do. Or do not. There is no try. 🐸"),
-    (re.compile(r"\black of faith\b", re.IGNORECASE),
-     "I find your lack of faith disturbing. 🖤"),
-    (re.compile(r"\bthese aren'?t the droids\b", re.IGNORECASE),
-     "These aren't the droids you're looking for. 👋"),
-    (re.compile(r"\bthis is the way\b", re.IGNORECASE), "This is the Way. 🪖"),
-    (re.compile(r"\bhasta la vista\b", re.IGNORECASE), "Hasta la vista, baby. 🤖"),
-    (re.compile(r"\blive long and prosper\b", re.IGNORECASE),
-     "🖖 Live long and prosper."),
-    (re.compile(r"\bresistance is futile\b", re.IGNORECASE),
-     "Resistance is futile. You will be assimilated. 🤖"),
-
-    # --- more movies ---
-    (re.compile(r"\bhandle the truth\b", re.IGNORECASE),
+    # --- movies ---
+    (re.compile(r"\bi want the truth\b", re.IGNORECASE),
      "You can't handle the truth! ⚖️"),
     (re.compile(r"\bbox of chocolates\b", re.IGNORECASE),
-     "Life is like a box of chocolates. You never know what you're gonna get. 🍫"),
-    (re.compile(r"\byou talkin['g]? to me\b", re.IGNORECASE), "You talkin' to me? 🚕"),
+     "You never know what you're gonna get. 🍫"),
+    (re.compile(r"\byou talkin['g]? to me\b", re.IGNORECASE),
+     "Well, I'm the only one here. 🚕"),
     (re.compile(r"\bbigger boat\b", re.IGNORECASE),
-     "You're gonna need a bigger boat. 🦈"),
+     "🦈 duunnn dunnn... duuuunnnn duun."),
     (re.compile(r"\boffer (?:he|you) can'?t refuse\b", re.IGNORECASE),
-     "I'm gonna make him an offer he can't refuse. 🎻"),
+     "*a horse head appears in your bed* 🐴"),
     (re.compile(r"\bhouston,? we have a problem\b", re.IGNORECASE),
-     "Houston, we have a problem. 🚀"),
-    (re.compile(r"\bshow me the money\b", re.IGNORECASE), "SHOW ME THE MONEY! 💰"),
-    (re.compile(r"\bto infinity\b", re.IGNORECASE), "To infinity... and beyond! 🚀"),
-    (re.compile(r"\bjust keep swimming\b", re.IGNORECASE), "Just keep swimming. 🐠"),
+     "📡 Roger. Stand by, Apollo."),
+    (re.compile(r"\bto infinity\b", re.IGNORECASE), "AND BEYOND! 🚀"),
+    (re.compile(r"\bjust keep swimming\b", re.IGNORECASE),
+     "what do we do? we swim, swim. 🐠"),
     (re.compile(r"\bhakuna matata\b", re.IGNORECASE),
-     "Hakuna Matata! What a wonderful phrase 🦁"),
+     "what a wonderful phrase! 🦁"),
+    (re.compile(r"\bwhy so serious\b", re.IGNORECASE),
+     "let's put a smile on that face. 🃏"),
+    (re.compile(r"\bhandle the truth\b", re.IGNORECASE),
+     "*Colonel Jessep intensifies* ⚖️"),
 
     # --- Mean Girls & Vine ---
     (re.compile(r"\bmake fetch happen\b", re.IGNORECASE),
      "Stop trying to make fetch happen! It's not going to happen! 💅"),
     (re.compile(r"\bget in loser\b", re.IGNORECASE),
-     "Get in, loser. We're going shopping. 💅"),
+     "We're going shopping. 💅"),
     (re.compile(r"\bon wednesdays we wear pink\b", re.IGNORECASE),
-     "On Wednesdays we wear pink. 💗"),
+     "you can't sit with us! 💗"),
     (re.compile(r"\bthe limit does not exist\b", re.IGNORECASE),
-     "The limit does not exist! 📈"),
-    (re.compile(r"\broad work ahead\b", re.IGNORECASE),
-     "Road work ahead? Uh, yeah, I sure hope it does. 🚧"),
-    (re.compile(r"\bwhat are those\b", re.IGNORECASE), "WHAT ARE THOOOSE?! 👟"),
+     "...and just like that, the Mathletes win state. 📈"),
     (re.compile(r"\blook at all those chickens\b", re.IGNORECASE),
-     "WOAH. Look at all those chickens! 🐔"),
+     "🐔 (they were, in fact, geese)"),
     (re.compile(r"\bthey were roommates\b", re.IGNORECASE),
-     "and they were ROOMMATES 🏠 (oh my god they were roommates)"),
-    (re.compile(r"\bmy name is jeff\b", re.IGNORECASE), "...my name is Jeff. 🕶️"),
+     "oh my god, they were roommates. 🏠"),
 
-    # --- more video games ---
+    # --- video games ---
+    (re.compile(r"\bwar never changes\b", re.IGNORECASE),
+     "☢️ *vault door creaks open*"),
+    (re.compile(r"\bwould you kindly\b", re.IGNORECASE),
+     "A man chooses; a slave obeys. 🌊"),
+    (re.compile(r"\bfinally awake\b", re.IGNORECASE),
+     "you were trying to cross the border, right? 🐴"),
+    (re.compile(r"\barrow (?:in|to) the knee\b", re.IGNORECASE),
+     "I used to be an adventurer like you. Then I took an arrow to the knee. 🏹"),
+    (re.compile(r"\bpraise the sun\b", re.IGNORECASE), "\\[T]/ ☀️"),
+    (re.compile(r"\bfinish him\b", re.IGNORECASE), "FATALITY. 💀"),
+    (re.compile(r"\bfatality\b", re.IGNORECASE), "FLAWLESS VICTORY. 🥋"),
+    (re.compile(r"\bbarrel roll\b", re.IGNORECASE), "(press Z or R twice) 🚀"),
+    (re.compile(r"\bdangerous to go alone\b", re.IGNORECASE),
+     "take this. 🗡️"),
+    (re.compile(r"\bobjection\b", re.IGNORECASE), "OVERRULED. ⚖️"),
     (re.compile(r"\badditional pylons\b", re.IGNORECASE),
-     "You must construct additional pylons. 🔮"),
-    (re.compile(r"\bleeroy\b", re.IGNORECASE), "LEEEEEROY JENKINS! 🍗"),
-    (re.compile(r"\bfor the horde\b", re.IGNORECASE), "FOR THE HORDE! ⚔️"),
+     "not enough minerals. 🔮"),
+    (re.compile(r"\bleeroy\b", re.IGNORECASE),
+     "at least I have chicken. 🍗"),
+    (re.compile(r"\bfor the horde\b", re.IGNORECASE), "FOR THE ALLIANCE! ⚔️"),
     (re.compile(r"\banother castle\b", re.IGNORECASE),
      "Thank you Mario! But our princess is in another castle! 🍄"),
-    (re.compile(r"\bit'?s[- ]?a me\b", re.IGNORECASE), "It's-a me, Mario! 🍄"),
-    (re.compile(r"\bgotta go fast\b", re.IGNORECASE), "Gotta go fast! 💨"),
-    (re.compile(r"\bsuper effective\b", re.IGNORECASE), "It's super effective! ⚡"),
-    (re.compile(r"\bhadouken\b", re.IGNORECASE), "HADOUKEN! 🔥"),
-    (re.compile(r"\bfatality\b", re.IGNORECASE), "FATALITY. 💀"),
-    (re.compile(r"\bflawless victory\b", re.IGNORECASE), "FLAWLESS VICTORY 🥋"),
-    (re.compile(r"\bget over here\b", re.IGNORECASE), "GET OVER HERE! 🔗"),
-    (re.compile(r"\bgit gud\b", re.IGNORECASE), "git gud 🎮"),
-    (re.compile(r"\bdysentery\b", re.IGNORECASE), "You have died of dysentery. 🐂"),
-    (re.compile(r"\bpay respects\b", re.IGNORECASE), "Press F to pay respects. 🫡"),
+    (re.compile(r"\bit'?s[- ]?a me\b", re.IGNORECASE), "Mama mia! 🍄"),
+    (re.compile(r"\bsuper effective\b", re.IGNORECASE),
+     "*it's not very effective...* ⚡"),
+    (re.compile(r"\bhadouken\b", re.IGNORECASE), "SHORYUKEN! 🥊"),
+    (re.compile(r"\bget over here\b", re.IGNORECASE),
+     "*harpoon through the chest* 🔗"),
+    (re.compile(r"\bgit gud\b", re.IGNORECASE),
+     "git: 'gud' is not a git command. See 'git --help'."),
+    (re.compile(r"\bdysentery\b", re.IGNORECASE),
+     "You have died of dysentery. 🐂"),
+    (re.compile(r"\bpay respects\b", re.IGNORECASE), "F"),
 
-    # --- more anime ---
-    (re.compile(r"\bkamehameha\b", re.IGNORECASE), "KAAA-MEEE-HAAA-MEEE-HAAA! 💥"),
-    (re.compile(r"\bora ora\b", re.IGNORECASE), "ORA ORA ORA ORA! 🌟"),
-    (re.compile(r"\byare yare\b", re.IGNORECASE), "Yare yare daze... 🕶️"),
-    (re.compile(r"\bza warudo\b", re.IGNORECASE), "ZA WARUDO! ⏱️"),
+    # --- anime ---
+    (re.compile(r"\bover 9000\b", re.IGNORECASE),
+     "WHAT?! 9000?! There's no way that can be right! 🔥"),
+    (re.compile(r"\bjojo reference\b", re.IGNORECASE), "ゴゴゴゴ (menacing) 🕶️"),
+    (re.compile(r"\bnothing personnel\b", re.IGNORECASE),
+     "*teleports behind you* psh... heh... 🌀"),
+    (re.compile(r"\bomae wa mou\b", re.IGNORECASE), "NANI?! 💥"),
+    (re.compile(r"\bkamehameha\b", re.IGNORECASE), "*your scouter explodes* 💥"),
+    (re.compile(r"\bora ora\b", re.IGNORECASE), "MUDA MUDA MUDA! 🧛"),
+    (re.compile(r"\byare yare\b", re.IGNORECASE), "good grief. 🕶️"),
     (re.compile(r"\bkeikaku\b", re.IGNORECASE),
-     "Just as planned. (Keikaku means 'plan'.) 📝"),
-    (re.compile(r"\bdattebayo\b", re.IGNORECASE), "Believe it! 🍥"),
+     "just as planned. (TL note: keikaku means plan) 📝"),
+    (re.compile(r"\bdattebayo\b", re.IGNORECASE), "believe it! 🍥"),
 
-    # --- reaction memes & brainrot ---
-    (re.compile(r"\bsurprised pikachu\b", re.IGNORECASE),
-     "*surprised Pikachu face* ⚡"),
-    (re.compile(r"\bsame picture\b", re.IGNORECASE), "They're the same picture. 📷"),
-    (re.compile(r"\bis this a pigeon\b", re.IGNORECASE), "Is this a pigeon? 🦋"),
-    (re.compile(r"\btook that personally\b", re.IGNORECASE),
-     "And I took that personally. 🐐"),
-    (re.compile(r"\bhonest work\b", re.IGNORECASE),
-     "It ain't much, but it's honest work. 🌾"),
-    (re.compile(r"\bmodern problems\b", re.IGNORECASE),
-     "Modern problems require modern solutions. 🧠"),
-    (re.compile(r"\bfollow the damn train\b", re.IGNORECASE),
-     "All we had to do was follow the damn train, CJ! 🚂"),
-    (re.compile(r"\bwhy are you running\b", re.IGNORECASE),
-     "Why are you running?! Why are you running?! 🏃"),
-    (re.compile(r"\bscientist myself\b", re.IGNORECASE),
-     "I'm something of a scientist myself. 🧪"),
-    (re.compile(r"\bx to doubt\b", re.IGNORECASE), "[X] Doubt 🤨"),
-    (re.compile(r"\btask failed successfully\b", re.IGNORECASE),
-     "Task failed successfully. ✅"),
-    (re.compile(r"\bstonks\b", re.IGNORECASE), "📈 Stonks."),
-    (re.compile(r"\bok boomer\b", re.IGNORECASE), "ok boomer 👵"),
-    (re.compile(r"\bbazinga\b", re.IGNORECASE), "Bazinga. 🤓"),
-    (re.compile(r"\bgigachad\b", re.IGNORECASE), "🗿"),
-    (re.compile(r"\bgyat+\b", re.IGNORECASE), "GYATT 🍑"),
-    (re.compile(r"\bfanum tax\b", re.IGNORECASE), "not the fanum tax 💀"),
-    (re.compile(r"\blet him cook\b", re.IGNORECASE), "let him cook 🔥"),
-    (re.compile(r"\breddit moment\b", re.IGNORECASE), "reddit moment 🤓"),
-    (re.compile(r"\bdeez nuts\b", re.IGNORECASE), "Ha! Got 'em. 🥜"),
+    # --- other classics ---
+    (re.compile(r"\bthe cake is a lie\b", re.IGNORECASE),
+     "this was a triumph. I'm making a note here: HUGE SUCCESS. 🎂"),
+    (re.compile(r"\bwake me up inside\b", re.IGNORECASE), "(can't wake up) 🎸"),
+    (re.compile(r"\bsomebody once told me\b", re.IGNORECASE),
+     "the world is gonna roll me 🌍"),
+    (re.compile(r"\bogres are like onions\b", re.IGNORECASE),
+     "ogres have LAYERS. 🧅"),
+    (re.compile(r"\bthis is a wendy'?s\b", re.IGNORECASE),
+     "may I take your order? 🍔"),
+    (re.compile(r"\bi also choose this guy\b", re.IGNORECASE),
+     "...and I also choose this guy's dead wife. 💀"),
 
     # --- number jokes (kept last: most incidental) ---
     (re.compile(r"(?<!\d)69(?!\d)"), "nice"),
@@ -391,12 +523,16 @@ _AUTOMOD_TRIGGERS: tuple[tuple["re.Pattern[str]", "str | tuple[str, ...]"], ...]
 )
 
 
-def _automod_response(text: str | None, rng: random.Random | None = None) -> str | None:
+def _automod_response(
+    text: str | None, rng: random.Random | None = None,
+) -> "str | MediaResponse | None":
     """First matching AutoMod-style canned response for `text`, or None."""
     if not text:
         return None
     r = rng or random
     for pattern, response in _AUTOMOD_TRIGGERS:
         if pattern.search(text):
+            if isinstance(response, MediaResponse):
+                return response
             return response if isinstance(response, str) else r.choice(response)
     return None

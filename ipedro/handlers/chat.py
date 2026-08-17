@@ -17,7 +17,9 @@ from ipedro.duckhunt.captcha_gen import matches as captcha_matches
 from ipedro.duckhunt.debug_toggles import is_on as debug_is_on
 from ipedro.duckhunt.scoring import challenge_is_over_time, over_time_line
 from ipedro.duckhunt.verdicts import parse_verdict
-from ipedro.handlers.automod import _automod_response
+from ipedro.handlers.automod import (
+    MediaResponse, _automod_response, fetch_automod_media,
+)
 from ipedro.handlers.common import (
     catify, display_name, fallback_cat_fact, get_or_create_chat_config,
 )
@@ -168,6 +170,34 @@ def _challenge_is_stale(challenge) -> bool:
         created = created.replace(tzinfo=timezone.utc)
     age = (datetime.now(timezone.utc) - created).total_seconds()
     return age > _BEF_CHALLENGE_TTL_SECONDS
+
+
+async def _reply_automod_media(msg: Message, media: MediaResponse) -> None:
+    """Send an automod media response; fall back to its text on any failure."""
+    data = await fetch_automod_media(media)
+    sent = None
+    if data is not None:
+        try:
+            file = BufferedInputFile(
+                data,
+                filename="automod.gif" if media.kind == "gif" else "automod.jpg",
+            )
+            if media.kind == "gif":
+                sent = await msg.reply_animation(
+                    file, caption=media.caption, disable_notification=True,
+                )
+            else:
+                sent = await msg.reply_photo(
+                    file, caption=media.caption, disable_notification=True,
+                )
+        except Exception as exc:
+            log.warning("automod media send failed in %s: %s", msg.chat.id, exc)
+            sent = None
+    if sent is None:
+        sent = await msg.reply(media.fallback, disable_notification=True)
+        track(msg.chat.id, sent.message_id, media.fallback)
+    else:
+        track(msg.chat.id, sent.message_id, media.caption)
 
 
 def _bot_username(rt: Runtime) -> str | None:
@@ -588,15 +618,18 @@ def build_router(rt: Runtime) -> Router:
                 )
             return
 
-        # AutoModerator-style canned responses (e.g. 'gay' → the copypasta).
-        # Fixed intercept; skip the AI reply. Not written to memory — these are
-        # canned bits, not conversational context worth keeping.
+        # AutoModerator-style canned responses (e.g. 'gay' → the copypasta,
+        # 'stonks' → the actual image). Fixed intercept; skip the AI reply.
+        # Not written to memory — canned bits aren't conversational context.
         automod = (
             _automod_response(text) if cfg.response_policy != "commands" else None
         )
         if automod is not None:
-            sent = await msg.reply(automod, disable_notification=True)
-            track(msg.chat.id, sent.message_id, automod)
+            if isinstance(automod, MediaResponse):
+                await _reply_automod_media(msg, automod)
+            else:
+                sent = await msg.reply(automod, disable_notification=True)
+                track(msg.chat.id, sent.message_id, automod)
             return
 
         # Ambient emoji reaction (rare, never on commands or our own intercepts).
