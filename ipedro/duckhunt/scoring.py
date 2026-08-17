@@ -81,14 +81,6 @@ HOLIDAYS: dict[tuple[int, int], tuple[str, str]] = {
 }
 
 # Preserved for backwards compatibility; not consulted while rarity is off.
-HOLIDAY_WEIGHTS: tuple[tuple[str, float, int], ...] = (
-    ("common",    0.40, 1),
-    ("uncommon",  0.25, 3),
-    ("rare",      0.20, 7),
-    ("epic",      0.10, 15),
-    ("legendary", 0.05, 40),
-)
-
 # Chance any given spawn is upgraded to a boss duck.
 BOSS_SPAWN_CHANCE = 0.03
 
@@ -98,7 +90,7 @@ def current_holiday(today: date | None = None) -> tuple[str, str] | None:
     return HOLIDAYS.get((d.month, d.day))
 
 
-def boss_required_hits(rarity: str) -> int:
+def boss_required_hits() -> int:
     """Boss takes a fixed number of hits while rarity is neutralized."""
     return 3
 

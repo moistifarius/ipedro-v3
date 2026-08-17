@@ -75,7 +75,8 @@ def _bef_celebration_message(duck_id: int, new_friend_total: int) -> str:
         milestone = f" {new_friend_total} and counting."
     return (
         f"🤝 You made a friend! {flair}{milestone}\n"
-        f"Want to name them? Reply to this message with the name."
+        f"Want to name them? Reply to this message with the name "
+        f"(or /duckname {duck_id} <name> any time)."
     )
 
 
@@ -381,6 +382,15 @@ def build_router(rt: Runtime) -> Router:
 
     @r.message(Command("quackflag"))
     async def quackflag(msg: Message) -> None:
+        cfg = await get_or_create_chat_config(rt, msg)
+        if not cfg.duckhunt_enabled:
+            # Say the game is off, not "no duck" — the latter reads like
+            # bad luck rather than a disabled feature.
+            await msg.reply(
+                "Duckhunt is off in this chat (/chat_config duckhunt on).",
+                disable_notification=True,
+            )
+            return
         active = await rt.duckhunt.active_duck(msg.chat.id)
         if active:
             await msg.reply("Duck status: ACTIVE.", disable_notification=True)
@@ -389,9 +399,15 @@ def build_router(rt: Runtime) -> Router:
 
     @r.message(Command("duckstats"))
     async def duckstats(msg: Message) -> None:
-        await get_or_create_chat_config(rt, msg)
+        cfg = await get_or_create_chat_config(rt, msg)
         rows = await rt.duckhunt.leaderboard(msg.chat.id, limit=15)
         if not rows:
+            if not cfg.duckhunt_enabled:
+                await msg.reply(
+                    "Duckhunt is off in this chat (/chat_config duckhunt on).",
+                    disable_notification=True,
+                )
+                return
             await msg.reply("No duckhunt activity yet.", disable_notification=True)
             return
         lines = ["🦆 Duck Stats 🦆"]
@@ -445,7 +461,7 @@ def build_router(rt: Runtime) -> Router:
         if not rows and page == 1:
             await msg.reply(
                 "No named ducks anywhere yet. (Set one with "
-                "`/duckname <id> <name>` after a successful bef.)",
+                "/duckname <id> <name> after a successful bef.)",
                 disable_notification=True,
             )
             return
@@ -465,7 +481,7 @@ def build_router(rt: Runtime) -> Router:
             lines.append(f"  • {d['name']} — {d['owner']}")
         if last_pos < total:
             lines.append(f"\n+ {total - last_pos} more. "
-                         f"Try `/ducknames {page + 1}`.")
+                         f"Try /ducknames {page + 1}.")
         # Telegram caps outbound at 4096 chars; truncate defensively.
         await msg.reply("\n".join(lines)[:4000], disable_notification=True)
 
@@ -539,17 +555,17 @@ def build_router(rt: Runtime) -> Router:
         # outstanding captcha / trivia / recipe challenge, both bang and
         # ignore are blocked until they clear it. Without the gate the
         # bang handler would fire before the chat-router challenge
-        # intercept gets a look.
-        if action == "bang":
-            pending = await rt.duckhunt.get_bef_challenge(
-                msg.chat.id, msg.from_user.id,
+        # intercept gets a look (and 'ignore' would let them dismiss the
+        # duck without ever solving anything).
+        pending = await rt.duckhunt.get_bef_challenge(
+            msg.chat.id, msg.from_user.id,
+        )
+        if pending:
+            await msg.reply(
+                "Solve the challenge first (reply to the prompt above).",
+                disable_notification=True,
             )
-            if pending:
-                await msg.reply(
-                    "Solve the challenge first (reply to the prompt above).",
-                    disable_notification=True,
-                )
-                return
+            return
 
         # bypass_cooldowns lets an admin re-bang/-bef rapidly while
         # testing. Non-admins (or admins with the toggle off) get the
@@ -626,6 +642,31 @@ def build_router(rt: Runtime) -> Router:
                 pass
             return
 
+        # No duck? Say so and stop — BEFORE the cooldown branch. Checking
+        # cooldown first used to hand out a captcha when there wasn't even
+        # a duck to befriend, and the pending challenge then hijacked the
+        # user's next plain message as an "answer" for 60s.
+        duck = await rt.duckhunt.active_duck(msg.chat.id)
+        if not duck:
+            await msg.reply(
+                _no_duck_line(),
+                disable_notification=True,
+            )
+            return
+
+        # A boss can't be befriended — send the explanation and stop.
+        # (Previously the refusal fell through to the challenge branch: the
+        # explanation was swallowed and the user got a captcha instead.)
+        if duck.is_boss:
+            outcome, _ = await rt.duckhunt.handle_bef(
+                chat_id=msg.chat.id, user_id=msg.from_user.id,
+                display_name=display_name(msg.from_user),
+                ai_verdict=None, ai_line=None,
+            )
+            if outcome is not None:
+                await msg.reply(outcome.message, disable_notification=True)
+            return
+
         # bypass_cooldowns lets an admin re-bef while debugging.
         if not debug_is_on(admin_id, "bypass_cooldowns") and not await rt.duckhunt.cooldown_ok(
             msg.chat.id, msg.from_user.id,
@@ -637,14 +678,6 @@ def build_router(rt: Runtime) -> Router:
             issued = await _issue_bef_challenge(rt, msg, who, from_action="bef")
             if not issued:
                 await msg.reply(_cooldown_line(), disable_notification=True)
-            return
-
-        duck = await rt.duckhunt.active_duck(msg.chat.id)
-        if not duck:
-            await msg.reply(
-                _no_duck_line(),
-                disable_notification=True,
-            )
             return
 
         # Step 2 of the flow only runs if dice pass; but to keep ai_line

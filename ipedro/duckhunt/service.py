@@ -78,12 +78,12 @@ class DuckhuntService:
         self, chat_id: int, lifetime_seconds: int,
         rng: random.Random | None = None,
     ) -> ActiveDuck:
-        # Resolve any stale unexpired duck first (idempotency).
+        # Clear out any already-expired duck first (idempotency).
         await self.expire_old_ducks(chat_id)
         on_holiday = current_holiday() is not None
         rarity = roll_rarity(rng, on_holiday=on_holiday)
         is_boss = roll_is_boss(rng)
-        required_hits = boss_required_hits(rarity) if is_boss else None
+        required_hits = boss_required_hits() if is_boss else None
         expires = datetime.now(timezone.utc) + timedelta(seconds=lifetime_seconds)
         row = await self.db.fetchrow(
             "INSERT INTO duck_events (chat_id, rarity, expires_at, "
@@ -321,9 +321,11 @@ class DuckhuntService:
                     message="",
                     resolves_duck=False,
                 )
+                # "boss_hit", not "bang": participation credit must not
+                # count as a kill — one boss is one duck killed, total.
                 await self._bump_stats(
                     duck.chat_id, c["user_id"], c["display_name"],
-                    "bang", share_outcome,
+                    "boss_hit", share_outcome,
                 )
             await self._resolve(
                 duck.id, user_id, "bang", outcome.points_delta,
@@ -341,8 +343,10 @@ class DuckhuntService:
             ),
             resolves_duck=False,
         )
+        # "boss_hit": a non-killing hit earns points but is not a kill —
+        # otherwise a 3-hit boss inflated `killed` by 3+ across the chat.
         await self._bump_stats(
-            duck.chat_id, user_id, display_name, "bang", outcome,
+            duck.chat_id, user_id, display_name, "boss_hit", outcome,
         )
         return outcome, duck
 
@@ -387,7 +391,7 @@ class DuckhuntService:
                     success=False, points_delta=0, streak_delta=0,
                     message=(
                         "This duck is too big to befriend. You'd be eaten. "
-                        "Try `bang`."
+                        "Try bang."
                     ),
                     resolves_duck=False,
                 ),

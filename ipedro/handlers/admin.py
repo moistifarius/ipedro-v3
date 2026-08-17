@@ -21,7 +21,7 @@ from ipedro.duckhunt.debug_toggles import (
     DEBUG_TOGGLE_NAMES, all_for as debug_toggles_all_for, set_toggle as set_debug_toggle,
 )
 from ipedro.duckhunt.spawner import (
-    build_quack_message, duckhunt_enabled_chat_ids, duckhunt_enabled_chats,
+    build_quack_message_for, duckhunt_enabled_chat_ids, duckhunt_enabled_chats,
 )
 from ipedro.handlers.command_catalog import (
     CATEGORIES, COMMANDS,
@@ -870,7 +870,7 @@ def build_router(rt: Runtime) -> Router:
                 duck = await rt.duckhunt.spawn_duck(
                     chat_id, rt.settings.duckhunt_duck_lifetime_seconds,
                 )
-                text = await build_quack_message(rt.openai, duck.rarity)
+                text = await build_quack_message_for(rt.openai, duck)
                 await rt.bot.send_message(
                     chat_id, text, disable_notification=True,
                 )
@@ -943,7 +943,7 @@ def build_router(rt: Runtime) -> Router:
             duck = await rt.duckhunt.spawn_duck(
                 target, rt.settings.duckhunt_duck_lifetime_seconds,
             )
-            text = await build_quack_message(rt.openai, duck.rarity)
+            text = await build_quack_message_for(rt.openai, duck)
             await rt.bot.send_message(target, text, disable_notification=True)
         except Exception as exc:
             log.warning("quack_chat failed for chat %s: %s", target, exc)
@@ -3470,7 +3470,7 @@ def build_router(rt: Runtime) -> Router:
                     duck = await rt.duckhunt.spawn_duck(
                         chat_id, rt.settings.duckhunt_duck_lifetime_seconds,
                     )
-                    text = await build_quack_message(rt.openai, duck.rarity)
+                    text = await build_quack_message_for(rt.openai, duck)
                     await rt.bot.send_message(
                         chat_id, text, disable_notification=True,
                     )
