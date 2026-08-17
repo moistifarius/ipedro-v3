@@ -129,31 +129,6 @@ def _mean(xs: list[int] | list[float]) -> float:
     return sum(xs) / len(xs) if xs else 0.0
 
 
-def progress_bar(position: int, total: int, width: int = 10) -> str:
-    """A ▰▱ bar for 'you're on question `position` of `total`'."""
-    filled = max(0, min(width, round(position / total * width)))
-    return "▰" * filled + "▱" * (width - filled)
-
-
-def meter(score: float, width: int = 10) -> str:
-    """Render a 1-6 score as a ▰▱ bar."""
-    frac = (score - SCALE_MIN) / (SCALE_MAX - SCALE_MIN)
-    filled = max(0, min(width, round(frac * width)))
-    return "▰" * filled + "▱" * (width - filled)
-
-
-def item_image_prompt(item: "Item") -> str:
-    """Prompt for a single question's cached illustration. Deliberately
-    lighthearted and text/gore-free — image models render text poorly and the
-    scenes must stay safe to generate and post."""
-    return (
-        "Funny lighthearted flat-vector cartoon sticker illustrating this "
-        f"scene: {item.text}. Bold clean outlines, soft muted palette, a single "
-        "clear subject centered on a plain background, no text, no words, no "
-        "letters, not graphic, not gory, wholesome cartoon style."
-    )
-
-
 def band(score: float) -> str:
     """Map a 1-6 mean to a qualitative, non-diagnostic band label."""
     if score < 2.0:
@@ -240,82 +215,4 @@ def score(answers: list[int]) -> DisgustResult:
         biggest_ick_emoji=ick_item.emoji,
         iron_stomach_label=SUBSCALE_LABELS[iron_item.subscale],
         iron_stomach_emoji=iron_item.emoji,
-    )
-
-
-def fallback_verdict(result: DisgustResult, name: str) -> str:
-    """Deterministic verdict used when the AI persona call is unavailable."""
-    b = result.overall_band
-    if b == "iron-stomached":
-        return (f"{name}, you've got the constitution of a bin lorry. "
-                f"Nothing on this list moved the needle. Respect, and also concern.")
-    if b == "pretty unbothered":
-        return (f"{name} is hard to gross out. You'd eat the mystery leftovers "
-                f"and not think twice.")
-    if b == "middle of the road":
-        return (f"{name}, you're a normal amount of grossed out. Textbook. "
-                f"Boring, even. That's a compliment.")
-    if b == "squeamish":
-        return (f"{name} is squeamish and I respect the honesty. That {result.biggest_ick_label} "
-                f"question clearly got you.")
-    return (f"{name} nearly needed a lie-down doing this test. "
-            f"Everything is an ick. Stay strong out there.")
-
-
-def result_caption(
-    result: DisgustResult, name: str, verdict: str,
-    *, percentile: int | None = None,
-) -> str:
-    """The photo caption / text result. Kept under Telegram's 1024-char cap.
-
-    `percentile`, when given, is the share of others in this chat whose overall
-    score is lower than this taker's ("grosser than X%").
-    """
-    fe = BAND_EMOJI.get(result.food_band, "")
-    ge = BAND_EMOJI.get(result.general_band, "")
-    lines = [
-        f"🧫 {name}'s Disgust Profile",
-        "",
-        f"🍽 Food     {meter(result.food_score)} {result.food_score}/6 · "
-        f"{result.food_band} {fe}",
-        f"🧠 General  {meter(result.general_score)} {result.general_score}/6 · "
-        f"{result.general_band} {ge}",
-        f"     core {meter(result.core_score, 6)} · "
-        f"animal {meter(result.animal_score, 6)} · "
-        f"contam {meter(result.contam_score, 6)}",
-    ]
-    if percentile is not None:
-        lines.append(f"🩸 Grosser than {percentile}% of this chat")
-    lines += [
-        "",
-        f"Biggest ick: {result.biggest_ick_label} {result.biggest_ick_emoji}   "
-        f"Iron stomach: {result.iron_stomach_label} {result.iron_stomach_emoji}",
-        "",
-        verdict.strip(),
-        "",
-        f"📚 {CITATION_SHORT}",
-    ]
-    caption = "\n".join(lines)
-    if len(caption) > 1024:
-        # Trim the verdict rather than drop the citation/scores.
-        overflow = len(caption) - 1024 + 1
-        trimmed = verdict.strip()[: max(0, len(verdict.strip()) - overflow - 1)] + "…"
-        try:
-            lines[lines.index(verdict.strip())] = trimmed
-        except ValueError:
-            pass
-        caption = "\n".join(lines)
-    return caption[:1024]      # hard cap regardless of the trim above
-
-
-def image_prompt(result: DisgustResult) -> str:
-    """Prompt for the result illustration. Tasteful and text-free by design —
-    image models render text poorly and we want no gore."""
-    return (
-        "A clean, cartoonish flat-vector 'lab report' badge illustration "
-        f"representing a person who is '{result.overall_band}' about disgusting "
-        f"things, with a playful motif of {result.biggest_ick_emoji} "
-        f"({result.biggest_ick_label}). Muted mint-and-cream laboratory palette, "
-        "a small specimen jar and clipboard, friendly and clinical, centered, "
-        "no text, no words, no gore, sticker style."
     )

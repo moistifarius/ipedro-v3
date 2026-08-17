@@ -33,7 +33,6 @@ import asyncpg
 
 log = logging.getLogger(__name__)
 
-_VECTOR_REGISTERED: set[int] = set()
 
 # asyncpg exceptions that indicate the connection we got from the pool was
 # already dead. Always safe to retry once — we just drop the dead conn and
@@ -50,7 +49,6 @@ async def _register_vector(conn: asyncpg.Connection) -> None:
         from pgvector.asyncpg import register_vector  # type: ignore
 
         await register_vector(conn)
-        _VECTOR_REGISTERED.add(id(conn))
     except Exception as exc:  # pragma: no cover - depends on installed extension
         log.debug("pgvector not registered on this connection: %s", exc)
 

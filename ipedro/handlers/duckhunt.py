@@ -635,7 +635,7 @@ def build_router(rt: Runtime) -> Router:
             msg.chat.id, msg.from_user.id,
         )
         if pending:
-            hint = f"Solve the challenge first (reply to the prompt above)."
+            hint = "Solve the challenge first (reply to the prompt above)."
             try:
                 await msg.reply(hint, disable_notification=True)
             except Exception:

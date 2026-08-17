@@ -17,8 +17,6 @@ DEFAULT_DALE_PROMPT = (
 # Legacy aliases so existing imports keep working without churn — the
 # CONTENT is Dale now; the variable names are just history.
 DEFAULT_DUDE_PROMPT = DEFAULT_DALE_PROMPT
-DEFAULT_BOOMHAUER_PROMPT = DEFAULT_DALE_PROMPT
-DEFAULT_PEDRO_PROMPT = DEFAULT_DALE_PROMPT
 
 NEUTRAL_PROMPT = (
     "You are a helpful, concise Telegram assistant. Be direct, accurate and "
@@ -40,8 +38,6 @@ def set_master_prompt_override(text: str | None) -> None:
 
 
 # Legacy aliases so callers from earlier batches still work.
-current_pedro_prompt = current_master_prompt
-set_pedro_prompt_override = set_master_prompt_override
 
 
 PERSONAS: dict[str, str] = {

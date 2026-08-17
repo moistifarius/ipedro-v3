@@ -12,7 +12,6 @@ import asyncio
 import logging
 import math
 import random
-import time
 
 from aiogram import Bot
 from aiogram.types import BufferedInputFile

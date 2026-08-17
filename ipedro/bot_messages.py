@@ -11,12 +11,10 @@ this module only cares about tracking what the bot sent.
 
 from __future__ import annotations
 
-import logging
 import time
 from collections import deque
 from dataclasses import dataclass
 
-log = logging.getLogger(__name__)
 
 
 @dataclass
