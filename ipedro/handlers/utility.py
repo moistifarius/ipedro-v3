@@ -6,10 +6,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections import Counter
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -19,7 +20,9 @@ from aiogram.types import (
 )
 
 from ipedro.bot_messages import track
-from ipedro.handlers.common import display_name, get_or_create_chat_config
+from ipedro.handlers.common import (
+    display_name, get_or_create_chat_config, require_memory,
+)
 from ipedro.on_this_day import build_on_this_day, render_on_this_day
 from ipedro.meme_finder import find_relevant_meme
 from ipedro.reddit import build_caption, download_media, fetch_meme
@@ -120,6 +123,27 @@ async def _answer_reddit_media(
     )
 
 
+
+async def _with_chat_action(bot, chat_id: int, action: str, coro):
+    """Await ``coro`` while re-sending a chat action every ~4s.
+
+    Telegram's typing/upload indicator expires after ~5s; a judged meme
+    hunt can take 30-60s and used to look like the bot went dead."""
+    async def _pinger():
+        while True:
+            try:
+                await bot.send_chat_action(chat_id, action)
+            except Exception:
+                pass
+            await asyncio.sleep(4)
+
+    task = asyncio.create_task(_pinger())
+    try:
+        return await coro
+    finally:
+        task.cancel()
+
+
 async def post_meme_to_chat(rt: Runtime, msg: Message, meme) -> str | None:
     """Download a fetched Meme's media and post it (caption = verbatim top
     comment via build_caption), plus the gif follow-up when the top comment
@@ -175,6 +199,9 @@ async def _resolve_target_user(
                 f"{row['first_name'] or ''} {row['last_name'] or ''}"
             ).strip() or row["username"] or arg
             return row["user_id"], name
+        # An @arg was given but nobody matched: hand the arg back so the
+        # caller can say "unknown user" instead of implying bad syntax.
+        return None, arg
     return None, ""
 
 
@@ -217,6 +244,8 @@ def build_router(rt: Runtime) -> Router:
     @r.message(Command("whatdid"))
     async def whatdid(msg: Message) -> None:
         """Confidently summarize what a user has been up to."""
+        if not await require_memory(rt, msg):
+            return
         await get_or_create_chat_config(rt, msg)
         target_user_id: int | None = None
         target_name = "they"
@@ -416,6 +445,8 @@ def build_router(rt: Runtime) -> Router:
     @r.message(Command("tldr"))
     async def tldr(msg: Message) -> None:
         """/tldr [duration] — summarize the last window (default 24h)."""
+        if not await require_memory(rt, msg):
+            return
         await get_or_create_chat_config(rt, msg)
         parts = (msg.text or "").split()
         window_seconds = 86400
@@ -484,17 +515,27 @@ def build_router(rt: Runtime) -> Router:
             )
             year_part = f"/{r['year']}" if r["year"] else ""
             note_part = f" ({r['note']})" if r["note"] else ""
+            base_label = r["label"].split(":", 1)[0]   # anniversary:wedding → anniversary
             lines.append(
                 f"{r['month']:02d}-{r['day']:02d}{year_part}  "
-                f"{r['label']:<12} {who}{note_part}"
+                f"{base_label:<12} {who}{note_part}"
             )
         await msg.reply("\n".join(lines)[:4000], disable_notification=True)
 
     @r.message(Command("catchphrases"))
     async def catchphrases(msg: Message) -> None:
+        if not await require_memory(rt, msg):
+            return
         await get_or_create_chat_config(rt, msg)
         user_id, name = await _resolve_target_user(rt, msg)
         if user_id is None:
+            if name:
+                await msg.reply(
+                    f"I don't know @{name} yet — they need to have "
+                    "spoken here first.",
+                    disable_notification=True,
+                )
+                return
             await msg.reply(
                 "Usage: /catchphrases @username (or reply to someone).",
                 disable_notification=True,
@@ -532,9 +573,18 @@ def build_router(rt: Runtime) -> Router:
 
     @r.message(Command("lexicon"))
     async def lexicon(msg: Message) -> None:
+        if not await require_memory(rt, msg):
+            return
         await get_or_create_chat_config(rt, msg)
         user_id, name = await _resolve_target_user(rt, msg)
         if user_id is None:
+            if name:
+                await msg.reply(
+                    f"I don't know @{name} yet — they need to have "
+                    "spoken here first.",
+                    disable_notification=True,
+                )
+                return
             await msg.reply(
                 "Usage: /lexicon @username (or reply to someone).",
                 disable_notification=True,
@@ -571,6 +621,8 @@ def build_router(rt: Runtime) -> Router:
 
     @r.message(Command("heatmap"))
     async def heatmap(msg: Message) -> None:
+        if not await require_memory(rt, msg):
+            return
         await get_or_create_chat_config(rt, msg)
         rows = await rt.db.fetch(
             "SELECT EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC')::int AS h, "
@@ -596,6 +648,8 @@ def build_router(rt: Runtime) -> Router:
     @r.message(Command("haiku"))
     async def haiku(msg: Message) -> None:
         """/haiku — compose a haiku about the recent chat."""
+        if not await require_memory(rt, msg):
+            return
         await get_or_create_chat_config(rt, msg)
         rows = await rt.db.fetch(
             "SELECT role, content FROM messages "
@@ -652,15 +706,20 @@ def build_router(rt: Runtime) -> Router:
             # configured; the cheap model picks the one that is BOTH an
             # actual meme and about the topic — a judge rejection is an
             # honest miss, never a random post.
-            meme = await find_relevant_meme(
-                rt.openai, [topic], topic_label=topic,
-                chat_id=msg.chat.id,
-                giphy_api_key=rt.settings.giphy_api_key,
-                imgur_client_id=rt.settings.imgur_client_id,
-                **creds,
+            meme = await _with_chat_action(
+                rt.bot, msg.chat.id, "upload_photo",
+                find_relevant_meme(
+                    rt.openai, [topic], topic_label=topic,
+                    chat_id=msg.chat.id,
+                    giphy_api_key=rt.settings.giphy_api_key,
+                    imgur_client_id=rt.settings.imgur_client_id,
+                    **creds,
+                ),
             )
         else:
-            meme = await fetch_meme(**creds)
+            meme = await _with_chat_action(
+                rt.bot, msg.chat.id, "upload_photo", fetch_meme(**creds),
+            )
         if meme is None:
             if topic:
                 await msg.reply(
@@ -709,9 +768,18 @@ def build_router(rt: Runtime) -> Router:
     @r.message(Command("echo"))
     async def echo(msg: Message) -> None:
         """/echo @user [topic] — Dale mimics that user's style."""
+        if not await require_memory(rt, msg):
+            return
         await get_or_create_chat_config(rt, msg)
         user_id, name = await _resolve_target_user(rt, msg)
         if user_id is None:
+            if name:
+                await msg.reply(
+                    f"I don't know @{name} yet — they need to have "
+                    "spoken here first.",
+                    disable_notification=True,
+                )
+                return
             await msg.reply(
                 "Usage: /echo @username [topic]  (or reply to someone).",
                 disable_notification=True,
@@ -830,7 +898,16 @@ def build_router(rt: Runtime) -> Router:
                         "or you defeat the anonymous part.",
                     )
             except Exception:
-                pass
+                # They've never DM'd the bot, so the explanation can't be
+                # delivered — without this note their message just vanishes.
+                try:
+                    await msg.answer(
+                        "(That /confess was removed — confessions only work "
+                        "in my DM, so they stay anonymous.)",
+                        disable_notification=True,
+                    )
+                except Exception:
+                    pass
             return
         parts = (msg.text or "").split(None, 1)
         if len(parts) < 2:
@@ -880,6 +957,8 @@ def build_router(rt: Runtime) -> Router:
     @r.message(Command("whoslurking"))
     async def whoslurking(msg: Message) -> None:
         """/whoslurking — users who've spoken here but not in the last 7 days."""
+        if not await require_memory(rt, msg):
+            return
         await get_or_create_chat_config(rt, msg)
         rows = await rt.db.fetch(
             """
@@ -982,9 +1061,6 @@ def build_router(rt: Runtime) -> Router:
             await cb.answer("Stale wizard — re-open /config.", show_alert=True)
             return
         field = parts[2]
-        if field == "noop":
-            await cb.answer()
-            return
         if not await _can_edit_config(
             rt, cb.from_user.id if cb.from_user else None,
             cb.message.chat, target_chat_id,
@@ -1217,9 +1293,17 @@ async def _do_burn(
     rt: Runtime, msg: Message, *, prompt: str, fallback: str,
 ) -> None:
     """Shared body for /roast and /compliment."""
-    await get_or_create_chat_config(rt, msg)
+    if not await require_memory(rt, msg):
+        return
     user_id, name = await _resolve_target_user(rt, msg)
     if user_id is None:
+        if name:
+            await msg.reply(
+                f"I don't know @{name} yet — they need to have spoken "
+                "here first.",
+                disable_notification=True,
+            )
+            return
         await msg.reply(
             "Usage: that command needs an @user (or reply to them).",
             disable_notification=True,
@@ -1265,7 +1349,15 @@ async def _set_date(rt: Runtime, msg: Message, *, label: str) -> None:
                 "SELECT user_id FROM users WHERE LOWER(username) = LOWER($1)",
                 tok[1:],
             )
-            target_user_id = row["user_id"] if row else None
+            if row is None:
+                # Don't silently save an ownerless date and claim success.
+                await msg.reply(
+                    f"I don't know {tok} yet — they need to have spoken "
+                    "here first.",
+                    disable_notification=True,
+                )
+                return
+            target_user_id = row["user_id"]
         else:
             arg_tokens.append(tok)
     if not arg_tokens:
@@ -1282,13 +1374,18 @@ async def _set_date(rt: Runtime, msg: Message, *, label: str) -> None:
         )
         return
     month, day, year = parsed
+    # The uniqueness key is (chat_id, user_id, label). A birthday is truly
+    # one-per-user, but named anniversaries must not overwrite each other —
+    # fold the name into the stored label so "wedding" and "moving-day"
+    # coexist. Display sites strip the suffix (label.split(':')[0]).
+    stored_label = f"{label}:{note}" if label == "anniversary" and note else label
     await rt.db.execute(
         "INSERT INTO chat_dates (chat_id, user_id, label, month, day, year, note) "
         "VALUES ($1, $2, $3, $4, $5, $6, $7) "
         "ON CONFLICT (chat_id, user_id, label) DO UPDATE "
         "SET month = EXCLUDED.month, day = EXCLUDED.day, year = EXCLUDED.year, "
         "    note = EXCLUDED.note",
-        msg.chat.id, target_user_id, label, month, day, year, note,
+        msg.chat.id, target_user_id, stored_label, month, day, year, note,
     )
     await msg.reply(
         f"Got it: {label} on {month:02d}-{day:02d}"

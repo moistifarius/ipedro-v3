@@ -27,7 +27,9 @@ _TICK_SECONDS = 300  # 5 min
 
 
 def _build_message(row: dict, name: str, today: date) -> str:
-    label = row["label"]
+    # Named anniversaries are stored as "anniversary:<name>" so they don't
+    # overwrite each other; celebrate them all as anniversaries.
+    label = row["label"].split(":", 1)[0]
     note = f" ({row['note']})" if row.get("note") else ""
     if label == "birthday":
         if row["year"]:

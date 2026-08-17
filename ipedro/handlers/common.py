@@ -86,6 +86,24 @@ async def require_admin(message: Message, admin_ids: Iterable[int]) -> bool:
     return True
 
 
+async def require_memory(rt: Runtime, message: Message) -> bool:
+    """Guard for history-reading commands (/tldr, /catchphrases, …).
+
+    When memory is off, the `messages` table never fills, so those commands
+    would report "no data" — which reads as broken, not disabled. Say the
+    real reason and return False.
+    """
+    cfg = await get_or_create_chat_config(rt, message)
+    if cfg.memory_enabled:
+        return True
+    await message.reply(
+        "Memory is off in this chat, so there's no history to work from. "
+        "Turn it on with /chat_config memory on.",
+        disable_notification=True,
+    )
+    return False
+
+
 async def get_or_create_chat_config(rt: Runtime, message: Message):
     """Ensure a chat is registered and return its config row."""
     assert message.chat is not None
@@ -116,6 +134,7 @@ async def get_or_create_chat_config(rt: Runtime, message: Message):
             ambient_probability=s.default_ambient_probability,
             persona=s.default_persona,
             duckhunt_enabled=s.duckhunt_enabled_by_default,
+            share_photo_enabled=s.share_photo_enabled_by_default,
         )
     return cfg
 
