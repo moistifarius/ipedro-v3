@@ -357,9 +357,9 @@ ALTER TABLE chat_config
 ALTER TABLE chat_state
     ADD COLUMN IF NOT EXISTS last_ether_at TIMESTAMPTZ;
 
--- 'On this day' nostalgia — resurface past messages from the same calendar
--- day. On by default (the bot wants to feel alive); once-per-local-day stamp
--- prevents re-posting.
+-- 'On this day' nostalgia. VESTIGIAL: the daily auto-post loop was replaced
+-- by the monthly recap; /onthisday is manual-only. Both columns kept to
+-- avoid a pointless migration — nothing writes them any more.
 ALTER TABLE chat_config
     ADD COLUMN IF NOT EXISTS on_this_day_enabled BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE chat_state

@@ -28,6 +28,9 @@ class ChatConfig:
     fortune_enabled: bool = False
     ether_enabled: bool = False
     duck_names_public: bool = True
+    # Vestigial: the daily on-this-day auto-post was replaced by the monthly
+    # recap. Column and field kept only to avoid a pointless migration;
+    # /onthisday is manual-only and unconditional.
     on_this_day_enabled: bool = True
     monthly_recap_enabled: bool = True
     automod_enabled: bool = True

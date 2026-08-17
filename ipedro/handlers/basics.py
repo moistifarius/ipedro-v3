@@ -82,6 +82,7 @@ HELP_TEXT_PUBLIC = (
     "/catchphrases @user - their repeated phrases\n"
     "/lexicon @user - their top words\n"
     "/heatmap - this chat's activity by hour-of-day\n"
+    "/onthisday - what people said on this day in past months/years\n"
     "/whoslurking - users silent for >7 days\n"
     "/karma - chat karma leaderboard (👍/👎 reactions grant/dock)\n"
     "\n"

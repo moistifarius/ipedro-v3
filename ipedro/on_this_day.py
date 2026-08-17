@@ -1,13 +1,11 @@
 """'On this day' nostalgia — resurface what people said on this calendar
 day in the past (a month / a few months / a year+ ago).
 
-Two entry points share one core (``build_on_this_day``):
-
-  * ``run_on_this_day_loop`` — a background loop that, once per local day
-    per opted-in *and recently-active* chat, posts the best anniversary
-    it can find. Restart-safe via ``chat_state.last_on_this_day_date``.
-  * the ``/onthisday`` command (handlers/utility.py) — an on-demand pull
-    for the current chat that ignores the once-a-day stamp.
+One entry point: the ``/onthisday`` command (handlers/utility.py), an
+on-demand pull for the current chat. (The daily auto-post loop was
+replaced by the monthly recap; ``chat_config.on_this_day_enabled`` and
+``chat_state.last_on_this_day_date`` are vestigial columns kept only to
+avoid a pointless migration.)
 
 The payload is the *verbatim* past messages (that's where the "lol I
 forgot I said that" hit comes from); an optional cheap AI line frames
@@ -16,28 +14,17 @@ them in-character. Everything degrades gracefully when the AI is down.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import random
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 
-from aiogram import Bot
-
-from ipedro.bot_messages import track
 from ipedro.config import Settings
 from ipedro.db.pool import Database
 from ipedro.openai_client import OpenAIClient
 from ipedro.prompts import ON_THIS_DAY_PROMPT
-from ipedro.silenced_chats import is_silenced
 
 log = logging.getLogger(__name__)
-
-_TICK_SECONDS = 3600  # 1 hour — same cadence as the other daily loops.
-
-# Only nostalgia-post into chats seen within this window; a dead chat
-# doesn't need the bot talking to itself.
-_ACTIVE_WINDOW_DAYS = 30
 
 # Look-back periods, longest-ago first. The loop posts the OLDEST period
 # that actually has substantive messages — the further back, the more
@@ -213,82 +200,3 @@ def render_on_this_day(result: OnThisDayResult) -> str:
         lines.append("")
         lines.append(result.header)
     return "\n".join(lines)
-
-
-async def _eligible_chats(db: Database, today: date) -> list[int]:
-    """Opted-in chats, active in the last _ACTIVE_WINDOW_DAYS, that haven't
-    had an on-this-day post yet today."""
-    rows = await db.fetch(
-        f"""
-        SELECT c.chat_id
-          FROM chats c
-          JOIN chat_config cfg ON cfg.chat_id = c.chat_id
-          LEFT JOIN chat_state cs ON cs.chat_id = c.chat_id
-         WHERE cfg.on_this_day_enabled = TRUE
-           AND c.last_seen >= NOW() - INTERVAL '{_ACTIVE_WINDOW_DAYS} days'
-           AND (cs.last_on_this_day_date IS NULL
-                OR cs.last_on_this_day_date < $1)
-        """,
-        today,
-    )
-    return [r["chat_id"] for r in rows]
-
-
-async def _stamp(db: Database, chat_id: int, today: date) -> None:
-    await db.execute(
-        "INSERT INTO chat_state (chat_id, last_on_this_day_date) "
-        "VALUES ($1, $2) "
-        "ON CONFLICT (chat_id) DO UPDATE "
-        "SET last_on_this_day_date = EXCLUDED.last_on_this_day_date",
-        chat_id, today,
-    )
-
-
-async def _maybe_post_on_this_day(
-    bot: Bot, db: Database, openai: OpenAIClient, settings: Settings,
-) -> None:
-    today = datetime.now(settings.tzinfo).date()
-    for chat_id in await _eligible_chats(db, today):
-        try:
-            result = await build_on_this_day(
-                db, openai, settings, chat_id, today=today,
-            )
-        except Exception as exc:  # pragma: no cover - defensive
-            log.warning("on-this-day build failed for %s: %s", chat_id, exc)
-            continue
-        if result is None:
-            # Nothing to surface today — stamp anyway so we don't re-query
-            # this chat every tick for the rest of the day.
-            await _stamp(db, chat_id, today)
-            continue
-        text = render_on_this_day(result)
-        try:
-            sent = await bot.send_message(
-                chat_id, text, disable_notification=is_silenced(chat_id),
-            )
-            track(chat_id, sent.message_id, text)
-            await _stamp(db, chat_id, today)
-            log.info("on-this-day posted in chat %s (%s).", chat_id, result.label)
-        except Exception as exc:  # pragma: no cover - defensive
-            # Leave the stamp unset so we retry next tick.
-            log.warning("on-this-day send failed for %s: %s", chat_id, exc)
-
-
-async def run_on_this_day_loop(
-    bot: Bot, db: Database, openai: OpenAIClient, settings: Settings,
-    stop: asyncio.Event,
-) -> None:
-    """Loop until ``stop`` is set."""
-    log.info("On-this-day loop running.")
-    while not stop.is_set():
-        try:
-            await _maybe_post_on_this_day(bot, db, openai, settings)
-            wait = _TICK_SECONDS
-        except Exception as exc:
-            log.exception("On-this-day iteration failed: %s", exc)
-            wait = _TICK_SECONDS
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=wait)
-        except asyncio.TimeoutError:
-            pass
-    log.info("On-this-day loop stopped.")
