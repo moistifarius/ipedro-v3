@@ -213,11 +213,8 @@ def build_router(rt: Runtime) -> Router:
         if not await require_admin(msg, rt.settings.admin_ids):
             return
         who = display_name(msg.from_user) if msg.from_user else "anonymous"
-        intro = (
-            f"[debug] Forcing a {kind or 'random'} challenge."
-        )
         issued = await _issue_bef_challenge(
-            rt, msg, who, intro=intro, force_kind=kind,
+            rt, msg, who, from_action="bef", force_kind=kind,
         )
         if not issued:
             await msg.reply(
