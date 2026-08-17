@@ -17,11 +17,6 @@ history. Useful for one-off questions.
 ### `/aigen <prompt>`
 Generate an image with the configured image model (default `gpt-image-1`).
 
-### `/aiedit`, `/aivar`
-Preserved from V1 for compatibility. Currently respond with a "not wired"
-notice — the modern OpenAI SDK requires a different flow for image edits
-and variations; these will be re-enabled when needed.
-
 ### `/aitranslate`
 Reply to a voice note with this command to translate the audio to English.
 

@@ -79,7 +79,6 @@ a second message.
 | `/chat_config [field value]`, `/config` | Show / change this chat's settings (group admins / DM only); `/config` is an inline-keyboard wizard |
 | `/a`, `/askai`, `/ask <q>` | One-shot AI answer (no memory write) |
 | `/aigen`, `/generate <prompt>` | Generate an image |
-| `/aiedit`, `/aivar` | Preserved aliases; image edit/variation not wired to the current SDK |
 | `/aitranslate` | Translate a replied-to voice note (Whisper) |
 | `/catfact` | Dubious cat fact |
 | `/beneficiality` | Score whether the bot would butt in |
