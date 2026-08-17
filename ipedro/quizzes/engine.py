@@ -134,35 +134,40 @@ async def _get_item_image(rt: Runtime, quiz: Quiz, key: str) -> bytes | None:
     return bytes(png) if png is not None else None
 
 
-def _kick_warmup(rt: Runtime, quiz: Quiz) -> None:
+def _kick_warmup(rt: Runtime, quizzes: list[Quiz]) -> None:
+    """Spawn ONE background task that warms all given quizzes in order."""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return
     if _warmup_lock.locked():
         return
-    loop.create_task(_warm_item_images(rt, quiz))
+    loop.create_task(_warm_item_images(rt, quizzes))
 
 
-async def _warm_item_images(rt: Runtime, quiz: Quiz) -> None:
-    """Generate + cache any missing illustrations for this quiz. Best-effort."""
+async def _warm_item_images(rt: Runtime, quizzes: list[Quiz]) -> None:
+    """Generate + cache any missing illustrations for these quizzes. Best-effort.
+
+    All quizzes are walked inside a single lock hold — one task per quiz would
+    let the first task's lock make the others silently bail."""
     if _warmup_lock.locked():
         return
     async with _warmup_lock:
-        for item in quiz.items:
-            if await rt.db.fetchval(
-                "SELECT 1 FROM quiz_item_images "
-                " WHERE quiz_id = $1 AND item_key = $2", quiz.id, item.key,
-            ):
-                continue
-            png = await image_fetch.fetch(item.image_query or item.text)
-            if png:
-                await rt.db.execute(
-                    "INSERT INTO quiz_item_images (quiz_id, item_key, png) "
-                    "VALUES ($1, $2, $3) ON CONFLICT (quiz_id, item_key) DO NOTHING",
-                    quiz.id, item.key, png,
-                )
-    log.info("quiz warmup pass complete for %s", quiz.id)
+        for quiz in quizzes:
+            for item in quiz.items:
+                if await rt.db.fetchval(
+                    "SELECT 1 FROM quiz_item_images "
+                    " WHERE quiz_id = $1 AND item_key = $2", quiz.id, item.key,
+                ):
+                    continue
+                png = await image_fetch.fetch(item.image_query or item.text)
+                if png:
+                    await rt.db.execute(
+                        "INSERT INTO quiz_item_images (quiz_id, item_key, png) "
+                        "VALUES ($1, $2, $3) ON CONFLICT (quiz_id, item_key) DO NOTHING",
+                        quiz.id, item.key, png,
+                    )
+            log.info("quiz warmup pass complete for %s", quiz.id)
 
 
 async def images_cached_count(rt: Runtime, quiz: Quiz) -> int:
@@ -194,7 +199,7 @@ async def begin(rt: Runtime, quiz: Quiz, target, chat_id: int, uid: int) -> None
             reply_markup=_rating_keyboard(quiz, uid, 0),
             parse_mode="HTML", disable_notification=True,
         )
-        _kick_warmup(rt, quiz)
+        _kick_warmup(rt, [quiz])
     await rt.db.execute(
         "INSERT INTO quiz_sessions (quiz_id, chat_id, user_id, message_id, "
         "                           answers, started_at) "
@@ -423,7 +428,7 @@ async def on_answer(rt: Runtime, cb: CallbackQuery) -> None:
             quiz.id, chat_id, owner_id,
         )
         if exists:
-            await cb.answer()
+            await cb.answer("already answered — use the newest question message")
         else:
             await cb.answer(
                 f"that test expired — send /{quiz.commands[0]} to start again",
@@ -488,16 +493,28 @@ async def show_menu(rt: Runtime, msg: Message) -> None:
 
 
 async def warmup_command(rt: Runtime, msg: Message) -> None:
-    """Admin: pre-generate every quiz's illustrations."""
+    """Admin: pre-generate every quiz's illustrations. With `force`, purge the
+    cached images first so junk fallbacks get re-fetched."""
     if not await require_admin(msg, rt.settings.admin_ids):
         return
+    force = "force" in (msg.text or "").split()[1:]
+    quizzes = registry.all_quizzes()
+    if force:
+        for quiz in quizzes:
+            await rt.db.execute(
+                "DELETE FROM quiz_item_images "
+                " WHERE quiz_id = $1 AND item_key = ANY($2::text[])",
+                quiz.id, [it.key for it in quiz.items],
+            )
     parts = []
-    for quiz in registry.all_quizzes():
+    for quiz in quizzes:
         n = await images_cached_count(rt, quiz)
         parts.append(f"{quiz.emoji} {quiz.title}: {n}/{quiz.n_items}")
-        _kick_warmup(rt, quiz)
+    _kick_warmup(rt, quizzes)
     await msg.reply(
-        "🖼 Cached illustrations:\n" + "\n".join(parts) +
-        "\n\nFetching any missing from the web in the background — re-run to check.",
+        ("🖼 Cache purged, re-fetching everything:\n" if force
+         else "🖼 Cached illustrations:\n") + "\n".join(parts) +
+        "\n\nFetching any missing from the web in the background — re-run to "
+        "check, or send /quiz_warmup force to purge the cache and re-fetch.",
         disable_notification=True,
     )

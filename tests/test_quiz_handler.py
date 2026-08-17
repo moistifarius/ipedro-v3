@@ -24,7 +24,7 @@ DARK = registry.get("darktriad")
 def _quiz_env(monkeypatch):
     # No real background warm-up, and the web image fetch returns bytes by
     # default (tests that need the text path override it to None).
-    monkeypatch.setattr(engine, "_kick_warmup", lambda rt, quiz: None)
+    monkeypatch.setattr(engine, "_kick_warmup", lambda rt, quizzes: None)
     monkeypatch.setattr(engine.image_fetch, "fetch", AsyncMock(return_value=b"IMG"))
 
 
@@ -52,6 +52,11 @@ class _FakeDB:
             quiz_id, item_key, png = args
             self.images.setdefault((quiz_id, item_key), png)
             return "INSERT 0 1"
+        if "DELETE FROM quiz_item_images" in query:
+            quiz_id, keys = args
+            for k in list(keys):
+                self.images.pop((quiz_id, k), None)
+            return "DELETE 1"
         return "OK"
 
     async def fetchrow(self, query, *args):
@@ -206,7 +211,8 @@ async def test_stale_tap_ignored():
     cb = _cb(100, 7, "q:disgust:7:0:5")
     await engine.on_answer(rt, cb)
     assert db.sessions[("disgust", 100, 7)]["answers"] == [3, 3]
-    assert cb.answer.await_args.args == ()
+    # Not counted, but the tapper gets a toast instead of dead silence.
+    assert "already answered" in cb.answer.await_args.args[0]
 
 
 @pytest.mark.asyncio
@@ -332,9 +338,65 @@ async def test_retake_rejects_other_user():
 async def test_warmup_fetches_and_caches():
     db = _FakeDB()
     rt = _rt(db)
-    await engine._warm_item_images(rt, DARK)   # engine.image_fetch.fetch → b"IMG"
+    await engine._warm_item_images(rt, [DARK])   # engine.image_fetch.fetch → b"IMG"
     assert sum(1 for (qid, _k) in db.images if qid == "darktriad") == DARK.n_items
     assert engine.image_fetch.fetch.await_count == DARK.n_items
+
+
+@pytest.mark.asyncio
+async def test_warmup_worker_warms_every_quiz():
+    """One worker pass covers ALL quizzes — the old task-per-quiz design let
+    the first task's lock make the other three silently bail."""
+    db = _FakeDB()
+    rt = _rt(db)
+    quizzes = registry.all_quizzes()
+    await engine._warm_item_images(rt, quizzes)
+    warmed = {qid for (qid, _k) in db.images}
+    assert len(warmed) > 1
+    assert warmed == {q.id for q in quizzes}
+    assert engine.image_fetch.fetch.await_count == sum(q.n_items for q in quizzes)
+
+
+@pytest.mark.asyncio
+async def test_warmup_command_force_purges_before_rewarm(monkeypatch):
+    db = _FakeDB()
+    for q in registry.all_quizzes():
+        _seed_images(db, q)
+    calls: list[str] = []
+    real_execute = db.execute
+
+    async def spy_execute(query, *args):
+        calls.append(query)
+        return await real_execute(query, *args)
+
+    db.execute = spy_execute
+    monkeypatch.setattr(engine, "_kick_warmup",
+                        lambda rt, quizzes: calls.append("KICK"))
+    rt = _rt(db, admin=frozenset({7}))
+    msg = _msg(7, 7, "/quiz_warmup force")
+    msg.chat.type = "private"                  # require_admin needs a DM
+    await engine.warmup_command(rt, msg)
+    deletes = [i for i, q in enumerate(calls)
+               if q != "KICK" and "DELETE FROM quiz_item_images" in q]
+    assert len(deletes) == len(registry.all_quizzes())
+    assert max(deletes) < calls.index("KICK")  # purge ran before the re-warm
+    assert db.images == {}
+    assert "force" in msg.reply.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_warmup_command_without_force_keeps_cache(monkeypatch):
+    db = _FakeDB()
+    _seed_images(db, DISGUST)
+    kicked = []
+    monkeypatch.setattr(engine, "_kick_warmup",
+                        lambda rt, quizzes: kicked.append(list(quizzes)))
+    rt = _rt(db, admin=frozenset({7}))
+    msg = _msg(7, 7, "/quiz_warmup")
+    msg.chat.type = "private"
+    await engine.warmup_command(rt, msg)
+    assert ("disgust", DISGUST.items[0].key) in db.images   # nothing purged
+    assert kicked == [registry.all_quizzes()]               # one kick, all quizzes
 
 
 # --------------------------------------------------------------- leaderboard
