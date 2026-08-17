@@ -83,6 +83,29 @@ class _FakeDB:
                     r["content"] = new
         return "UPDATE 1"
 
+    @property
+    def pool(self):
+        """Minimal asyncpg-pool shim: transactions route to this same fake."""
+        fake = self
+
+        class _Tx:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *exc): return False
+
+        class _Conn:
+            async def execute(self, q, *a): return await fake.execute(q, *a)
+            async def fetch(self, q, *a): return await fake.fetch(q, *a)
+            def transaction(self): return _Tx()
+
+        class _Acquire:
+            async def __aenter__(self): return _Conn()
+            async def __aexit__(self, *exc): return False
+
+        class _Pool:
+            def acquire(self): return _Acquire()
+
+        return _Pool()
+
 
 @pytest.mark.asyncio
 async def test_correct_name_rewrites_derived_layers_only():

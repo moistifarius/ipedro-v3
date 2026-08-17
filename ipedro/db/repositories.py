@@ -270,8 +270,10 @@ class SummaryRepo:
         self.db = db
 
     async def latest(self, chat_id: int) -> StoredSummary | None:
+        # Explicit columns: a future ADD COLUMN must not explode the splat.
         row = await self.db.fetchrow(
-            "SELECT * FROM summaries WHERE chat_id = $1 ORDER BY id DESC LIMIT 1",
+            "SELECT id, chat_id, summary, covers_until_id, created_at "
+            "  FROM summaries WHERE chat_id = $1 ORDER BY id DESC LIMIT 1",
             chat_id,
         )
         return StoredSummary(**dict(row)) if row else None
@@ -312,8 +314,10 @@ class FactRepo:
         return int(val)
 
     async def list_for_chat(self, chat_id: int, limit: int = 50) -> list[StoredFact]:
+        # Explicit columns: a future ADD COLUMN must not explode the splat.
         rows = await self.db.fetch(
-            "SELECT * FROM facts WHERE chat_id = $1 ORDER BY id DESC LIMIT $2",
+            "SELECT id, chat_id, user_id, fact, source_msg, created_at "
+            "  FROM facts WHERE chat_id = $1 ORDER BY id DESC LIMIT $2",
             chat_id, limit,
         )
         return [StoredFact(**dict(r)) for r in rows]

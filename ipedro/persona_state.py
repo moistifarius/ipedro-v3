@@ -130,8 +130,14 @@ class PersonaStateService:
             # still stuck
             pass
         else:
+            # Only clear when there's actually a stale word — current() runs
+            # per reply, and an unconditional upsert here was two pointless
+            # writes per message.
+            if stuck is not None:
+                await self._upsert(
+                    chat_id, stuck_word=None, stuck_word_expires_at=None,
+                )
             stuck = None
-            await self._upsert(chat_id, stuck_word=None, stuck_word_expires_at=None)
             if random.random() < _STUCK_WORD_PROBABILITY:
                 stuck = random.choice(_STUCK_WORDS)
                 await self._upsert(

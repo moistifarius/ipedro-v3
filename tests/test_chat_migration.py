@@ -1,9 +1,9 @@
 """Re-keying chat-scoped data on a Telegram group→supergroup migration.
 
 The DB is faked with an in-memory connection that models per-table chat_id
-sets, so the transactional orchestration (create new parent → move every
-chat_id table discovered from the catalog → drop old parent) is exercised
-without Postgres.
+row counts, so the transactional orchestration (create new parent → move every
+chat_id table discovered from the catalog, skipping identity collisions →
+renumber quotes → drop old parent) is exercised without Postgres.
 """
 
 from __future__ import annotations
@@ -17,9 +17,18 @@ from ipedro.db.chat_migration import migrate_chat
 
 
 class _FakeConn:
-    def __init__(self, tables: list[str], data: dict[str, dict[int, int]]):
+    def __init__(
+        self, tables: list[str], data: dict[str, dict[int, int]],
+        constraints: dict[str, list[list[str]]] | None = None,
+        collisions: dict[str, int] | None = None,
+    ):
         self.tables = tables            # tables that have a chat_id column
-        self.data = data               # table -> {chat_id: row_count}
+        self.data = data                # table -> {chat_id: row_count}
+        # table -> PK/UNIQUE column lists (incl. chat_id); drives the guarded
+        # UPDATE path in production code.
+        self.constraints = constraints or {}
+        # table -> how many old-id rows collide with existing new-id rows.
+        self.collisions = dict(collisions or {})
         self.executed: list[str] = []
 
     def transaction(self):
@@ -36,26 +45,45 @@ class _FakeConn:
 
     async def execute(self, query: str, *args):
         self.executed.append(query)
-        q = query.strip()
+        q = " ".join(query.split())
+        if q.startswith("UPDATE quotes q SET seq"):
+            return "UPDATE 0"
         if q.startswith("UPDATE") and "SET chat_id" in q:
             table = q.split()[1]
             new_id, old_id = args
-            moved = self.data.get(table, {}).pop(old_id, 0)
+            have = self.data.get(table, {}).pop(old_id, 0)
+            guarded = "AND NOT (" in q
+            stuck = min(self.collisions.get(table, 0), have) if guarded else 0
+            moved = have - stuck
             if moved:
-                self.data[table][new_id] = moved
+                self.data[table][new_id] = self.data[table].get(new_id, 0) + moved
+            if stuck:
+                self.data[table][old_id] = stuck
             return f"UPDATE {moved}"
         if q.startswith("DELETE FROM chats"):
             (old_id,) = args
             self.data.get("chats", {}).pop(old_id, None)
             return "DELETE 1"
+        if q.startswith("DELETE FROM"):
+            table = q.split()[2]
+            (old_id,) = args
+            n = self.data.get(table, {}).pop(old_id, 0)
+            return f"DELETE {n}"
         if q.startswith("INSERT INTO chats"):
             self.data.setdefault("chats", {})[args[0]] = 1
             return "INSERT 0 1"
         return "OK"
 
     async def fetch(self, query: str, *args):
-        assert "information_schema.columns" in query
-        return [{"table_name": t} for t in self.tables]
+        if "information_schema.columns" in query:
+            return [{"table_name": t} for t in self.tables]
+        if "table_constraints" in query:
+            (table,) = args
+            return [
+                {"constraint_name": f"{table}_c{i}", "cols": cols}
+                for i, cols in enumerate(self.constraints.get(table, []))
+            ]
+        raise AssertionError(f"unexpected fetch: {query}")
 
 
 class _FakePool:
@@ -107,6 +135,49 @@ async def test_moves_every_chat_scoped_table():
     # …the new parent was created and the old parent deleted.
     assert any(q.strip().startswith("INSERT INTO chats") for q in conn.executed)
     assert OLD not in conn.data["chats"] and NEW in conn.data["chats"]
+
+
+@pytest.mark.asyncio
+async def test_colliding_rows_are_dropped_not_fatal():
+    """A PK/UNIQUE collision must not abort the migration — the colliding old
+    rows are dropped (new-id data wins) and reported."""
+    conn = _FakeConn(
+        tables=["messages"],
+        data={"messages": {OLD: 200, NEW: 2}, "chats": {OLD: 1}},
+        constraints={"messages": [["chat_id", "message_id"]]},
+        collisions={"messages": 2},
+    )
+    moved = await migrate_chat(_fake_db(conn), OLD, NEW)
+
+    assert moved["messages"] == 198
+    assert moved["messages (dropped duplicates)"] == 2
+    assert conn.data["messages"][NEW] == 200          # 2 already there + 198
+    assert OLD not in conn.data["messages"]           # colliders deleted
+    assert OLD not in conn.data["chats"]              # migration completed
+
+
+@pytest.mark.asyncio
+async def test_odd_table_name_aborts_instead_of_cascade_deleting():
+    """A refused table name must roll the whole migration back — continuing
+    would CASCADE-delete the skipped table's rows with the old parent."""
+    conn = _FakeConn(
+        tables=["duck_stats", "weird-table"],
+        data={"duck_stats": {OLD: 5}, "chats": {OLD: 1}},
+    )
+    with pytest.raises(RuntimeError):
+        await migrate_chat(_fake_db(conn), OLD, NEW)
+    assert OLD in conn.data["chats"]                  # old parent NOT deleted
+
+
+@pytest.mark.asyncio
+async def test_quotes_get_renumbered_after_merge():
+    conn = _FakeConn(
+        tables=["quotes"],
+        data={"quotes": {OLD: 4}, "chats": {OLD: 1}},
+    )
+    await migrate_chat(_fake_db(conn), OLD, NEW)
+    renumber = [q for q in conn.executed if "ROW_NUMBER() OVER" in q]
+    assert len(renumber) == 1 and "quotes" in renumber[0]
 
 
 @pytest.mark.asyncio

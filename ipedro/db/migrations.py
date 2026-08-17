@@ -32,7 +32,13 @@ async def apply_schema(db: Database, embedding_dim: int = 1536) -> None:
     try:
         await db.execute(sql)
     except Exception as exc:
-        # Most common cause: pgvector extension is not installed. Retry without it.
+        # Only fall back when the failure actually looks like a missing
+        # pgvector extension. Anything else (SQL typo, lock timeout,
+        # permissions) must surface as itself — retrying a broken schema
+        # without vector would just fail again with a misleading message.
+        text = str(exc).lower()
+        if "vector" not in text and "extension" not in text:
+            raise
         log.warning("Full schema failed (%s); retrying without vector extension.", exc)
         without_vector = "\n".join(
             line for line in sql.splitlines()

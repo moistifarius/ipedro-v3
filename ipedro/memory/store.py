@@ -124,20 +124,23 @@ class MemoryStore:
                 return 0
 
         results: dict[str, int] = {}
-        # Embeddings first (no FK dependency either way, but tidy).
-        results["embeddings"] = _count(await self.db.execute(
-            "DELETE FROM embeddings WHERE chat_id = $1", chat_id,
-        ))
-        results["summaries"] = _count(await self.db.execute(
-            "DELETE FROM summaries WHERE chat_id = $1", chat_id,
-        ))
-        results["messages"] = _count(await self.db.execute(
-            "DELETE FROM messages WHERE chat_id = $1", chat_id,
-        ))
-        if include_facts:
-            results["facts"] = _count(await self.db.execute(
-                "DELETE FROM facts WHERE chat_id = $1", chat_id,
-            ))
+        # One transaction: a failure partway must not leave e.g. embeddings
+        # wiped while the messages they point at survive.
+        async with self.db.pool.acquire() as conn:
+            async with conn.transaction():
+                results["embeddings"] = _count(await conn.execute(
+                    "DELETE FROM embeddings WHERE chat_id = $1", chat_id,
+                ))
+                results["summaries"] = _count(await conn.execute(
+                    "DELETE FROM summaries WHERE chat_id = $1", chat_id,
+                ))
+                results["messages"] = _count(await conn.execute(
+                    "DELETE FROM messages WHERE chat_id = $1", chat_id,
+                ))
+                if include_facts:
+                    results["facts"] = _count(await conn.execute(
+                        "DELETE FROM facts WHERE chat_id = $1", chat_id,
+                    ))
         return results
 
     async def correct_name(
@@ -161,43 +164,58 @@ class MemoryStore:
         if not wrong.strip() or not right.strip():
             return results
 
-        async def _fix(table: str, col: str, ref_kind: str) -> int:
-            rows = await self.db.fetch(
-                f"SELECT id, {col} AS body FROM {table} WHERE chat_id = $1",
-                chat_id,
-            )
-            changed = 0
-            for r in rows:
-                body = r["body"] or ""
-                new = _replace_whole_word(body, wrong, right)
-                if new == body:
-                    continue
-                await self.db.execute(
-                    f"UPDATE {table} SET {col} = $1 WHERE id = $2", new, r["id"],
+        # All text rewrites happen in ONE transaction — a failure halfway must
+        # not leave summaries renamed but facts/messages not. Re-embedding
+        # happens after commit: embeddings are recoverable, the text isn't,
+        # and an OpenAI call doesn't belong inside a DB transaction.
+        reembed_jobs: list[tuple[str, int, str]] = []   # (ref_kind, id, text)
+
+        async with self.db.pool.acquire() as conn:
+            async with conn.transaction():
+
+                async def _fix(table: str, col: str, ref_kind: str) -> int:
+                    rows = await conn.fetch(
+                        f"SELECT id, {col} AS body FROM {table} "
+                        f"WHERE chat_id = $1",
+                        chat_id,
+                    )
+                    changed = 0
+                    for r in rows:
+                        body = r["body"] or ""
+                        new = _replace_whole_word(body, wrong, right)
+                        if new == body:
+                            continue
+                        await conn.execute(
+                            f"UPDATE {table} SET {col} = $1 WHERE id = $2",
+                            new, r["id"],
+                        )
+                        reembed_jobs.append((ref_kind, r["id"], new))
+                        changed += 1
+                    return changed
+
+                results["summaries"] = await _fix("summaries", "summary", "summary")
+                results["facts"] = await _fix("facts", "fact", "fact")
+
+                # Assistant messages only; user turns are sacred.
+                rows = await conn.fetch(
+                    "SELECT id, content FROM messages "
+                    " WHERE chat_id = $1 AND role = 'assistant'",
+                    chat_id,
                 )
-                await self._reembed(chat_id, ref_kind, r["id"], new)
-                changed += 1
-            return changed
+                for r in rows:
+                    body = r["content"] or ""
+                    new = _replace_whole_word(body, wrong, right)
+                    if new == body:
+                        continue
+                    await conn.execute(
+                        "UPDATE messages SET content = $1 WHERE id = $2",
+                        new, r["id"],
+                    )
+                    reembed_jobs.append(("message", r["id"], new))
+                    results["messages"] += 1
 
-        results["summaries"] = await _fix("summaries", "summary", "summary")
-        results["facts"] = await _fix("facts", "fact", "fact")
-
-        # Assistant messages only (role='assistant'); user turns are sacred.
-        rows = await self.db.fetch(
-            "SELECT id, content FROM messages "
-            " WHERE chat_id = $1 AND role = 'assistant'",
-            chat_id,
-        )
-        for r in rows:
-            body = r["content"] or ""
-            new = _replace_whole_word(body, wrong, right)
-            if new == body:
-                continue
-            await self.db.execute(
-                "UPDATE messages SET content = $1 WHERE id = $2", new, r["id"],
-            )
-            await self._reembed(chat_id, "message", r["id"], new)
-            results["messages"] += 1
+        for ref_kind, ref_id, new_text in reembed_jobs:
+            await self._reembed(chat_id, ref_kind, ref_id, new_text)
         return results
 
     async def _reembed(

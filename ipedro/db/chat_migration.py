@@ -70,20 +70,115 @@ async def migrate_chat(db: Database, old_id: int, new_id: int) -> dict[str, int]
             for rec in recs:
                 table = rec["table_name"]
                 if not _SAFE_IDENT.match(table):
-                    log.warning("chat migration: skipping odd table name %r", table)
-                    continue
-                status = await conn.execute(
-                    f"UPDATE {table} SET chat_id = $1 WHERE chat_id = $2",
-                    new_id, old_id,
-                )
+                    # Raise so the transaction rolls back. Continuing here
+                    # would reach step 3, whose CASCADE delete of the old
+                    # parent DESTROYS the skipped table's rows.
+                    raise RuntimeError(
+                        f"chat migration: refusing odd table name {table!r}"
+                    )
+                # Rows whose PRIMARY KEY / UNIQUE identity already exists
+                # under the new id can't be moved (e.g. a message recorded
+                # under the supergroup id before this service message was
+                # processed). Skip exactly those rows — the new-id data
+                # wins — instead of letting one collision abort the whole
+                # migration and orphan everything.
+                collision = await _collision_predicate(conn, table)
+                if collision:
+                    status = await conn.execute(
+                        f"UPDATE {table} SET chat_id = $1 "
+                        f" WHERE chat_id = $2 AND NOT ({collision})",
+                        new_id, old_id,
+                    )
+                else:
+                    status = await conn.execute(
+                        f"UPDATE {table} SET chat_id = $1 WHERE chat_id = $2",
+                        new_id, old_id,
+                    )
                 try:
                     n = int(status.split()[-1])
                 except (ValueError, IndexError):
                     n = 0
                 if n:
                     moved[table] = n
+                # Anything still at the old id collided; drop it (it's a
+                # duplicate of data the new id already has) and report it.
+                left = await conn.execute(
+                    f"DELETE FROM {table} WHERE chat_id = $1", old_id,
+                )
+                try:
+                    dropped = int(left.split()[-1])
+                except (ValueError, IndexError):
+                    dropped = 0
+                if dropped:
+                    log.warning(
+                        "chat migration %s -> %s: dropped %d colliding %s row(s)",
+                        old_id, new_id, dropped, table,
+                    )
+                    moved[f"{table} (dropped duplicates)"] = dropped
+
+            # Merged quote books can hold duplicate per-chat seq numbers
+            # (both chats had their own #1, #2, …), which would make
+            # /unquote #N delete several rows. Renumber once, by original id.
+            await conn.execute(
+                """
+                UPDATE quotes q
+                   SET seq = n.rn
+                  FROM (SELECT id,
+                               ROW_NUMBER() OVER (ORDER BY id) AS rn
+                          FROM quotes WHERE chat_id = $1) n
+                 WHERE q.id = n.id AND q.chat_id = $1
+                """,
+                new_id,
+            )
 
             # 3. Remove the old parent; all its children have moved.
             await conn.execute("DELETE FROM chats WHERE chat_id = $1", old_id)
 
     return moved
+
+
+async def _collision_predicate(conn, table: str) -> str | None:
+    """SQL predicate marking old-id rows whose identity already exists at the
+    new id ($1), built from every PK/UNIQUE constraint that includes chat_id.
+
+    Returns None when the table has no such constraint (nothing can collide).
+    Column names come from our own catalog and are validated before being
+    formatted into SQL.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT tc.constraint_name,
+               array_agg(kcu.column_name::text
+                         ORDER BY kcu.ordinal_position) AS cols
+          FROM information_schema.table_constraints tc
+          JOIN information_schema.key_column_usage kcu
+            ON kcu.constraint_name = tc.constraint_name
+           AND kcu.table_schema = tc.table_schema
+         WHERE tc.table_schema = 'public'
+           AND tc.table_name = $1
+           AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
+         GROUP BY tc.constraint_name
+        """,
+        table,
+    )
+    predicates: list[str] = []
+    for r in rows:
+        cols = list(r["cols"])
+        if "chat_id" not in cols:
+            continue
+        others = [c for c in cols if c != "chat_id"]
+        if any(not _SAFE_IDENT.match(c) for c in others):
+            raise RuntimeError(
+                f"chat migration: odd column name in {table!r} constraint"
+            )
+        if others:
+            match = " AND ".join(f"t2.{c} = {table}.{c}" for c in others)
+        else:
+            # Constraint is chat_id alone (e.g. chat_config PK): ANY row
+            # already at the new id is a collision.
+            match = "TRUE"
+        predicates.append(
+            f"EXISTS (SELECT 1 FROM {table} t2 "
+            f"WHERE t2.chat_id = $1 AND {match})"
+        )
+    return " OR ".join(predicates) if predicates else None
