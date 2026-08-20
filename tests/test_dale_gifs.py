@@ -351,3 +351,36 @@ def test_dale_gifs_table_has_no_chat_id_column():
     block = sql[sql.index("CREATE TABLE IF NOT EXISTS dale_gifs"):]
     block = block[:block.index(");")]
     assert "chat_id" not in block
+
+
+# ── the pinned seed set ──────────────────────────────────────────────────────
+
+def test_seed_set_is_sane():
+    seed = dg._SEED_GIFS
+    assert 20 <= len(seed) <= 40, len(seed)
+    urls = [u for u, _ in seed]
+    assert len(set(urls)) == len(urls), "duplicate seed URL"
+    for url, tags in seed:
+        assert url.startswith("https://"), url
+        assert url.split("/")[2] in dg.SEED_HOSTS, url
+        assert tags, url
+        for t in tags:
+            assert dg.normalize_tag(t) == t, (url, t)
+
+
+@pytest.mark.asyncio
+async def test_apply_seed_is_idempotent():
+    db = _FakeDB()
+    added, skipped = await dg.apply_seed(db)
+    assert added == len(dg._SEED_GIFS) and skipped == 0
+
+    added_2, skipped_2 = await dg.apply_seed(db)
+    assert added_2 == 0 and skipped_2 == len(dg._SEED_GIFS)
+    assert len(db.rows) == len(dg._SEED_GIFS)
+
+
+@pytest.mark.asyncio
+async def test_seeded_rows_start_as_urls_awaiting_upgrade():
+    db = _FakeDB()
+    await dg.apply_seed(db)
+    assert all(r["url"] and not r["file_id"] for r in db.rows)

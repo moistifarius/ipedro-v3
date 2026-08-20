@@ -189,7 +189,85 @@ async def note_sent(
 # startup seed would resurrect anything the user deleted on the next restart.
 # Re-running is a no-op (url is UNIQUE), and each row stops depending on the
 # host as soon as its first send upgrades it to a file_id.
-_SEED_GIFS: tuple[tuple[str, tuple[str, ...]], ...] = ()
+#
+# Every URL below was downloaded and looked at before it was pinned. Six
+# candidates were dropped in the process: two duplicate scenes, one that was
+# Bill and Hank with no Dale in frame, and two extreme close-ups that read as
+# an anonymous hand rather than pocket sand.
+_SEED_GIFS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # -- the signature bit --
+    ("https://media.tenor.com/5rV2htsmYroAAAAM/pocket-sand-dale-gribble.gif",
+     ("pocketsand",)),
+    ("https://media.tenor.com/8xOtgiVgw0gAAAAM/dale-gribble-koth.gif",
+     ("shsha",)),
+
+    # -- conspiracy / paranoia --
+    ("https://media.tenor.com/gDz9uTO2Gk4AAAAM/"
+     "my-suspicions-have-been-confirmed-dale-gribble.gif",
+     ("conspiracy", "paranoia")),
+    ("https://media.tenor.com/fSgocjK3KDQAAAAM/"
+     "i-suspected-since-day-since-one-dale-gribble.gif",
+     ("conspiracy", "paranoia")),
+    ("https://media.tenor.com/agbpcYxrKPkAAAAM/think-about-it-dale-gribble.gif",
+     ("conspiracy", "paranoia")),
+    # "...the global information conspiracy otherwise known as 'the Beast'"
+    ("https://media.tenor.com/4Meyn03YnRIAAAAM/king-of-the-hill-dale-gribble.gif",
+     ("conspiracy", "paranoia")),
+    # "Guns don't kill people, the government does."
+    ("https://media.tenor.com/F3KCHf1DEO4AAAAM/king-of.gif",
+     ("conspiracy", "guns")),
+    ("https://media.tenor.com/KO_F34Bqe78AAAAM/king-of-the-hill-hank-hill.gif",
+     ("paranoia",)),
+
+    # -- smug / the expert --
+    ("https://media.tenor.com/L_8WRznhLaEAAAAM/ha-gotcha.gif", ("smug",)),
+    ("https://media.tenor.com/fC5qIgBvW9YAAAAM/"
+     "are-you-familiar-with-my-credentials-credentials.gif",
+     ("smug", "expert")),
+    ("https://media.tenor.com/EXXyadd0J9EAAAAM/"
+     "you-called-the-right-guy-dale-gribble.gif",
+     ("smug", "expert")),
+
+    # -- agreement --
+    ("https://media.tenor.com/PIhbe0SLtkAAAAAM/noted-dale-gribble.gif",
+     ("agree",)),
+    ("https://media.tenor.com/SJUZyeEIc3MAAAAM/yep-dale-gribble.gif", ("agree",)),
+    ("https://media.tenor.com/Iu1fx7hN7tAAAAAM/yup-dale-gribble.gif", ("agree",)),
+
+    # -- "I'm skeptical that you could, yet intrigued that you may." --
+    ("https://media.tenor.com/_5Jn7fS-ASEAAAAM/king-of-the-hill-dale-gribble.gif",
+     ("doubt",)),
+
+    # -- guns --
+    ("https://media.tenor.com/gcKoCR72Iu4AAAAM/dale-gribble-king-of-the-hill.gif",
+     ("guns",)),
+    ("https://media.tenor.com/2RNa9iGu1gcAAAAM/reload-shotgun.gif",
+     ("guns", "paranoia")),
+    ("https://media.tenor.com/oa0rInOgM2QAAAAM/dale-gribble-king-of-the-hill.gif",
+     ("guns", "paranoia")),
+
+    # -- panic / flight --
+    ("https://media.tenor.com/Gs_sT0J_cZkAAAAM/scared-scared-face.gif",
+     ("panic",)),
+    ("https://media.tenor.com/sMjbjZcAgusAAAAM/vertigo-dale-gribble.gif",
+     ("panic",)),
+    ("https://media.tenor.com/VamCz7JBHMkAAAAM/king-of-the-hill-dale-gribble.gif",
+     ("panic", "chaos")),
+    ("https://media.tenor.com/fBbBwLO2yjkAAAAM/dale-gribble-king-of-the-hill.gif",
+     ("panic", "flee")),          # "Squirrel Tactic!"
+    ("https://media.tenor.com/My3ExpNPJy4AAAAM/dale-gribble-dale.gif",
+     ("flee",)),                  # "So long, suckers"
+
+    # -- deadpan filler, mostly for the ambient sprinkle --
+    ("https://media.tenor.com/z_7eIX8X06IAAAAM/king-of-the-hill-dale-gribble.gif",
+     ("deadpan",)),
+    ("https://media.tenor.com/oLlX7pYScZIAAAAM/king-of-the-hill-dale-gribble.gif",
+     ("deadpan",)),               # "You wouldn't hit an unconscious man."
+)
+
+# Hosts we're willing to pin. Mirrors the automod media test's allowlist.
+SEED_HOSTS = frozenset({"media.tenor.com", "media1.tenor.com",
+                        "media.giphy.com", "i.imgflip.com"})
 
 
 async def apply_seed(db: Database) -> tuple[int, int]:
