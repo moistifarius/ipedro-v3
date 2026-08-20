@@ -183,6 +183,27 @@ async def note_sent(
         )
 
 
+# ── seeding ──────────────────────────────────────────────────────────────────
+# Pinned starter set: URLs verified by download + eye at the time they were
+# added. Applied by `/dalegif seed` rather than at startup, deliberately — a
+# startup seed would resurrect anything the user deleted on the next restart.
+# Re-running is a no-op (url is UNIQUE), and each row stops depending on the
+# host as soon as its first send upgrades it to a file_id.
+_SEED_GIFS: tuple[tuple[str, tuple[str, ...]], ...] = ()
+
+
+async def apply_seed(db: Database) -> tuple[int, int]:
+    """Insert the pinned starter set. Returns (added, already_present)."""
+    added = skipped = 0
+    for url, tags in _SEED_GIFS:
+        gif_id, was_new = await add(db, list(tags), url=url)
+        if gif_id is not None and was_new:
+            added += 1
+        else:
+            skipped += 1
+    return added, skipped
+
+
 # ── sending ──────────────────────────────────────────────────────────────────
 
 async def _download(url: str) -> bytes | None:

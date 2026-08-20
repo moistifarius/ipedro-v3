@@ -21,6 +21,7 @@ from ipedro.handlers import admin as admin_h
 from ipedro.handlers import ai as ai_h
 from ipedro.handlers import basics as basics_h
 from ipedro.handlers import chat as chat_h
+from ipedro.handlers import dale as dale_h
 from ipedro.handlers import debug as debug_h
 from ipedro.handlers import duckhunt as duck_h
 from ipedro.handlers import ether as ether_h
@@ -144,6 +145,7 @@ def build_dispatcher(rt: Runtime) -> Dispatcher:
     dp.include_router(quiz_h.build_router(rt))
     dp.include_router(duck_h.build_router(rt))
     dp.include_router(ether_h.build_router(rt))
+    dp.include_router(dale_h.build_router(rt))
     dp.include_router(chat_h.build_router(rt))
     return dp
 

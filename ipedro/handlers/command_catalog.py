@@ -101,6 +101,10 @@ COMMANDS: tuple[Command, ...] = (
     Command("beneficiality","ai", "/beneficiality",
             "/beneficiality",
             "Score whether I'd butt in right now."),
+    Command("dalegif",      "ai", "/dalegif",
+            "/dalegif <tags> (as a reply to a GIF)",
+            "Curate the Dale GIF library: reply to a GIF to save it, "
+            "or list / test / remove / seed."),
     Command("whatdid",      "ai", "/whatdid",
             "/whatdid @user",
             "Summarize what they've been up to."),
