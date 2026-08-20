@@ -18,8 +18,9 @@ from ipedro.duckhunt.captcha_gen import matches as captcha_matches
 from ipedro.duckhunt.debug_toggles import is_on as debug_is_on
 from ipedro.duckhunt.scoring import challenge_is_over_time, over_time_line
 from ipedro.duckhunt.verdicts import parse_verdict
+from ipedro import dale_gifs as dale
 from ipedro.handlers.automod import (
-    MediaResponse, _automod_response, fetch_automod_media,
+    DaleGif, MediaResponse, _automod_response, fetch_automod_media,
 )
 from ipedro.handlers.common import (
     catify, display_name, fallback_cat_fact, get_or_create_chat_config,
@@ -644,6 +645,12 @@ def build_router(rt: Runtime) -> Router:
         if automod is not None:
             if isinstance(automod, MediaResponse):
                 await _reply_automod_media(msg, automod)
+            elif isinstance(automod, DaleGif):
+                await dale.send_random(
+                    rt.db, msg, automod.tag,
+                    caption=automod.caption or None,
+                    fallback=automod.fallback,
+                )
             else:
                 sent = await msg.reply(automod, disable_notification=True)
                 track(msg.chat.id, sent.message_id, automod)

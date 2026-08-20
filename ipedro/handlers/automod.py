@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import random
 import re
+from dataclasses import dataclass
 from typing import NamedTuple
 
 import httpx
@@ -47,6 +48,25 @@ class MediaResponse(NamedTuple):
     url: str           # pinned direct media URL (https)
     caption: str       # sent with the media; also the tracked snippet
     fallback: str      # text reply used when fetching/sending the media fails
+
+
+@dataclass(frozen=True)
+class DaleGif:
+    """Reply with a random Dale Gribble GIF drawn from the library.
+
+    A marker only: this module stays pure (no Runtime, no I/O), so it just
+    names a tag and chat.py resolves it against the DB at send time.
+
+    Deliberately a dataclass and NOT a NamedTuple. A NamedTuple *is* a tuple,
+    so it would fall into `_automod_response`'s "tuple means pick one at
+    random" branch and return one of these three fields as the reply — and
+    `test_table_shape_is_extensible`, which checks `isinstance(r, tuple)`,
+    would happily pass while it happened.
+    """
+
+    tag: str
+    caption: str = ""
+    fallback: str = ""
 
 
 # In-process cache of fetched media bytes. The URL set is small and fixed
@@ -306,11 +326,38 @@ _M_WHY_RUNNING = MediaResponse(
 # The trigger table. First match wins.
 # ─────────────────────────────────────────────────────────────────────────────
 _AUTOMOD_TRIGGERS: tuple[
-    tuple["re.Pattern[str]", "str | tuple[str, ...] | MediaResponse"], ...
+    tuple["re.Pattern[str]",
+          "str | tuple[str, ...] | MediaResponse | DaleGif"], ...
 ] = (
     # --- kys stays first: it must win over any joke trigger in the message ---
     (re.compile(r"\bkys\b|(kill|neck)\s*(your|my|ur|yr)\s*self", re.IGNORECASE),
      _KYS_LINES),
+
+    # --- Dale Gribble GIFs (the bot's own persona) ---
+    # Distinctive phrases ONLY. Bare 'government' / 'conspiracy' / 'alien' are
+    # ordinary conversational words, and because this table intercepts and
+    # RETURNS, a row on those would answer a real question with a GIF.
+    # Nothing here may match the bot's own name either — see
+    # test_no_dale_trigger_matches_the_bots_own_name.
+    (re.compile(r"\bpocket\s*sand\b", re.IGNORECASE),
+     DaleGif("pocketsand", fallback="sh-sha! Straight in the eyes.")),
+    (re.compile(r"\bpropane\b", re.IGNORECASE),
+     DaleGif("deadpan", fallback="...and propane accessories.")),
+    (re.compile(r"\bthat boy ain'?t right\b", re.IGNORECASE),
+     DaleGif("deadpan", fallback="I tell you hwhat.")),
+    (re.compile(r"\bsh+-?sha+\b", re.IGNORECASE),
+     DaleGif("shsha", fallback="That's the sound of a man who knows things.")),
+    (re.compile(
+        r"\bdeep state\b|\bfalse flag\b|\bchemtrails?\b"
+        r"|\bblack helicopters?\b|\btin\s*foil hat\b|\bnew world order\b"
+        r"|\bmen in black\b|\bgrassy knoll\b|\blizard people\b"
+        r"|\bsheeple\b|\barea 51\b|\bmoon landing\b",
+        re.IGNORECASE),
+     DaleGif("conspiracy", fallback="My suspicions have been confirmed.")),
+    (re.compile(r"\bthey'?re watching\b|\bwake up sheeple\b", re.IGNORECASE),
+     DaleGif("paranoia", fallback="Sh-sha. Eyes peeled.")),
+    (re.compile(r"\bsquirrel tactic\b", re.IGNORECASE),
+     DaleGif("flee", fallback="*scatters into the neighbour's yard* 🐿️")),
 
     # --- long-form copypastas ---
     (_GAY_RE, _GAY_COPYPASTA),
@@ -358,7 +405,7 @@ _AUTOMOD_TRIGGERS: tuple[
     (re.compile(r"\bsigma\b", re.IGNORECASE), "sigma balls. 🥷"),
     (re.compile(r"\brizz\b", re.IGNORECASE), _RIZZ_LINES),
     (re.compile(r"\bwe live in a society\b", re.IGNORECASE),
-     "🃏 we live in one. gamers, rise up."),
+     DaleGif("conspiracy", fallback="🃏 we live in one. gamers, rise up.")),
     (re.compile(r"\bmitochondria\b", re.IGNORECASE),
      "the powerhouse of the cell 🔬"),
     (re.compile(r"\breduced to atoms\b", re.IGNORECASE), "*snaps fingers* 🫰"),
@@ -366,7 +413,8 @@ _AUTOMOD_TRIGGERS: tuple[
     (re.compile(r"\bgyat+\b", re.IGNORECASE), "level 10 gyatt detected 🚨"),
     (re.compile(r"\bfanum tax\b", re.IGNORECASE), "not the fanum tax 💀"),
     (re.compile(r"\blet (?:him|her|them) cook\b", re.IGNORECASE), _COOK_LINES),
-    (re.compile(r"\breddit moment\b", re.IGNORECASE), "🤓 erm, ackshually"),
+    (re.compile(r"\breddit moment\b", re.IGNORECASE),
+     DaleGif("smug", fallback="🤓 erm, ackshually")),
     (re.compile(r"\bdeez nuts\b", re.IGNORECASE), "Ha! Got 'em. 🥜"),
     (re.compile(r"\bok boomer\b", re.IGNORECASE), "ok zoomer 👵"),
     (re.compile(r"\btask failed successfully\b", re.IGNORECASE),
@@ -525,14 +573,16 @@ _AUTOMOD_TRIGGERS: tuple[
 
 def _automod_response(
     text: str | None, rng: random.Random | None = None,
-) -> "str | MediaResponse | None":
+) -> "str | MediaResponse | DaleGif | None":
     """First matching AutoMod-style canned response for `text`, or None."""
     if not text:
         return None
     r = rng or random
     for pattern, response in _AUTOMOD_TRIGGERS:
         if pattern.search(text):
-            if isinstance(response, MediaResponse):
+            # Both markers pass through untouched; only a real tuple means
+            # "pick one of these at random".
+            if isinstance(response, (MediaResponse, DaleGif)):
                 return response
             return response if isinstance(response, str) else r.choice(response)
     return None

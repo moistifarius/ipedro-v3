@@ -17,7 +17,7 @@ import pytest
 from ipedro.handlers.automod import (
     _ALL_YOUR_BASE, _AMONG_US_COPYPASTA, _AUTOMOD_TRIGGERS, _COPIUM_LINES,
     _GAY_COPYPASTA, _GNU_LINUX_PASTA, _HOLY_HELL_CHAIN, _JACKDAW_PASTA,
-    _KYS_LINES, _L_RATIO_COPYPASTA, MediaResponse, _automod_response,
+    _KYS_LINES, _L_RATIO_COPYPASTA, DaleGif, MediaResponse, _automod_response,
 )
 
 
@@ -90,6 +90,13 @@ def test_kys_gets_a_deflection_and_wins_priority():
 
 _SAMPLES: dict[str, str] = {
     r"\bkys\b|(kill|neck)\s*(your|my|ur|yr)\s*self": "kys",
+    r"\bpocket\s*sand\b": "pocket sand",
+    r"\bpropane\b": "propane",
+    r"\bthat boy ain'?t right\b": "that boy ain't right",
+    r"\bsh+-?sha+\b": "sh-sha",
+    r"\bdeep state\b|\bfalse flag\b|\bchemtrails?\b|\bblack helicopters?\b|\btin\s*foil hat\b|\bnew world order\b|\bmen in black\b|\bgrassy knoll\b|\blizard people\b|\bsheeple\b|\barea 51\b|\bmoon landing\b": "deep state",
+    r"\bthey'?re watching\b|\bwake up sheeple\b": "they're watching",
+    r"\bsquirrel tactic\b": "squirrel tactic",
     r"\bgays?\b": "gay",
     r"\bamong\s*us\b|\bamogus\b|\bsussy\b": "among us",
     r"\bholy\s+hell\b|\ben\s+passant\b": "holy hell",
@@ -218,6 +225,17 @@ def _normalize(s: str) -> str:
     return " ".join("".join(c if c.isalnum() else " " for c in s.lower()).split())
 
 
+def _variants(response) -> tuple[str, ...]:
+    """Every string a response can put on screen, whatever its type."""
+    if isinstance(response, MediaResponse):
+        return (response.caption, response.fallback)
+    if isinstance(response, DaleGif):
+        return tuple(v for v in (response.caption, response.fallback) if v)
+    if isinstance(response, str):
+        return (response,)
+    return tuple(response)
+
+
 def test_every_trigger_has_a_sample():
     patterns = {p.pattern for p, _ in _AUTOMOD_TRIGGERS}
     missing = patterns - set(_SAMPLES)
@@ -230,7 +248,7 @@ def test_samples_reach_their_own_row():
     for pattern, response in _AUTOMOD_TRIGGERS:
         sample = _SAMPLES[pattern.pattern]
         got = _automod_response(sample, random.Random(0))
-        if isinstance(response, MediaResponse):
+        if isinstance(response, (MediaResponse, DaleGif)):
             assert got == response, (sample, got)
         elif isinstance(response, str):
             assert got == response, (sample, got)
@@ -242,13 +260,7 @@ def test_no_response_is_an_echo():
     """The core rule: never repeat the trigger phrase back ± emoji."""
     for pattern, response in _AUTOMOD_TRIGGERS:
         sample = _normalize(_SAMPLES[pattern.pattern])
-        if isinstance(response, MediaResponse):
-            variants = (response.caption, response.fallback)
-        elif isinstance(response, str):
-            variants = (response,)
-        else:
-            variants = response
-        for v in variants:
+        for v in _variants(response):
             assert _normalize(v) != sample, (
                 f"echo response for {pattern.pattern!r}: {v!r}")
 
@@ -414,13 +426,7 @@ def test_tuple_branch_draws_and_varies():
 
 def test_every_text_response_fits_the_telegram_message_limit():
     for _pattern, response in _AUTOMOD_TRIGGERS:
-        if isinstance(response, MediaResponse):
-            variants = (response.caption, response.fallback)
-        elif isinstance(response, str):
-            variants = (response,)
-        else:
-            variants = response
-        for v in variants:
+        for v in _variants(response):
             assert isinstance(v, str) and 0 < len(v) <= 4000, v[:60]
 
 
@@ -433,4 +439,63 @@ def test_no_trigger_returns_none():
 def test_table_shape_is_extensible():
     for pattern, response in _AUTOMOD_TRIGGERS:
         assert hasattr(pattern, "search")
-        assert isinstance(response, (str, tuple, MediaResponse))
+        assert isinstance(response, (str, tuple, MediaResponse, DaleGif))
+
+
+# ── Dale GIF rows ────────────────────────────────────────────────────────────
+
+def _dale_rows():
+    return [(p, r) for p, r in _AUTOMOD_TRIGGERS if isinstance(r, DaleGif)]
+
+
+def test_no_dale_trigger_matches_the_bots_own_name():
+    """The load-bearing guard.
+
+    This table intercepts and RETURNS, before the AI ever runs. A Dale row
+    matching the bot's own name would mean that addressing it by name gets a
+    GIF instead of an answer — it would simply stop replying when spoken to.
+    """
+    addressed = [
+        "dale", "dale gribble", "rusty shackleford", "idale", "boomhauer",
+        "pedro", "the dude", "duderino", "hey dale", "dale what do you think",
+        "thanks dale", "rusty, you there?",
+    ]
+    for pattern, response in _dale_rows():
+        for text in addressed:
+            assert not pattern.search(text), (
+                f"Dale row {pattern.pattern!r} swallows {text!r} — the bot "
+                f"would answer its own name with a GIF ({response.tag})")
+
+
+def test_dale_rows_are_wellformed():
+    rows = _dale_rows()
+    assert len(rows) >= 8
+    for _pattern, r in rows:
+        assert r.tag and r.tag == r.tag.lower(), r
+        assert r.fallback, r          # never degrade into silence
+        assert len(r.fallback) <= 4000
+
+
+def test_dale_tags_all_exist_in_the_seeded_library():
+    """A typo'd tag would silently fall back to 'any Dale GIF' forever."""
+    from ipedro.dale_gifs import _SEED_GIFS
+    seeded = {t for _url, tags in _SEED_GIFS for t in tags}
+    for _pattern, r in _dale_rows():
+        assert r.tag in seeded, f"tag {r.tag!r} is in no seeded GIF"
+
+
+def test_dale_triggers_need_their_distinctive_phrase():
+    """Bare conversational words must not fire — the reply would replace a
+    real answer to an ordinary question."""
+    for text in ("the government said so", "that's a conspiracy",
+                 "aliens are cool", "call the fbi", "surveillance state",
+                 "i saw a black cat", "the moon is bright"):
+        got = _automod_response(text)
+        assert not isinstance(got, DaleGif), (text, got)
+
+
+def test_converted_rows_keep_their_old_text_as_the_fallback():
+    reddit = _automod_response("reddit moment")
+    assert isinstance(reddit, DaleGif) and "ackshually" in reddit.fallback
+    society = _automod_response("we live in a society")
+    assert isinstance(society, DaleGif) and "gamers" in society.fallback
