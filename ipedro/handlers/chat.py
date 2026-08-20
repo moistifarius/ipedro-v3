@@ -83,6 +83,12 @@ _REACTION_POOL = (
 
 _REACT_PROBABILITY = 0.04
 
+# Ambient Dale: how often an un-addressed message just gets a GIF back.
+# A module constant on purpose, like _REACT_PROBABILITY above it — the
+# per-chat off switch is /chat_config automod off, which covers the whole
+# canned-reaction surface rather than adding a second overlapping toggle.
+_DALE_GIF_PROBABILITY = 0.03
+
 _POSITIVITY_RE = re.compile(
     r"\b(thanks?|thank\s*you|ty|tysm|appreciate|love\s+(it|this|that)|"
     r"great|awesome|amazing|nice|cool|good\s+(job|idea|call)|"
@@ -719,6 +725,23 @@ def build_router(rt: Runtime) -> Router:
             is_command=False,
             chat_type=msg.chat.type,
         )
+
+        # Ambient Dale. Deliberately does NOT return: falling through keeps
+        # maybe_summarize (below) running on these messages. Skipped whenever
+        # the message is addressed to the bot, so a random GIF can never eat a
+        # real answer, and given no text fallback — an empty library means
+        # silence, not noise.
+        if (
+            cfg.automod_enabled
+            and cfg.response_policy != "commands"
+            and not incoming.has_mention_of_bot
+            and not incoming.is_reply_to_bot
+            and random.random() < _DALE_GIF_PROBABILITY
+        ):
+            try:
+                await dale.send_random(rt.db, msg, "")
+            except Exception as exc:
+                log.debug("ambient dale gif failed in %s: %s", msg.chat.id, exc)
 
         if not should_respond(
             cfg.response_policy, incoming,
