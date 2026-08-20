@@ -501,3 +501,28 @@ ON CONFLICT (quiz_id, chat_id, user_id) DO NOTHING;
 INSERT INTO quiz_item_images (quiz_id, item_key, png, created_at)
 SELECT 'disgust', item_key, png, created_at FROM disgust_item_images
 ON CONFLICT (quiz_id, item_key) DO NOTHING;
+
+-- Dale Gribble GIF library ---------------------------------------------------
+-- GLOBAL on purpose: no chat_id column, because the library is shared by every
+-- chat (and because db/chat_migration.py:63-78 re-keys every table that HAS
+-- one). Rows arrive seeded from pinned URLs, or captured from Telegram when an
+-- admin tags a GIF with /dalegif <tags>.
+--
+-- Identity is file_unique_id, NOT file_id: file_id is per-bot and Telegram may
+-- re-issue it, while file_unique_id is stable and is what makes "we already
+-- have this GIF" answerable. url is unique too, which is what makes re-running
+-- the seed a no-op. Postgres allows many NULLs in a UNIQUE column, so
+-- url-only and file-only rows coexist happily.
+--
+-- No index: this table is a few dozen rows and every read is either a random
+-- pick or a full list. A seq scan is microseconds and an index would be noise.
+CREATE TABLE IF NOT EXISTS dale_gifs (
+    id             BIGSERIAL PRIMARY KEY,
+    tags           TEXT[] NOT NULL DEFAULT '{}',
+    file_id        TEXT,
+    file_unique_id TEXT UNIQUE,
+    url            TEXT UNIQUE,
+    added_by       BIGINT,
+    send_count     INTEGER NOT NULL DEFAULT 0,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
