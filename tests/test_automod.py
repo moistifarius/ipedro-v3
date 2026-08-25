@@ -484,6 +484,22 @@ def test_dale_tags_all_exist_in_the_seeded_library():
         assert r.tag in seeded, f"tag {r.tag!r} is in no seeded GIF"
 
 
+def test_every_dale_trigger_tag_has_more_than_one_gif():
+    """A bucket with one GIF returns that same GIF every single time.
+
+    random_for_tag only falls back to 'any Dale GIF' when the bucket is
+    EMPTY, so a one-GIF bucket doesn't degrade gracefully — it just repeats,
+    which kills the bit fastest on the triggers people use most.
+    """
+    from collections import Counter
+    from ipedro.dale_gifs import _SEED_GIFS
+    counts = Counter(t for _url, tags in _SEED_GIFS for t in tags)
+    for _pattern, r in _dale_rows():
+        assert counts[r.tag] >= 2, (
+            f"tag {r.tag!r} has {counts[r.tag]} GIF(s) — it would send the "
+            f"same one every time")
+
+
 def test_dale_triggers_need_their_distinctive_phrase():
     """Bare conversational words must not fire — the reply would replace a
     real answer to an ordinary question."""

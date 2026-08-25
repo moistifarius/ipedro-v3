@@ -190,10 +190,12 @@ async def note_sent(
 # Re-running is a no-op (url is UNIQUE), and each row stops depending on the
 # host as soon as its first send upgrades it to a file_id.
 #
-# Every URL below was downloaded and looked at before it was pinned. Six
-# candidates were dropped in the process: two duplicate scenes, one that was
-# Bill and Hank with no Dale in frame, and two extreme close-ups that read as
-# an anonymous hand rather than pocket sand.
+# Every URL below was downloaded and looked at before it was pinned, across
+# two passes. 18 candidates were dropped in the process: duplicate scenes at
+# different sizes, one that was Bill and Hank with no Dale in frame, a couple
+# of bland group shots, one that wasn't King of the Hill at all, and SIX
+# separate uploads of the same anonymous hand-in-a-pocket close-up, which is
+# what most of Tenor's "pocket sand" results actually are.
 _SEED_GIFS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # -- the signature bit --
     ("https://media.tenor.com/5rV2htsmYroAAAAM/pocket-sand-dale-gribble.gif",
@@ -220,17 +222,18 @@ _SEED_GIFS: tuple[tuple[str, tuple[str, ...]], ...] = (
      ("paranoia",)),
 
     # -- smug / the expert --
-    ("https://media.tenor.com/L_8WRznhLaEAAAAM/ha-gotcha.gif", ("smug",)),
+    ("https://media.tenor.com/L_8WRznhLaEAAAAM/ha-gotcha.gif",
+     ("smug", "shsha")),
     ("https://media.tenor.com/fC5qIgBvW9YAAAAM/"
      "are-you-familiar-with-my-credentials-credentials.gif",
-     ("smug", "expert")),
+     ("smug", "expert", "shsha")),
     ("https://media.tenor.com/EXXyadd0J9EAAAAM/"
      "you-called-the-right-guy-dale-gribble.gif",
      ("smug", "expert")),
 
     # -- agreement --
     ("https://media.tenor.com/PIhbe0SLtkAAAAAM/noted-dale-gribble.gif",
-     ("agree",)),
+     ("agree", "shsha")),
     ("https://media.tenor.com/SJUZyeEIc3MAAAAM/yep-dale-gribble.gif", ("agree",)),
     ("https://media.tenor.com/Iu1fx7hN7tAAAAAM/yup-dale-gribble.gif", ("agree",)),
 
@@ -263,6 +266,21 @@ _SEED_GIFS: tuple[tuple[str, tuple[str, ...]], ...] = (
      ("deadpan",)),
     ("https://media.tenor.com/oLlX7pYScZIAAAAM/king-of-the-hill-dale-gribble.gif",
      ("deadpan",)),               # "You wouldn't hit an unconscious man."
+
+    # -- second pass: filling the buckets that had only one GIF, so the
+    # -- signature bits stop repeating the same clip every time --
+    ("https://media.tenor.com/ASoyuGdMMm8AAAAM/pocket-sand-dale.gif",
+     ("pocketsand",)),            # the bar scene, Dale's face in frame
+    ("https://media.tenor.com/Mlb73N-O7WYAAAAM/dale-gribble-squirrel-tactic.gif",
+     ("flee", "panic")),          # wider cut of "Squirrel Tactic!"
+    ("https://media.tenor.com/eDo0vuCTHYgAAAAM/king-of-the-hill-dale-gribble.gif",
+     ("panic", "chaos")),
+    ("https://media.tenor.com/HaDGdBi3DZ4AAAAM/nod-nodding.gif",
+     ("deadpan", "agree")),
+    ("https://media.tenor.com/Eh4lPv9GXxQAAAAM/stand-off-snake.gif",
+     ("deadpan",)),
+    ("https://media.tenor.com/xvf3XrrPlNwAAAAM/king-of-the-hill-koth.gif",
+     ("deadpan",)),               # the alley, beers, with Boomhauer
 )
 
 # Hosts we're willing to pin. Mirrors the automod media test's allowlist.
