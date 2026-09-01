@@ -30,7 +30,7 @@ from ipedro.meme_finder import (
     classify_meme_request, derive_topic_queries, find_relevant_meme,
     generate_meme,
 )
-from ipedro.memory.context_builder import build_context
+from ipedro.memory.context_builder import build_context, reaction_note
 from ipedro.memory.summarizer import maybe_summarize
 from ipedro.prompts import CAT_FACT_PROMPT, DUCK_BEF_CHALLENGE_JUDGE_PROMPT
 from ipedro.reddit import (
@@ -668,14 +668,41 @@ def build_router(rt: Runtime) -> Router:
             and msg.message_id
             and random.random() < _REACT_PROBABILITY
         ):
+            # Bound to a local, not inlined into the call: the bot has to be
+            # able to say WHICH emoji it used. Telegram never reports a bot's
+            # own reactions back to it and there's no "list my reactions" API,
+            # so recording it here is the only chance we get.
+            emoji = random.choice(_REACTION_POOL)
+            reacted = False
             try:
                 await rt.bot.set_message_reaction(
                     chat_id=msg.chat.id,
                     message_id=msg.message_id,
-                    reaction=[ReactionTypeEmoji(emoji=random.choice(_REACTION_POOL))],
+                    reaction=[ReactionTypeEmoji(emoji=emoji)],
                 )
+                reacted = True
             except Exception as exc:
                 log.debug("Reaction failed: %s", exc)
+            if reacted and cfg.memory_enabled:
+                # A synthetic assistant turn so the reaction shows up in the
+                # bot's own history. message_id=None is the schema's sanctioned
+                # synthetic path; do_embed=False keeps these out of semantic
+                # retrieval. Quote the text, not just the name — stored user
+                # turns carry no speaker labels, so the snippet is what lets
+                # the model tie the reaction to the right message.
+                try:
+                    await rt.memory.record_message(
+                        chat_id=msg.chat.id,
+                        role="assistant",
+                        content=reaction_note(emoji, text),
+                        message_id=None,
+                        user_id=None,
+                        do_embed=False,
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "reaction record failed for %s: %s", msg.chat.id, exc,
+                    )
 
         # Cat mention: drop a dubious cat fact and stop. Skip the regular
         # AI reply so the bot doesn't both fact and chat. Meme requests

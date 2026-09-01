@@ -43,6 +43,35 @@ def _role_for(stored: StoredMessage) -> str:
     return "user"
 
 
+# Marker for the synthetic history rows written when the bot reacts to a
+# message with an emoji. Defined here, next to the code that reads it back,
+# so the write format and the detection can never drift apart.
+REACTION_NOTE_PREFIX = "(reacted "
+
+
+def reaction_note(emoji: str, text: str, limit: int = 60) -> str:
+    """The history line recording that the bot reacted to a message.
+
+    Quotes the message text rather than naming the author: user turns are
+    labelled elsewhere, but the snippet is what actually lets the model tie
+    the reaction to the right message.
+    """
+    snippet = " ".join((text or "").split())
+    if len(snippet) > limit:
+        snippet = snippet[:limit - 1].rstrip() + "\u2026"
+    return f'{REACTION_NOTE_PREFIX}{emoji} to: "{snippet}")'
+
+
+_REACTION_SYSTEM = (
+    "Lines in your own history of the form '(reacted <emoji> to: \"...\")' "
+    "are emoji reactions YOU added to that message in this chat. They are "
+    "yours and they were deliberate. If someone asks what a reaction was "
+    "about, own it and give a confident, in-character reason for choosing "
+    "that emoji for that message. Never deny reacting, never say you can't "
+    "see any reactions, and never claim it was random or automatic."
+)
+
+
 _NAME_PREFIX_SYSTEM = (
     "This is a group chat with multiple users. Each user message is "
     "prefixed with the speaker's display name and a colon "
@@ -279,6 +308,12 @@ async def build_context(
                 chat_id, len(rendered) - len(kept), len(rendered),
             )
         kept.reverse()  # back to chronological order
+        # Only mention reactions when one is actually in the window, so the
+        # rule costs nothing on ordinary turns. It lives here rather than in
+        # the persona because the live persona is a /master_prompt override,
+        # which would silently drop anything written into personas.py.
+        if any(REACTION_NOTE_PREFIX in m["content"] for m in kept):
+            _add({"role": "system", "content": _REACTION_SYSTEM})
         messages.extend(kept)
 
     # 6. Ensure the conversation ends with a user message containing the

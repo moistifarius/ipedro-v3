@@ -471,3 +471,62 @@ async def test_no_marker_for_rapid_back_and_forth():
     # note legitimately contains an example marker, so exclude it).
     convo = [m for m in built.messages if m["role"] != "system"]
     assert all("⏳" not in m["content"] for m in convo)
+
+
+# ── the bot must own its own reactions ───────────────────────────────────────
+
+def _system_text(built) -> str:
+    return "\n".join(m["content"] for m in built.messages if m["role"] == "system")
+
+
+@pytest.mark.asyncio
+async def test_reaction_in_window_adds_the_own_it_rule():
+    """A '(reacted …)' assistant row in recent history must be accompanied
+    by the instruction to own it — otherwise the model reads its own
+    reaction note and still says 'which reactions?'."""
+    from ipedro.memory.context_builder import reaction_note
+    store = FakeStore(recent=[
+        _msg("I give up", "user"),
+        _msg(reaction_note("🤡", "I give up"), "assistant", mid=2),
+        _msg("Dale what are those reactions about", "user", mid=3),
+    ])
+    built = await build_context(
+        store=store, settings=_settings(), chat_id=1,
+        persona="pedro", persona_custom=None,
+        latest_user_text="Dale what are those reactions about",
+    )
+    system = _system_text(built)
+    assert "reacted" in system and "deliberate" in system
+    assert "Never deny reacting" in system
+    # and the reaction row itself reached the model as its own turn
+    assert any(m["role"] == "assistant" and "🤡" in m["content"]
+               for m in built.messages)
+
+
+@pytest.mark.asyncio
+async def test_no_reaction_in_window_no_rule():
+    """The rule costs tokens on every turn it's present, so it must only
+    appear when there's actually a reaction to account for."""
+    store = FakeStore(recent=[
+        _msg("hi there", "user"), _msg("hey back", "assistant", mid=2),
+    ])
+    built = await build_context(
+        store=store, settings=_settings(), chat_id=1,
+        persona="pedro", persona_custom=None,
+        latest_user_text="hi there",
+    )
+    assert "Never deny reacting" not in _system_text(built)
+
+
+@pytest.mark.asyncio
+async def test_reaction_rule_is_skipped_when_memory_is_off():
+    """With memory off the reaction row is never loaded, so the rule has
+    nothing to refer to and must not appear."""
+    from ipedro.memory.context_builder import reaction_note
+    store = FakeStore(recent=[_msg(reaction_note("🤡", "x"), "assistant")])
+    built = await build_context(
+        store=store, settings=_settings(), chat_id=1,
+        persona="pedro", persona_custom=None,
+        latest_user_text="x", memory_enabled=False,
+    )
+    assert "Never deny reacting" not in _system_text(built)
