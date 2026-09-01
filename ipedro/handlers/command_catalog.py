@@ -141,7 +141,7 @@ COMMANDS: tuple[Command, ...] = (
             "/redditmeme [topic]  (or /rmeme)",
             "No topic: a post from Reddit's r/popular. With a topic: search "
             "Reddit for a relevant meme. Caption is the post's top comment. "
-            "Also triggers in chat: 'hey pedro, give me a meme about this'."),
+            "Also triggers in chat: 'hey dale, give me a meme about this'."),
     Command("ether",        "ai", "/ether",
             "/ether <text> | /ether (reply to voice)",
             "Transmit a message as staticky shortwave-voice into another "
@@ -240,8 +240,7 @@ COMMANDS: tuple[Command, ...] = (
             "Chat karma leaderboard (👍/👎 reactions grant/dock)."),
     Command("onthisday",    "quotes", "/onthisday",
             "/onthisday",
-            "Resurface what people said on this calendar day in the past. "
-            "Also auto-posts once a day on its own."),
+            "Resurface what people said on this calendar day in the past."),
 
     # ── Reminders & dates ────────────────────────────────────────────────
     Command("remind",       "reminders", "/remind",

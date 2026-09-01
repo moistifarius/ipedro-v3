@@ -530,3 +530,53 @@ async def test_reaction_rule_is_skipped_when_memory_is_off():
         latest_user_text="x", memory_enabled=False,
     )
     assert "Never deny reacting" not in _system_text(built)
+
+
+# ── the capability brief ─────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_capability_brief_is_a_system_message_before_history():
+    store = FakeStore(recent=[_msg("hi", "user")])
+    built = await build_context(
+        store=store, settings=_settings(), chat_id=1,
+        persona="dude", persona_custom=None,
+        latest_user_text="hi", latest_user_name="Matt",
+        capabilities="CAPS: you can do things",
+    )
+    roles = [m["role"] for m in built.messages]
+    idx = next(i for i, m in enumerate(built.messages)
+               if m["content"] == "CAPS: you can do things")
+    assert roles[idx] == "system"
+    assert idx > 0                                   # persona comes first
+    assert idx < roles.index("user")                 # before the conversation
+
+
+@pytest.mark.asyncio
+async def test_capability_brief_is_dropped_during_impersonation():
+    """An impersonation turn is somebody else's voice; the bot's own
+    ability sheet would only leak into it."""
+    store = FakeStore(recent=[_msg("act like Luke", "user")])
+    built = await build_context(
+        store=store, settings=_settings(), chat_id=1,
+        persona="dude", persona_custom=None,
+        latest_user_text="act like Luke", latest_user_name="Matt",
+        persona_override="IMPERSONATION MODE: you are Luke.",
+        capabilities="CAPS: you can do things",
+    )
+    assert "CAPS" not in _system_text(built)
+    assert "IMPERSONATION MODE" in _system_text(built)
+
+
+@pytest.mark.asyncio
+async def test_no_capabilities_means_no_extra_message():
+    store = FakeStore(recent=[_msg("hi", "user")])
+    with_caps = await build_context(
+        store=store, settings=_settings(), chat_id=1,
+        persona="dude", persona_custom=None, latest_user_text="hi",
+        capabilities="CAPS",
+    )
+    without = await build_context(
+        store=store, settings=_settings(), chat_id=1,
+        persona="dude", persona_custom=None, latest_user_text="hi",
+    )
+    assert len(with_caps.messages) == len(without.messages) + 1

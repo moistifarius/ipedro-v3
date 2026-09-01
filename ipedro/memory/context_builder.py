@@ -1,7 +1,8 @@
 """Build the AI chat-completion `messages` array for a given chat.
 
 Combines, in priority order:
-  1. The persona system prompt.
+  1. The persona system prompt, then the current time, the speaker-label
+     convention, and the capability brief (what the bot can and can't do).
   2. A condensed running summary (if any).
   3. Durable per-chat facts (if any).
   4. Semantically retrieved older snippets relevant to the latest user query.
@@ -202,6 +203,7 @@ async def build_context(
     memory_enabled: bool = True,
     now: datetime | None = None,
     persona_override: str | None = None,
+    capabilities: str | None = None,
 ) -> BuiltContext:
     budget = settings.context_max_tokens
     messages: list[dict[str, Any]] = []
@@ -230,6 +232,11 @@ async def build_context(
     # distinguish speakers and address people properly. Kept compact so
     # the budget hit is small.
     _add({"role": "system", "content": _NAME_PREFIX_SYSTEM})
+    # 1c. What the bot can and can't do (ipedro.capabilities). Always on,
+    # so it never denies an ability it has or promises one it hasn't. An
+    # impersonation turn is somebody else's voice, so it gets none of it.
+    if capabilities and not persona_override:
+        _add({"role": "system", "content": capabilities})
     if extra_system:
         _add({"role": "system", "content": extra_system})
 

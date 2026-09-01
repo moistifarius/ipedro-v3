@@ -13,6 +13,7 @@ from aiogram import F, Router
 from aiogram.types import BufferedInputFile, Message, ReactionTypeEmoji
 
 from ipedro.bot_messages import track
+from ipedro.capabilities import capability_brief
 from ipedro.chat_policy import IncomingMessage, should_respond
 from ipedro.duckhunt.captcha_gen import matches as captcha_matches
 from ipedro.duckhunt.debug_toggles import is_on as debug_is_on
@@ -869,6 +870,7 @@ def build_router(rt: Runtime) -> Router:
             extra_system=extra,
             memory_enabled=cfg.memory_enabled,
             persona_override=persona_override,
+            capabilities=capability_brief(cfg),
         )
         reply = await rt.openai.chat(
             ctx.messages, max_tokens=500, chat_id=msg.chat.id,
