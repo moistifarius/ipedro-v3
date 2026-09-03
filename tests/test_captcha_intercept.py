@@ -54,6 +54,8 @@ def _msg(
     return SimpleNamespace(
         chat=chat, from_user=from_user, text=text, caption=None,
         voice=None, message_id=100, entities=None,
+        photo=None, sticker=None, animation=None, video=None,
+        video_note=None, document=None, audio=None,
         reply_to_message=reply_to,
         reply=AsyncMock(),
         answer=AsyncMock(),
@@ -73,6 +75,7 @@ def _rt_with(
         voice_transcribe=False, response_policy="always",
         ambient_probability=0.0, persona="dude", persona_custom=None,
         automod_enabled=True,
+        vision_enabled=False,
     )
     chats = SimpleNamespace(
         upsert_chat=AsyncMock(),

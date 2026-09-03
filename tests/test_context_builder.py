@@ -580,3 +580,42 @@ async def test_no_capabilities_means_no_extra_message():
         persona="dude", persona_custom=None, latest_user_text="hi",
     )
     assert len(with_caps.messages) == len(without.messages) + 1
+
+
+# ── the standing prose-rhythm nudge ──────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_the_style_nudge_is_always_present():
+    """It's a habit, not a mode: no flag turns it on, and it survives
+    memory being off."""
+    store = FakeStore(recent=[])
+    for memory_on in (True, False):
+        built = await build_context(
+            store=store, settings=_settings(), chat_id=1,
+            persona="dude", persona_custom=None, latest_user_text="hi",
+            memory_enabled=memory_on,
+        )
+        system = _system_text(built)
+        assert "Vary sentence length" in system
+        assert "burst and friction" in system
+
+
+@pytest.mark.asyncio
+async def test_the_style_nudge_stands_down_for_impersonation():
+    """Impersonation copies a real person's cadence. A generic rhythm rule
+    would flatten exactly the thing being copied."""
+    store = FakeStore(recent=[])
+    built = await build_context(
+        store=store, settings=_settings(), chat_id=1,
+        persona="dude", persona_custom=None, latest_user_text="act like Luke",
+        persona_override="IMPERSONATION MODE: you are Luke.",
+    )
+    assert "burst and friction" not in _system_text(built)
+
+
+@pytest.mark.asyncio
+async def test_the_style_nudge_does_not_claim_authority_over_voice():
+    """It rides on every single reply, so it must yield to the persona
+    rather than quietly becoming a second one."""
+    from ipedro.memory.context_builder import _STYLE_SYSTEM
+    assert "never overrides your persona" in _STYLE_SYSTEM

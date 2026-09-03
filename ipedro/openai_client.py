@@ -431,6 +431,94 @@ class AIClient:
             log.error("Claude chat error: %s", exc)
             return None
 
+    # ----------------------------------------------------------- vision
+    async def describe_image(
+        self,
+        image: bytes,
+        *,
+        media_type: str = "image/jpeg",
+        prompt: str,
+        max_tokens: int = 300,
+        chat_id: int | None = None,
+    ) -> str | None:
+        """Look at an image and return a plain-text description.
+
+        Routed to the CHEAP model of whichever provider is configured
+        (Claude first): describing a picture is a perception task, not a
+        creative one, and it runs on every image posted in every chat.
+        Returns None when no provider can see, or the call fails — every
+        caller degrades to a text label.
+        """
+        b64 = base64.b64encode(image).decode("ascii")
+        if self._anthropic is not None:
+            try:
+                resp = await self._anthropic.messages.create(
+                    model=self.cheap_claude_model,
+                    max_tokens=max_tokens,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": b64,
+                                },
+                            },
+                            {"type": "text", "text": prompt},
+                        ],
+                    }],
+                )
+                usage = getattr(resp, "usage", None)
+                pt = getattr(usage, "input_tokens", 0) or 0
+                ct = getattr(usage, "output_tokens", 0) or 0
+                await self._log_usage(
+                    kind="vision", model=self.cheap_claude_model,
+                    chat_id=chat_id, prompt_tokens=pt, completion_tokens=ct,
+                    cost_usd=_claude_text_price(self.cheap_claude_model, pt, ct),
+                )
+                out = "\n".join(
+                    block.text for block in resp.content
+                    if getattr(block, "type", None) == "text"
+                ).strip()
+                return out or None
+            except Exception as exc:
+                log.warning("Claude vision error: %s", exc)
+                # Fall through to OpenAI when it's available.
+        if self._openai is not None:
+            try:
+                resp = await self._openai.chat.completions.create(
+                    model=self.cheap_openai_model,
+                    max_tokens=max_tokens,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{media_type};base64,{b64}",
+                                },
+                            },
+                        ],
+                    }],
+                )
+                usage = getattr(resp, "usage", None)
+                pt = getattr(usage, "prompt_tokens", 0) or 0
+                ct = getattr(usage, "completion_tokens", 0) or 0
+                await self._log_usage(
+                    kind="vision", model=self.cheap_openai_model,
+                    chat_id=chat_id, prompt_tokens=pt, completion_tokens=ct,
+                    cost_usd=_openai_text_price(self.cheap_openai_model, pt, ct),
+                )
+                return (resp.choices[0].message.content or "").strip() or None
+            except Exception as exc:
+                log.warning("OpenAI vision error: %s", exc)
+                return None
+        log.debug("describe_image called with no vision-capable provider.")
+        return None
+
     # ----------------------------------------------------------- embeddings (OpenAI only)
     async def embed(
         self, text: str, *, chat_id: int | None = None,

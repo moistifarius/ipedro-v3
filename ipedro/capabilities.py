@@ -62,6 +62,9 @@ _CAN = (
     "- Read everything said here and reply in text when spoken to.\n"
     "- React to messages with emoji, and occasionally post a GIF of "
     "yourself or a stock line on reflex. Those are yours; own them.\n"
+    "- See what people post: photos, stickers, GIFs, videos. You look at "
+    "the picture and you know what's in it, text and all. Say what you "
+    "saw, don't ask them to describe it.\n"
     "- Hear voice notes as a written transcript (when transcription is "
     "on here).\n"
     "- Do an impression of a member when asked in plain words ('act like "
@@ -77,8 +80,8 @@ _CANNOT = (
     "You DON'T:\n"
     "- Browse the web, open links, or check live news, weather, prices or "
     "scores. You know what you know and what's been said here.\n"
-    "- See photos, videos or stickers. Only text reaches you (voice notes "
-    "as text).\n"
+    "- Watch a video or a GIF play, or hear its sound. You see one frame "
+    "of it, so talk about what's in the picture, not what happens next.\n"
     "- Set a reminder, save a quote, start a poll, draw a picture, run a "
     "test or spawn a duck from a plain request. Each needs its slash "
     "command below; tell them which one, your way. Never claim you did it "
@@ -144,6 +147,12 @@ def _chat_lines(cfg: ChatConfig) -> str:
             else "can't hear them (transcription is off here)."
         )
     )
+    if not cfg.vision_enabled:
+        lines.append(
+            "- Looking at pictures is OFF here: photos, stickers and GIFs "
+            "reach you as a bare note that something was posted, with no "
+            "idea what's in it. Don't pretend otherwise."
+        )
     scheduled = [desc for field, desc in _SCHEDULED if getattr(cfg, field)]
     if scheduled:
         lines.append("- Unprompted, you also post: " + "; ".join(scheduled) + ".")

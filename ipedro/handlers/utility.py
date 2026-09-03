@@ -1083,6 +1083,7 @@ def build_router(rt: Runtime) -> Router:
             "ducknames": ("duck_names_public", not cfg.duck_names_public),
             "monthlyrecap": ("monthly_recap_enabled", not cfg.monthly_recap_enabled),
             "automod": ("automod_enabled", not cfg.automod_enabled),
+            "vision": ("vision_enabled", not cfg.vision_enabled),
         }
         if field in toggles:
             col, new_val = toggles[field]
@@ -1174,7 +1175,8 @@ def _config_wizard_header(cfg, target_chat_id: int, *, is_dm_scoped: bool) -> st
         f"   {on if cfg.ether_enabled else off} ether"
         f"   {on if cfg.duck_names_public else off} duck-names public\n"
         f"   {on if cfg.monthly_recap_enabled else off} monthly-recap\n"
-        f"   {on if cfg.automod_enabled else off} automod\n"
+        f"   {on if cfg.automod_enabled else off} automod"
+        f"   {on if cfg.vision_enabled else off} vision\n"
     )
 
 
@@ -1259,6 +1261,8 @@ def _config_keyboard(cfg, *, target_chat_id: int) -> InlineKeyboardMarkup:
         [
             b(f"🤖 Automod bits: {on if cfg.automod_enabled else off}",
               "automod"),
+            b(f"👁 Sees pictures: {on if cfg.vision_enabled else off}",
+              "vision"),
         ],
         [
             b("commands", "policy:commands"),

@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from aiogram import F, Router
 from aiogram.types import BufferedInputFile, Message, ReactionTypeEmoji
 
+from ipedro import vision
 from ipedro.bot_messages import track
 from ipedro.capabilities import capability_brief
 from ipedro.chat_policy import IncomingMessage, should_respond
@@ -588,17 +589,26 @@ def build_router(rt: Runtime) -> Router:
                     )
                 return
 
+        # What the human actually typed. Every keyword intercept below
+        # (automod, cat facts, meme requests, "thanks dale") matches on
+        # THIS, never on the machine-written media description folded into
+        # `text` further down — a canned bit firing off the bot's own
+        # words about a picture would be nonsense.
+        typed = msg.text or msg.caption or ""
+
         # Voice notes: optionally transcribe and treat the transcript as user text.
-        text = msg.text or msg.caption
-        if not text and msg.voice and cfg.voice_transcribe:
+        if not typed and msg.voice and cfg.voice_transcribe:
             transcription = await _transcribe_voice(rt, msg)
             if transcription:
-                text = f"[voice transcript] {transcription}"
+                typed = f"[voice transcript] {transcription}"
 
-        if not text:
+        # A bare photo or sticker carries no text at all, so "no text" can
+        # no longer mean "nothing happened" — check for media before
+        # dropping the message.
+        if not typed and vision.extract_media(msg) is None:
             return  # nothing actionable
 
-        if _is_command(text):
+        if _is_command(typed):
             # Commands are handled by their own routers; nothing to do here.
             return
 
@@ -611,11 +621,25 @@ def build_router(rt: Runtime) -> Router:
         if await has_flag(rt.db, msg.chat.id, from_user_id, "shutup"):
             return
 
+        # Look at the picture. Whatever the bot sees is folded into the
+        # transcript as a bracketed line, so from here down a photo is just
+        # something that was said: recorded in memory, summarized, embedded,
+        # recallable months later. Placed after the shut-up gate so a muted
+        # user's images never cost a vision call.
+        text = typed
+        if cfg.vision_enabled and cfg.response_policy != "commands":
+            seen = await vision.describe(rt, msg)
+            if seen:
+                text = f"{seen}\n{typed}" if typed else seen
+
+        if not text:
+            return  # media we couldn't see and nothing typed
+
         # Auto-grudge: insults toward the bot earn a 24h snark flag.
-        if await maybe_auto_grudge(rt.db, msg.chat.id, from_user_id, text):
+        if await maybe_auto_grudge(rt.db, msg.chat.id, from_user_id, typed):
             log.info(
                 "Auto-grudge added: chat=%s user=%s text=%r",
-                msg.chat.id, from_user_id, text[:80],
+                msg.chat.id, from_user_id, typed[:80],
             )
 
         # Record the inbound message (token-counted, optionally embedded).
@@ -630,7 +654,7 @@ def build_router(rt: Runtime) -> Router:
 
         # "thanks pedro" → passive-aggressive line. Intercepts before the
         # normal flow so we don't also run an AI reply.
-        if cfg.response_policy != "commands" and _THANKS_PEDRO_RE.search(text):
+        if cfg.response_policy != "commands" and _THANKS_PEDRO_RE.search(typed):
             line = random.choice(_THANKS_PEDRO_LINES)
             sent = await msg.reply(line, disable_notification=True)
             track(msg.chat.id, sent.message_id, line)
@@ -645,7 +669,7 @@ def build_router(rt: Runtime) -> Router:
         # 'stonks' → the actual image). Fixed intercept; skip the AI reply.
         # Not written to memory — canned bits aren't conversational context.
         automod = (
-            _automod_response(text)
+            _automod_response(typed)
             if cfg.automod_enabled and cfg.response_policy != "commands"
             else None
         )
@@ -715,8 +739,8 @@ def build_router(rt: Runtime) -> Router:
         # are a separate ambient feature.
         if (
             cfg.response_policy != "commands"
-            and _mentions_cat(text)
-            and _MEME_WORD_RE.search(text) is None
+            and _mentions_cat(typed)
+            and _MEME_WORD_RE.search(typed) is None
         ):
             await rt.bot.send_chat_action(msg.chat.id, "typing")
             fact = await rt.openai.cheap_completion(CAT_FACT_PROMPT, max_tokens=120)
@@ -745,9 +769,9 @@ def build_router(rt: Runtime) -> Router:
             return
 
         incoming = IncomingMessage(
-            text=text,
+            text=typed,
             has_mention_of_bot=(
-                _has_bot_mention(msg, bot_username) or _mentions_pedro(text)
+                _has_bot_mention(msg, bot_username) or _mentions_pedro(typed)
             ),
             is_reply_to_bot=_is_reply_to_bot(msg, bot_id),
             is_command=False,
@@ -780,7 +804,7 @@ def build_router(rt: Runtime) -> Router:
             # Skipped under the explicit commands-only opt-out.
             if (
                 cfg.response_policy != "commands"
-                and _POSITIVITY_RE.search(text)
+                and _POSITIVITY_RE.search(typed)
                 and random.random() < _CREDIT_PROBABILITY
             ):
                 line = random.choice(_CREDIT_LINES)
@@ -803,11 +827,11 @@ def build_router(rt: Runtime) -> Router:
         # cheap AI classifier decides — that's the net for natural
         # phrasings the grammar can't enumerate. Both only run on messages
         # the bot was answering anyway.
-        meme_topic = detect_meme_request(text)
-        if meme_topic is None and _MEME_WORD_RE.search(text):
+        meme_topic = detect_meme_request(typed)
+        if meme_topic is None and _MEME_WORD_RE.search(typed):
             try:
                 meme_topic = await classify_meme_request(
-                    rt.openai, text, chat_id=msg.chat.id,
+                    rt.openai, typed, chat_id=msg.chat.id,
                 )
             except Exception as exc:  # pragma: no cover - defensive
                 log.info("meme classify failed in %s: %s", msg.chat.id, exc)
@@ -820,7 +844,7 @@ def build_router(rt: Runtime) -> Router:
         if meme_topic is not None:
             await _handle_meme_request(
                 rt, msg, cfg, meme_topic,
-                generate=is_meme_generation_request(text),
+                generate=is_meme_generation_request(typed),
             )
             return
 
@@ -831,6 +855,17 @@ def build_router(rt: Runtime) -> Router:
         base_extra = rt.persona_state.to_system_prompt(state)
         if base_extra:
             extra_bits.append(base_extra)
+        # "dale what is this" on someone else's photo: the picture is on the
+        # replied-to message, not this one. Described for this turn only —
+        # it already has its own history row from when it arrived, and the
+        # description is cached by file id, so this is almost always free.
+        if cfg.vision_enabled and msg.reply_to_message is not None:
+            quoted = await vision.describe(rt, msg.reply_to_message)
+            if quoted:
+                extra_bits.append(
+                    f"The message being replied to contains {quoted}"
+                )
+
         snark_flag = await has_flag(rt.db, msg.chat.id, from_user_id, "snark")
         grudge_flag = await has_flag(rt.db, msg.chat.id, from_user_id, "grudge")
         if snark_flag or grudge_flag:
@@ -848,7 +883,7 @@ def build_router(rt: Runtime) -> Router:
         # for just this turn; falls through to a normal reply when there's
         # no request, no matching member, or too little history.
         persona_override = None
-        impersonation = await resolve_impersonation(rt.db, msg.chat.id, text)
+        impersonation = await resolve_impersonation(rt.db, msg.chat.id, typed)
         if impersonation is not None:
             member, samples = impersonation
             persona_override = build_impersonation_prompt(member.name, samples)

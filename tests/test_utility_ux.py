@@ -28,6 +28,7 @@ def _rt(*, memory_enabled=True, user_lookup=None):
     cfg = SimpleNamespace(
         memory_enabled=memory_enabled, duckhunt_enabled=True,
         response_policy="always", automod_enabled=True,
+        vision_enabled=False,
     )
     executed: list[tuple] = []
 

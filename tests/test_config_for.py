@@ -20,7 +20,7 @@ class _FakeCfg:
             voice_transcribe=True, memory_enabled=True,
             ether_enabled=False, duck_names_public=True,
             on_this_day_enabled=True, monthly_recap_enabled=True,
-            automod_enabled=True,
+            automod_enabled=True, vision_enabled=True,
             response_policy="mention", persona="dude",
             persona_custom=None, ambient_probability=0.03,
         )
@@ -102,7 +102,7 @@ def test_config_wizard_header_shows_every_chat_config_field():
     # Every boolean appears with a clear on/off marker (✅ or ⛔️).
     for name in (
         "duckhunt", "sharephoto", "comic", "fortune", "voice",
-        "memory", "ether", "duck-names public",
+        "memory", "ether", "duck-names public", "vision",
     ):
         assert name in head
     assert "✅" in head
@@ -166,7 +166,7 @@ def test_config_keyboard_covers_every_chat_config_field():
     # Every boolean field toggle.
     for f in (
         "duckhunt", "sharephoto", "comic", "fortune",
-        "voice", "memory", "ether", "ducknames",
+        "voice", "memory", "ether", "ducknames", "vision",
     ):
         assert f in suffixes, f
     # Every response_policy choice.

@@ -2,7 +2,8 @@
 
 Combines, in priority order:
   1. The persona system prompt, then the current time, the speaker-label
-     convention, and the capability brief (what the bot can and can't do).
+     convention, the capability brief (what the bot can and can't do),
+     and the standing prose-rhythm nudge.
   2. A condensed running summary (if any).
   3. Durable per-chat facts (if any).
   4. Semantically retrieved older snippets relevant to the latest user query.
@@ -70,6 +71,24 @@ _REACTION_SYSTEM = (
     "about, own it and give a confident, in-character reason for choosing "
     "that emoji for that message. Never deny reacting, never say you can't "
     "see any reactions, and never claim it was random or automatic."
+)
+
+
+# A standing nudge on prose rhythm, not on content. Two knobs: burstiness
+# (variance in sentence length) and perplexity (how unpredictable the next
+# word is). Left alone, a model writes sentences of near-identical length
+# reaching for the most probable word every time, which reads as flat and
+# machine-made whoever the persona is. This pushes both up. Deliberately
+# says nothing about voice or subject so it can't fight the persona.
+_STYLE_SYSTEM = (
+    "Write with burst and friction. Vary sentence length hard — a long "
+    "winding one, then three words. Then one. Never let three sentences in "
+    "a row share a shape or a length. Reach past the expected word for the "
+    "odd, specific, slightly-wrong one: the second thing that comes to "
+    "mind, not the first. No balanced pairs, no tidy parallel lists, no "
+    "summing-up sentence at the end. Start somewhere unexpected and stop "
+    "before it gets neat. This governs rhythm and word choice only. It "
+    "never overrides your persona, your mood, or what you actually mean."
 )
 
 
@@ -237,6 +256,11 @@ async def build_context(
     # impersonation turn is somebody else's voice, so it gets none of it.
     if capabilities and not persona_override:
         _add({"role": "system", "content": capabilities})
+    # 1d. Prose rhythm. Always on — it's a standing habit, not a mode. Off
+    # during impersonation, where the target's own cadence is the point and
+    # a generic rhythm rule would flatten the very thing being copied.
+    if not persona_override:
+        _add({"role": "system", "content": _STYLE_SYSTEM})
     if extra_system:
         _add({"role": "system", "content": extra_system})
 

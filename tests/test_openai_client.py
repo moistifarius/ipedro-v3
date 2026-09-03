@@ -297,3 +297,95 @@ def test_retry_predicate_excludes_rate_limit_errors():
     assert isinstance(_FakeAnthConn(), A_Conn)
     assert not isinstance(_FakeAnthRL(), (A_Conn,))
     assert not isinstance(_FakeOAIRL(), (O_Conn,))
+
+
+# ── vision ───────────────────────────────────────────────────────────────────
+
+class _FakeBlock:
+    type = "text"
+
+    def __init__(self, text):
+        self.text = text
+
+
+class _FakeAnthropicMessages:
+    """Records the request so the image payload's shape can be asserted."""
+
+    def __init__(self, text=None, error=None):
+        self._text, self._error = text, error
+        self.calls: list[dict] = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if self._error:
+            raise self._error
+        return type("R", (), {
+            "content": [_FakeBlock(self._text)],
+            "usage": type("U", (), {"input_tokens": 10, "output_tokens": 5})(),
+        })()
+
+
+def _claude_client(messages):
+    client = OpenAIClient(api_key=None, anthropic_api_key="k")
+    client._anthropic = type("A", (), {"messages": messages})()
+    return client
+
+
+@pytest.mark.asyncio
+async def test_describe_image_sends_a_base64_image_block():
+    msgs = _FakeAnthropicMessages(text="  a dog on a skateboard  ")
+    client = _claude_client(msgs)
+
+    out = await client.describe_image(
+        b"\xff\xd8\xffdata", media_type="image/jpeg", prompt="what is this",
+    )
+
+    assert out == "a dog on a skateboard"
+    content = msgs.calls[0]["messages"][0]["content"]
+    image, text = content[0], content[1]
+    assert image["type"] == "image"
+    assert image["source"]["media_type"] == "image/jpeg"
+    assert image["source"]["type"] == "base64"
+    # Round-trips back to the exact bytes we handed in.
+    import base64
+    assert base64.b64decode(image["source"]["data"]) == b"\xff\xd8\xffdata"
+    assert text["text"] == "what is this"
+
+
+@pytest.mark.asyncio
+async def test_describe_image_uses_the_cheap_model():
+    """It runs on every image in every chat; the expensive model would
+    make looking at pictures the biggest line on the bill."""
+    msgs = _FakeAnthropicMessages(text="x")
+    client = _claude_client(msgs)
+    await client.describe_image(b"x", prompt="p")
+    assert msgs.calls[0]["model"] == client.cheap_claude_model
+
+
+@pytest.mark.asyncio
+async def test_describe_image_falls_back_to_openai_when_claude_fails():
+    msgs = _FakeAnthropicMessages(error=RuntimeError("anthropic down"))
+    client = _claude_client(msgs)
+    client._openai = type("O", (), {
+        "chat": _FakeChatNamespace("a fallback description"),
+    })()
+    assert await client.describe_image(b"x", prompt="p") == (
+        "a fallback description"
+    )
+
+
+@pytest.mark.asyncio
+async def test_describe_image_returns_none_with_no_provider():
+    client = OpenAIClient(api_key=None)
+    client._openai = None
+    client._anthropic = None
+    assert await client.describe_image(b"x", prompt="p") is None
+
+
+@pytest.mark.asyncio
+async def test_describe_image_swallows_a_total_failure():
+    """A blind spot is a missing sentence, never a dropped message."""
+    client = OpenAIClient(api_key="x", text_provider="openai")
+    client._anthropic = None
+    client._client.chat = _ExplodingChatNamespace()
+    assert await client.describe_image(b"x", prompt="p") is None

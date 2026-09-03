@@ -94,6 +94,7 @@ def _chat_rt(
         voice_transcribe=False, response_policy=response_policy,
         ambient_probability=0.0, persona="dude", persona_custom=None,
         automod_enabled=False,
+        vision_enabled=False,
     )
     chats = SimpleNamespace(
         upsert_chat=AsyncMock(),
@@ -136,6 +137,8 @@ def _chat_msg(text="i love cats", chat_id=100, user_id=7):
     return SimpleNamespace(
         chat=chat, from_user=from_user, text=text, caption=None,
         voice=None, message_id=200, entities=None,
+        photo=None, sticker=None, animation=None, video=None,
+        video_note=None, document=None, audio=None,
         reply_to_message=None,
         reply=AsyncMock(return_value=SimpleNamespace(message_id=201)),
         answer=AsyncMock(return_value=SimpleNamespace(message_id=202)),

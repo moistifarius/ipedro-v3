@@ -74,20 +74,34 @@ def test_public_categories_are_real_and_non_admin():
 def test_the_cannots_cover_the_usual_false_promises():
     brief = capability_brief(_cfg())
     assert "Browse the web" in brief
-    assert "See photos" in brief
     assert "Set a reminder" in brief and "slash command" in brief
     assert "Never claim you did it" in brief
 
 
+def test_it_knows_it_can_see_pictures_but_not_watch_them():
+    """He looks at a still frame. Claiming he can't see a photo at all is
+    as wrong as claiming he watched the video."""
+    brief = capability_brief(_cfg())
+    assert "See what people post" in brief
+    assert "Watch a video or a GIF play" in brief          # in the DON'Ts
+
+
+def test_vision_off_is_stated_plainly():
+    assert "Looking at pictures is OFF" in capability_brief(
+        _cfg(vision_enabled=False),
+    )
+    assert "Looking at pictures is OFF" not in capability_brief(_cfg())
+
+
 def test_the_brief_is_not_a_novel():
-    """It rides along on every AI reply; keep it well under a sixth of the
-    default 6000-token context budget."""
+    """It rides along on every AI reply; keep it well under a quarter of
+    the default 6000-token context budget."""
     fully_on = _cfg(
         duckhunt_enabled=True, monthly_recap_enabled=True,
         share_photo_enabled=True, comic_enabled=True, fortune_enabled=True,
         ether_enabled=True,
     )
-    assert count_tokens(capability_brief(fully_on)) < 1000
+    assert count_tokens(capability_brief(fully_on)) < 1200
 
 
 # ── per-chat lines ───────────────────────────────────────────────────────────

@@ -526,3 +526,23 @@ CREATE TABLE IF NOT EXISTS dale_gifs (
     send_count     INTEGER NOT NULL DEFAULT 0,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Vision: what the bot saw in a piece of media --------------------------------
+-- GLOBAL, like dale_gifs: file_unique_id is Telegram's stable per-file
+-- identity, so the same sticker forwarded into five chats is one row and one
+-- vision call. Stickers and memes repeat constantly, which makes this cache
+-- most of the cost control rather than a nicety.
+--
+-- Descriptions are never invalidated: the bytes behind a file_unique_id can't
+-- change, so neither can what's in the picture.
+CREATE TABLE IF NOT EXISTS media_descriptions (
+    file_unique_id TEXT PRIMARY KEY,
+    kind           TEXT NOT NULL,          -- photo | sticker | gif | video | …
+    description    TEXT NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Per-chat switch for looking at media. On by default; the kill switch for a
+-- chat that posts hundreds of images a day and doesn't want them described.
+ALTER TABLE chat_config
+    ADD COLUMN IF NOT EXISTS vision_enabled BOOLEAN NOT NULL DEFAULT TRUE;
