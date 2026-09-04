@@ -319,24 +319,85 @@ def test_the_newer_generation_rejects_sampling_parameters():
         assert not _rejects_sampling(model), model
 
 
-def test_every_model_we_can_be_pointed_at_has_a_price():
-    """A missing row falls back to Sonnet's rate, which would quietly
-    misreport the bill for a model in a different tier."""
-    from ipedro.openai_client import (
-        _CLAUDE_TEXT_PRICE_PER_1K, CHEAPER_ALTERNATIVES,
+def test_the_default_model_is_the_cheaper_newer_sonnet():
+    """Sonnet 5 is $2/$10 per MTok against Sonnet 4.6's $3/$15 — 33% off
+    both directions, compounding with the cache. Pinned so a stray env
+    default can't quietly walk it back."""
+    from ipedro.config import Settings
+    from ipedro.openai_client import OpenAIClient
+
+    s = Settings(telegram_bot_token="t", openai_api_key="k",  # type: ignore[call-arg]
+                 database_url="postgresql://t/t")
+    assert s.claude_text_model == "claude-sonnet-5"
+    assert OpenAIClient(api_key="x").claude_model == "claude-sonnet-5"
+    assert _claude_text_price("claude-sonnet-5", 2000, 100) < (
+        _claude_text_price("claude-sonnet-4-6", 2000, 100)
     )
 
+
+def test_every_selectable_model_has_a_price_row():
+    """A missing row falls back to Sonnet's rate, which would quietly
+    misreport the bill for a model in a different tier."""
+    from ipedro.handlers.admin import _KNOWN_CLAUDE_TEXT_MODELS
+    from ipedro.openai_client import _CLAUDE_TEXT_PRICE_PER_1K
+
     priced = tuple(_CLAUDE_TEXT_PRICE_PER_1K)
-    for model in (*CHEAPER_ALTERNATIVES, *CHEAPER_ALTERNATIVES.values()):
+    for model in _KNOWN_CLAUDE_TEXT_MODELS:
         assert model.startswith(priced), f"{model} has no price row"
 
 
-def test_the_named_alternative_is_actually_cheaper():
-    """The whole point of the mapping — if a row stops being cheaper it
-    should not be advertised as a saving."""
-    from ipedro.openai_client import CHEAPER_ALTERNATIVES
+def test_the_default_model_is_selectable_and_cacheable():
+    from ipedro.handlers.admin import _KNOWN_CLAUDE_TEXT_MODELS
+    from ipedro.openai_client import OpenAIClient
 
-    for current, better in CHEAPER_ALTERNATIVES.items():
-        now = _claude_text_price(current, 2000, 100)
-        then = _claude_text_price(better, 2000, 100)
-        assert then < now, f"{better} is not cheaper than {current}"
+    default = OpenAIClient(api_key="x").claude_model
+    assert default in _KNOWN_CLAUDE_TEXT_MODELS
+    assert _cache_minimum(default) <= 1024      # our ~1450-token prefix caches
+
+
+# ── thinking: off for a chat bot, on the models that would otherwise think ──
+
+@pytest.mark.asyncio
+async def test_thinking_is_disabled_on_models_that_think_by_default():
+    """Omitting `thinking` on Sonnet 5 runs adaptive thinking: reasoning
+    tokens billed as output and counted against the 500-token reply cap.
+    For two-sentence persona replies that is cost and truncation for
+    nothing."""
+    from ipedro.openai_client import OpenAIClient
+
+    captured: dict = {}
+
+    class _Msgs:
+        async def create(self, **kw):
+            captured.update(kw)
+            return type("R", (), {"content": [], "usage": None})()
+
+    client = OpenAIClient(api_key=None, anthropic_api_key="k",
+                          claude_model="claude-sonnet-5")
+    client._anthropic = type("A", (), {"messages": _Msgs()})()
+    await client.chat([{"role": "user", "content": "hi"}])
+    assert captured["thinking"] == {"type": "disabled"}
+    assert "temperature" not in captured        # rejected by this generation
+
+
+@pytest.mark.asyncio
+async def test_older_models_are_left_exactly_as_before():
+    """Sonnet 4.6 / Haiku 4.5 run without thinking when it is omitted and
+    still take temperature — sending a thinking block there would be a
+    behaviour change for no reason."""
+    from ipedro.openai_client import OpenAIClient
+
+    for model in ("claude-sonnet-4-6", "claude-haiku-4-5"):
+        captured: dict = {}
+
+        class _Msgs:
+            async def create(self, **kw):
+                captured.update(kw)
+                return type("R", (), {"content": [], "usage": None})()
+
+        client = OpenAIClient(api_key=None, anthropic_api_key="k",
+                              claude_model=model)
+        client._anthropic = type("A", (), {"messages": _Msgs()})()
+        await client.chat([{"role": "user", "content": "hi"}])
+        assert "thinking" not in captured, model
+        assert captured["temperature"] == 1.0, model

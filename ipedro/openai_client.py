@@ -145,16 +145,24 @@ _NO_SAMPLING_PREFIXES: tuple[str, ...] = (
     "claude-sonnet-5",
 )
 
-# Newer models that also price cheaper than what this bot runs today. Not
-# switched automatically: a model change moves the persona's voice, and
-# that is the operator's call, not a cost optimization to apply silently.
-CHEAPER_ALTERNATIVES = {
-    "claude-sonnet-4-6": "claude-sonnet-5",   # $3/$15 -> $2/$10 per MTok
-}
+# Models on which OMITTING `thinking` means adaptive thinking is ON. Every
+# older model runs without thinking unless asked; these two invert that.
+# For a persona chat bot writing two-sentence replies, thinking is pure
+# cost: the reasoning tokens bill as output (5x the input price) and count
+# against the 500-token reply cap, so a chatty think would truncate the
+# actual answer. Explicitly off. (Fable 5 rejects "disabled" outright and
+# must be left alone — it is deliberately absent here.)
+_THINKS_UNLESS_TOLD_NOT_TO: tuple[str, ...] = (
+    "claude-sonnet-5", "claude-opus-5",
+)
 
 
 def _rejects_sampling(model: str) -> bool:
     return model.startswith(_NO_SAMPLING_PREFIXES)
+
+
+def _thinks_by_default(model: str) -> bool:
+    return model.startswith(_THINKS_UNLESS_TOLD_NOT_TO)
 
 
 def _cache_minimum(model: str) -> int:
@@ -293,7 +301,7 @@ class AIClient:
         anthropic_api_key: str | None = None,
         text_provider: TextProvider | None = None,
         text_model: str = "gpt-4o-mini",
-        claude_model: str = "claude-sonnet-4-6",
+        claude_model: str = "claude-sonnet-5",
         # Low-stakes routing: classifiers, judges, one-liners go through
         # cheap_chat/cheap_completion, which use these models regardless
         # of the primary text_provider. ~3x cheaper than Sonnet, with a
@@ -564,6 +572,8 @@ class AIClient:
         # a current model at all.
         if not _rejects_sampling(m):
             kwargs["temperature"] = max(0.0, min(1.0, temperature))
+        if _thinks_by_default(m):
+            kwargs["thinking"] = {"type": "disabled"}
         try:
             resp = await self._anthropic.messages.create(**kwargs)
             text_parts = [

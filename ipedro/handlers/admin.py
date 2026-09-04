@@ -461,6 +461,7 @@ _MGM_LEAVES: tuple[str, ...] = tuple(sorted(set(
 # private price-table keys without coupling admin.py to openai_client
 # internals. Update by hand when adding a new model price entry.
 _KNOWN_CLAUDE_TEXT_MODELS: tuple[str, ...] = (
+    "claude-sonnet-5", "claude-opus-5", "claude-opus-4-8",
     "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5",
     "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5",
 )

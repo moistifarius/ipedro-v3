@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     # back to OpenAI when the Anthropic key is absent. Admins can flip it
     # live via /ai_provider, persisted in kv_store.
     anthropic_api_key: str | None = None
-    claude_text_model: str = "claude-sonnet-4-6"
+    claude_text_model: str = "claude-sonnet-5"
     # Cheap models used by `AIClient.cheap_chat / cheap_completion` for
     # classifiers, judges, and short one-liners (~3x cheaper than Sonnet
     # with a separate rate-limit quota). Override via env if you want a
