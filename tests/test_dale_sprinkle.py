@@ -6,7 +6,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from types import SimpleNamespace
+
 from ipedro import dale_gifs as dale
+from ipedro import vision
 from ipedro.handlers import chat
 from tests.test_captcha_intercept import _msg, _rt_with
 
@@ -123,3 +126,37 @@ async def test_it_does_not_return_early(sprinkle, monkeypatch):
     await _handler(rt)(_msg(text="ordinary chatter"))
     sprinkle.assert_awaited_once()
     summarize.assert_awaited()          # flow continued past the sprinkle
+
+
+@pytest.mark.asyncio
+async def test_never_fires_on_a_media_only_message(sprinkle, monkeypatch):
+    """Since vision, a bare sticker or photo flows through on_message like
+    text. It must not roll the GIF dice: a sticker volley would fire one
+    every few frames, and a GIF answered with a GIF reads as a reply."""
+    rt = _rt()
+    rt.chats.get_config.return_value.vision_enabled = True
+    monkeypatch.setattr(vision, "describe",
+                        AsyncMock(return_value="[sticker: a smug frog]"))
+    msg = _msg(text=None)
+    msg.text = None
+    msg.caption = None
+    msg.sticker = SimpleNamespace(file_id="s", file_unique_id="u", emoji="🐸",
+                                  set_name=None, is_animated=False,
+                                  is_video=False, thumbnail=None)
+    await _handler(rt)(msg)
+    sprinkle.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_captioned_photo_still_counts_as_text(sprinkle, monkeypatch):
+    """The guard is on what the human typed, not on the presence of media."""
+    rt = _rt()
+    rt.chats.get_config.return_value.vision_enabled = True
+    monkeypatch.setattr(vision, "describe",
+                        AsyncMock(return_value="[photo: a grill]"))
+    msg = _msg(text=None)
+    msg.text = None
+    msg.caption = "look at this thing"
+    msg.photo = [SimpleNamespace(file_id="p", file_unique_id="u", file_size=1)]
+    await _handler(rt)(msg)
+    sprinkle.assert_awaited_once()

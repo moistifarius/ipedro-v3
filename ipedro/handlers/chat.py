@@ -85,11 +85,14 @@ _REACTION_POOL = (
 
 _REACT_PROBABILITY = 0.04
 
-# Ambient Dale: how often an un-addressed message just gets a GIF back.
-# A module constant on purpose, like _REACT_PROBABILITY above it — the
-# per-chat off switch is /chat_config automod off, which covers the whole
-# canned-reaction surface rather than adding a second overlapping toggle.
-_DALE_GIF_PROBABILITY = 0.03
+# Ambient Dale: how often an un-addressed TEXT message just gets a GIF
+# back — one in fifty. A module constant on purpose, like
+# _REACT_PROBABILITY above it; the per-chat off switch is /chat_config
+# automod off, which covers the whole canned-reaction surface rather than
+# adding a second overlapping toggle. Was 3%, and felt like constant once
+# media messages started flowing through this handler too (see the guard
+# at the roll).
+_DALE_GIF_PROBABILITY = 0.02
 
 _POSITIVITY_RE = re.compile(
     r"\b(thanks?|thank\s*you|ty|tysm|appreciate|love\s+(it|this|that)|"
@@ -782,9 +785,13 @@ def build_router(rt: Runtime) -> Router:
         # maybe_summarize (below) running on these messages. Skipped whenever
         # the message is addressed to the bot, so a random GIF can never eat a
         # real answer, and given no text fallback — an empty library means
-        # silence, not noise.
+        # silence, not noise. Text only: since vision, stickers and photos
+        # reach this point too, and a sticker volley rolling the dice on
+        # every frame turned "occasional" into "constant" — and a GIF fired
+        # back at a GIF reads as a reply, not a stray.
         if (
-            cfg.automod_enabled
+            typed
+            and cfg.automod_enabled
             and cfg.response_policy != "commands"
             and not incoming.has_mention_of_bot
             and not incoming.is_reply_to_bot
