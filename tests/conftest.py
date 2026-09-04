@@ -37,10 +37,12 @@ def _no_ambient_dice(monkeypatch):
     """
     from ipedro import addressed
     from ipedro.handlers import chat
+    from ipedro.memory import context_builder
 
     # The implicit-address window is module state; a bot reply noted by one
     # test must not make the next test's message look like a follow-up.
     addressed.reset()
+    context_builder.reset_windows()
     monkeypatch.setattr(chat, "_REACT_PROBABILITY", 0.0)
     monkeypatch.setattr(chat, "_DALE_GIF_PROBABILITY", 0.0)
     monkeypatch.setattr(chat, "_CREDIT_PROBABILITY", 0.0)

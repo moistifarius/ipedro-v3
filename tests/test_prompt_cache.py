@@ -455,3 +455,125 @@ async def test_retrieval_block_is_omitted_when_every_hit_was_a_duplicate():
 
     ctx = await _ctx("what about propane", store=_OnlyEcho())
     assert "Potentially relevant" not in _split(ctx)[0][1]["text"]
+
+
+# ── the conversation is cacheable too: anchored window + auto breakpoint ─────
+
+class _Growing:
+    """A chat with ``n`` stored lines, 'line 1' … 'line n'."""
+
+    def __init__(self, n):
+        self.n = n
+
+    async def recent_messages(self, chat_id, limit):
+        rows = [
+            # All user turns: the newest row is then always the labelled
+            # "Matt: line n" that latest_user_text dedups against, so the
+            # non-system turns are exactly the window, nothing appended.
+            StoredMessage(id=i, chat_id=1, message_id=i, user_id=7,
+                          role="user", content=f"line {i}", tokens=None,
+                          created_at=NOW - timedelta(seconds=1000 - i),
+                          author_name="Matt")
+            for i in range(1, self.n + 1)
+        ]
+        return rows[-limit:]
+
+    async def latest_summary(self, chat_id):
+        return None
+
+    async def list_facts(self, chat_id, limit=50):
+        return []
+
+    async def semantic_search(self, chat_id, query, k=6):
+        return []
+
+
+async def _window(n):
+    # latest_user_text matches the newest stored row so no extra turn is
+    # appended; what's left of the non-system turns IS the window.
+    ctx = await _ctx(f"line {n}", store=_Growing(n), extra_system=None)
+    return [m["content"] for m in ctx.messages if m["role"] != "system"]
+
+
+@pytest.mark.asyncio
+async def test_the_history_window_is_append_only_between_re_anchors():
+    """A sliding window changes its first byte every turn, so the
+    conversation could never be a cache prefix. Anchored, each turn
+    extends the previous window by exactly one line."""
+    prev = await _window(25)
+    for n in range(26, 30):
+        cur = await _window(n)
+        assert cur[:len(prev)] == prev, "history is no longer a prefix"
+        assert len(cur) == len(prev) + 1
+        prev = cur
+
+
+@pytest.mark.asyncio
+async def test_the_window_re_anchors_between_n_and_2n():
+    """It grows to 2N, then snaps back to N: bounded, never unbounded."""
+    n = 10   # _settings() sets context_recent_messages=10
+    sizes = [len(await _window(k)) for k in range(10, 61)]
+    assert min(sizes) == n and max(sizes) == 2 * n
+    assert 2 * n in sizes and n in sizes[1:]
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_process_starts_a_window_at_n():
+    assert len(await _window(40)) == 10
+
+
+@pytest.mark.asyncio
+async def test_the_claude_request_carries_both_breakpoints():
+    """Explicit on the system prefix (1h), automatic top-level for the
+    conversation (5m). Longer TTL first, as the API requires."""
+    from tests.test_openai_client import _FakeAnthropicMessages, _claude_client
+
+    fake = _FakeAnthropicMessages(text="ok")
+    client = _claude_client(fake)
+    client.cache_ttl = "1h"
+    big = "word " * 3000
+    await client._chat_claude(
+        [{"role": "system", "content": big, CACHE_BREAKPOINT: True},
+         {"role": "user", "content": "hi"}],
+        max_tokens=10, temperature=1.0, chat_id=1,
+    )
+    sent = fake.calls[0]
+    assert sent["cache_control"] == {"type": "ephemeral"}
+    assert sent["system"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+
+
+@pytest.mark.asyncio
+async def test_no_automatic_breakpoint_when_nothing_was_marked():
+    """cheap_chat and the one-off prompts must not pay a write premium on
+    a prefix that is never read back."""
+    from tests.test_openai_client import _FakeAnthropicMessages, _claude_client
+
+    fake = _FakeAnthropicMessages(text="ok")
+    client = _claude_client(fake)
+    await client._chat_claude(
+        [{"role": "user", "content": "classify this"}],
+        max_tokens=10, temperature=1.0, chat_id=1,
+    )
+    assert "cache_control" not in fake.calls[0]
+
+
+def test_five_minute_ttl_sends_no_ttl_field():
+    big = "word " * 3000
+    blocks, _ = _normalize_for_claude(
+        [{"role": "system", "content": big, CACHE_BREAKPOINT: True},
+         {"role": "user", "content": "hi"}],
+        model="claude-sonnet-5", ttl="5m",
+    )
+    assert blocks[0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_one_hour_writes_are_priced_at_double():
+    five = _claude_text_price("claude-sonnet-5", 0, 0, cache_write_tokens=1000)
+    hour = _claude_text_price("claude-sonnet-5", 0, 0, cache_write_tokens=1000,
+                              cache_write_1h_tokens=1000)
+    assert five == pytest.approx(1000 * 0.002 / 1000 * 1.25)
+    assert hour == pytest.approx(1000 * 0.002 / 1000 * 2.0)
+
+
+def test_the_default_ttl_is_an_hour():
+    assert _settings().cache_ttl == "1h"

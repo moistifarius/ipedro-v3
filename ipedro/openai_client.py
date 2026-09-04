@@ -133,7 +133,8 @@ _CACHE_MIN_DEFAULT = 4096   # unknown model: assume the strictest we know of
 # Cache writes cost 1.25x base input, reads 0.1x. Both are billed as separate
 # usage fields, so the cost estimate has to price them separately or it
 # silently under-reports the moment caching is switched on.
-_CACHE_WRITE_MULTIPLIER = 1.25
+_CACHE_WRITE_MULTIPLIER = 1.25        # 5-minute entries
+_CACHE_WRITE_1H_MULTIPLIER = 2.0       # 1-hour entries
 _CACHE_READ_MULTIPLIER = 0.1
 
 
@@ -201,6 +202,7 @@ def _openai_text_price(
 def _claude_text_price(
     model: str, prompt_tokens: int, completion_tokens: int,
     cache_write_tokens: int = 0, cache_read_tokens: int = 0,
+    cache_write_1h_tokens: int = 0,
 ) -> float:
     """Cost estimate in USD.
 
@@ -214,9 +216,14 @@ def _claude_text_price(
         (0.003, 0.015),
     )
     inp = rate[0] / 1000
+    # cache_write_tokens is the TOTAL written; the 1h portion of it bills
+    # at 2x instead of 1.25x (usage.cache_creation splits them out).
+    write_1h = min(cache_write_1h_tokens, cache_write_tokens)
+    write_5m = cache_write_tokens - write_1h
     return (
         prompt_tokens * inp
-        + cache_write_tokens * inp * _CACHE_WRITE_MULTIPLIER
+        + write_5m * inp * _CACHE_WRITE_MULTIPLIER
+        + write_1h * inp * _CACHE_WRITE_1H_MULTIPLIER
         + cache_read_tokens * inp * _CACHE_READ_MULTIPLIER
         + completion_tokens * (rate[1] / 1000)
     )
@@ -226,6 +233,7 @@ def _normalize_for_claude(
     messages: Sequence[dict[str, Any]],
     *,
     model: str | None = None,
+    ttl: str | None = None,
 ) -> tuple[str | list[dict[str, Any]] | None, list[dict[str, Any]]]:
     """Split system messages from chat messages and make the chat array
     safe for Claude (no leading assistant, no consecutive same-role).
@@ -277,10 +285,13 @@ def _normalize_for_claude(
     volatile = "\n\n".join(p for p in volatile_parts if p)
 
     if marked and stable and count_tokens(stable) >= _cache_minimum(model or ""):
+        control: dict[str, Any] = {"type": "ephemeral"}
+        if ttl == "1h":
+            control["ttl"] = "1h"
         blocks: list[dict[str, Any]] = [{
             "type": "text",
             "text": stable,
-            "cache_control": {"type": "ephemeral"},
+            "cache_control": control,
         }]
         if volatile:
             blocks.append({"type": "text", "text": volatile})
@@ -309,6 +320,7 @@ class AIClient:
         # judging doesn't eat your /a or /tldr capacity.
         cheap_claude_model: str = "claude-haiku-4-5",
         cheap_openai_model: str = "gpt-4o-mini",
+        cache_ttl: str = "5m",
         image_model: str = "gpt-image-1",
         transcription_model: str = "whisper-1",
         embedding_model: str = "text-embedding-3-small",
@@ -339,6 +351,7 @@ class AIClient:
         self.claude_model = claude_model
         self.cheap_claude_model = cheap_claude_model
         self.cheap_openai_model = cheap_openai_model
+        self.cache_ttl = cache_ttl
         self.image_model = image_model
         self.transcription_model = transcription_model
         self.embedding_model = embedding_model
@@ -558,7 +571,9 @@ class AIClient:
             log.error("Claude chat requested but no anthropic_api_key.")
             return None
         m = model or self.claude_model
-        system, chat_messages = _normalize_for_claude(messages, model=m)
+        system, chat_messages = _normalize_for_claude(
+            messages, model=m, ttl=self.cache_ttl,
+        )
         kwargs: dict[str, Any] = {
             "model": m,
             "max_tokens": max_tokens,
@@ -566,6 +581,15 @@ class AIClient:
         }
         if system:
             kwargs["system"] = system
+        if isinstance(system, list):
+            # The explicit breakpoint above covers the stable prefix. This
+            # top-level one is Anthropic's automatic caching for the growing
+            # conversation: it lands on the last block, and the next
+            # request's lookback finds that write a couple of blocks back —
+            # which only works because build_context keeps the history
+            # window anchored (append-only) rather than sliding. Default
+            # 5m TTL, after the (possibly 1h) system entry, as required.
+            kwargs["cache_control"] = {"type": "ephemeral"}
         # Sampling parameters were removed across the newer generation, not
         # just on Opus 4.7 — sending temperature to any of them is a 400 on
         # every request. This gate is what keeps /ai_model able to point at
@@ -587,6 +611,8 @@ class AIClient:
             ct = getattr(usage, "output_tokens", 0) or 0
             cw = getattr(usage, "cache_creation_input_tokens", 0) or 0
             cr = getattr(usage, "cache_read_input_tokens", 0) or 0
+            creation = getattr(usage, "cache_creation", None)
+            w1h = getattr(creation, "ephemeral_1h_input_tokens", 0) or 0
             if cw or cr:
                 log.debug(
                     "cache: %s read, %s written, %s fresh (%s)",
@@ -596,7 +622,7 @@ class AIClient:
                 kind="chat", model=m, chat_id=chat_id,
                 prompt_tokens=pt + cw + cr, completion_tokens=ct,
                 cache_write_tokens=cw, cache_read_tokens=cr,
-                cost_usd=_claude_text_price(m, pt, ct, cw, cr),
+                cost_usd=_claude_text_price(m, pt, ct, cw, cr, w1h),
             )
             out = "\n".join(text_parts).strip()
             return out or None

@@ -67,6 +67,15 @@ class Settings(BaseSettings):
     summary_keep_recent: int = 20
     semantic_retrieval_k: int = 6
 
+    # Prompt-cache TTL for the stable system prefix: "5m" or "1h". A group
+    # chat talks in bursts minutes apart, with human-scale gaps between
+    # bursts. A 5m entry dies in every gap and is rewritten at 1.25x on the
+    # next burst; a 1h entry costs 2x to write but survives any gap under
+    # an hour and is refreshed free on every read. Whenever the next burst
+    # tends to land within the hour, 1h wins. /cost shows writes next to
+    # reads, so "writes every burst" is visible if a chat is the exception.
+    cache_ttl: Literal["5m", "1h"] = "1h"
+
     # Temporal awareness — the bot injects "right now it is …" into the AI
     # context and marks long silences between messages so it can reason
     # about time of day, dates, and how long ago things happened. The

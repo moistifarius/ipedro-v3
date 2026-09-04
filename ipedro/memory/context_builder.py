@@ -93,6 +93,38 @@ _STYLE_SYSTEM = (
 )
 
 
+# ── the history window is anchored, not sliding ────────────────────────
+# "The last N messages" changes its first byte on every turn, so nothing
+# in it can ever be a cache prefix. Anchoring the start and letting the
+# window grow to 2N before re-anchoring makes the history append-only
+# between re-anchors — which is what Anthropic's automatic conversation
+# breakpoint needs: last turn's write is then two blocks back, inside the
+# lookback. The extra rows cost a tenth of the price; the price of a
+# sliding window was all of them, every time. In-process state: a restart
+# is one cache miss, not a bug.
+_window_anchor: dict[int, int] = {}
+
+
+def reset_windows() -> None:
+    """Forget every anchor (tests)."""
+    _window_anchor.clear()
+
+
+def _anchored_window(recent: list[StoredMessage], chat_id: int, n: int) -> list[StoredMessage]:
+    """``recent`` is the newest 2N rows, oldest first. Returns N..2N of them,
+    starting at a fixed row until that row falls off the fetch."""
+    if not recent:
+        return recent
+    ids = [m.id for m in recent]
+    anchor = _window_anchor.get(chat_id)
+    if anchor is None or anchor not in ids:
+        anchor = ids[-n] if len(ids) >= n else ids[0]
+        _window_anchor[chat_id] = anchor
+    # Positional, not `id >= anchor`: the rows are already in the order the
+    # model should see them, and ids need not be monotonic in that order.
+    return recent[ids.index(anchor):]
+
+
 _NAME_PREFIX_SYSTEM = (
     "This is a group chat with multiple users. Each user message is "
     "prefixed with the speaker's display name and a colon "
@@ -348,7 +380,10 @@ async def build_context(
         # neighbour), but the budget is applied NEWEST-first: when tokens
         # run out it's the oldest turns that fall off, not the fresh
         # context the model actually needs to answer.
-        recent = await store.recent_messages(chat_id, settings.context_recent_messages)
+        n = settings.context_recent_messages
+        recent = _anchored_window(
+            await store.recent_messages(chat_id, 2 * n), chat_id, n,
+        )
         rendered: list[dict[str, Any]] = []
         prev_ts: datetime | None = None
         for m in recent:
