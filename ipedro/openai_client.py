@@ -43,6 +43,7 @@ from tenacity import (
 )
 
 from ipedro.db.pool import Database
+from ipedro.memory.tokens import count_tokens
 
 log = logging.getLogger(__name__)
 
@@ -101,36 +102,129 @@ _TTS_PER_1K_CHARS = 0.015
 
 TextProvider = Literal["claude", "openai"]
 
+# Marker key set by build_context on the LAST system message that belongs in
+# the cacheable prefix. Everything after it is per-request volatile content.
+# A plain dict key rather than a sentinel string so it can never collide with
+# real prompt text; both provider paths strip it before the wire.
+CACHE_BREAKPOINT = "_cache_breakpoint"
 
-def _openai_text_price(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+# Anthropic will not cache a prefix shorter than this, and says nothing when
+# it declines - you just get cache_creation_input_tokens: 0 forever. The
+# minimum is NOT monotonic across generations, so this is a lookup, not a
+# rule of thumb. Longest matching prefix wins.
+_CACHE_MIN_TOKENS: tuple[tuple[str, int], ...] = (
+    ("claude-opus-5", 512),
+    ("claude-fable-5", 512),
+    ("claude-opus-4-8", 1024),
+    ("claude-sonnet-5", 1024),
+    ("claude-sonnet-4-6", 1024),
+    ("claude-sonnet-4-5", 1024),
+    ("claude-opus-4-7", 2048),
+    ("claude-opus-4-6", 4096),
+    ("claude-opus-4-5", 4096),
+    ("claude-haiku-4-5", 4096),
+)
+_CACHE_MIN_DEFAULT = 4096   # unknown model: assume the strictest we know of
+
+# Cache writes cost 1.25x base input, reads 0.1x. Both are billed as separate
+# usage fields, so the cost estimate has to price them separately or it
+# silently under-reports the moment caching is switched on.
+_CACHE_WRITE_MULTIPLIER = 1.25
+_CACHE_READ_MULTIPLIER = 0.1
+
+
+def _cache_minimum(model: str) -> int:
+    """Smallest prefix this model will actually cache."""
+    best = None
+    for prefix, minimum in _CACHE_MIN_TOKENS:
+        if model.startswith(prefix) and (best is None or len(prefix) > len(best[0])):
+            best = (prefix, minimum)
+    return best[1] if best else _CACHE_MIN_DEFAULT
+
+
+# OpenAI discounts cached input tokens by half, and — unlike Anthropic —
+# reports them as a SUBSET of prompt_tokens rather than excluding them.
+# Mixing the two conventions up double-counts, so they stay separate.
+_OPENAI_CACHE_READ_MULTIPLIER = 0.5
+
+
+def _openai_text_price(
+    model: str, prompt_tokens: int, completion_tokens: int,
+    cached_tokens: int = 0,
+) -> float:
     rate = next(
         (v for k, v in _OPENAI_TEXT_PRICE_PER_1K.items() if model.startswith(k)),
         (0.001, 0.003),
     )
-    return (prompt_tokens / 1000) * rate[0] + (completion_tokens / 1000) * rate[1]
+    cached = min(cached_tokens, prompt_tokens)      # a subset, by definition
+    fresh = prompt_tokens - cached
+    inp = rate[0] / 1000
+    return (
+        fresh * inp
+        + cached * inp * _OPENAI_CACHE_READ_MULTIPLIER
+        + completion_tokens * (rate[1] / 1000)
+    )
 
 
-def _claude_text_price(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+def _claude_text_price(
+    model: str, prompt_tokens: int, completion_tokens: int,
+    cache_write_tokens: int = 0, cache_read_tokens: int = 0,
+) -> float:
+    """Cost estimate in USD.
+
+    ``prompt_tokens`` is the UNCACHED remainder only - Anthropic reports
+    cached tokens in their own fields and excludes them from input_tokens,
+    so all three have to be priced or the total is wrong (too low while
+    caching works, which is exactly when you'd want to trust it).
+    """
     rate = next(
         (v for k, v in _CLAUDE_TEXT_PRICE_PER_1K.items() if model.startswith(k)),
         (0.003, 0.015),
     )
-    return (prompt_tokens / 1000) * rate[0] + (completion_tokens / 1000) * rate[1]
+    inp = rate[0] / 1000
+    return (
+        prompt_tokens * inp
+        + cache_write_tokens * inp * _CACHE_WRITE_MULTIPLIER
+        + cache_read_tokens * inp * _CACHE_READ_MULTIPLIER
+        + completion_tokens * (rate[1] / 1000)
+    )
 
 
 def _normalize_for_claude(
     messages: Sequence[dict[str, Any]],
-) -> tuple[str | None, list[dict[str, Any]]]:
+    *,
+    model: str | None = None,
+) -> tuple[str | list[dict[str, Any]] | None, list[dict[str, Any]]]:
     """Split system messages from chat messages and make the chat array
-    safe for Claude (no leading assistant, no consecutive same-role)."""
-    system_parts: list[str] = []
+    safe for Claude (no leading assistant, no consecutive same-role).
+
+    When the caller marked a cache breakpoint (build_context sets
+    ``CACHE_BREAKPOINT`` on the last stable system message), the system
+    prompt comes back as TWO content blocks — everything up to and
+    including the marked one, carrying ``cache_control``, then the
+    volatile remainder — instead of one joined string. Caching is a prefix
+    match, so this is the whole game: the stable half stays byte-identical
+    between requests and is served at a tenth of the price, and the
+    volatile half sits after the breakpoint where it invalidates nothing.
+
+    The breakpoint is dropped when the stable half falls below the model's
+    minimum cacheable prefix. Anthropic silently declines to cache a
+    shorter one, so a marker there would be decoration.
+    """
+    stable_parts: list[str] = []
+    volatile_parts: list[str] = []
+    marked = False
     chat: list[dict[str, Any]] = []
     for m in messages:
         role = m.get("role")
         content = m.get("content")
         if role == "system":
             if content:
-                system_parts.append(str(content))
+                (volatile_parts if marked else stable_parts).append(str(content))
+            # Flip AFTER appending: the marked message is the last one
+            # INSIDE the cached prefix, not the first one outside it.
+            if m.get(CACHE_BREAKPOINT):
+                marked = True
             continue
         if role not in ("user", "assistant"):
             continue
@@ -142,11 +236,26 @@ def _normalize_for_claude(
             chat[-1]["content"] = (chat[-1]["content"] or "") + "\n\n" + (content or "")
             continue
         chat.append({"role": role, "content": content or ""})
-    system = "\n\n".join(p for p in system_parts if p) or None
+
     if not chat:
         # Claude requires at least one message — synthesize a noop.
         chat.append({"role": "user", "content": "(continue)"})
-    return system, chat
+
+    stable = "\n\n".join(p for p in stable_parts if p)
+    volatile = "\n\n".join(p for p in volatile_parts if p)
+
+    if marked and stable and count_tokens(stable) >= _cache_minimum(model or ""):
+        blocks: list[dict[str, Any]] = [{
+            "type": "text",
+            "text": stable,
+            "cache_control": {"type": "ephemeral"},
+        }]
+        if volatile:
+            blocks.append({"type": "text", "text": volatile})
+        return blocks, chat
+
+    joined = "\n\n".join(p for p in (stable, volatile) if p)
+    return (joined or None), chat
 
 
 class AIClient:
@@ -238,6 +347,7 @@ class AIClient:
     async def _log_usage(
         self, *, kind: str, model: str | None, chat_id: int | None,
         prompt_tokens: int | None = None, completion_tokens: int | None = None,
+        cache_write_tokens: int = 0, cache_read_tokens: int = 0,
         cost_usd: float | None = None,
     ) -> None:
         if self._usage_db is None:
@@ -248,10 +358,12 @@ class AIClient:
                 total = (prompt_tokens or 0) + (completion_tokens or 0)
             await self._usage_db.execute(
                 "INSERT INTO openai_usage (chat_id, kind, model, "
-                " prompt_tokens, completion_tokens, total_tokens, cost_usd) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                " prompt_tokens, completion_tokens, total_tokens, cost_usd, "
+                " cache_write_tokens, cache_read_tokens) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
                 chat_id, kind, model,
                 prompt_tokens, completion_tokens, total, cost_usd,
+                cache_write_tokens, cache_read_tokens,
             )
         except Exception as exc:
             log.debug("Usage log write failed: %s", exc)
@@ -359,21 +471,37 @@ class AIClient:
             log.error("OpenAI chat requested but no openai_api_key.")
             return None
         m = model or self.text_model
+        # The cache-breakpoint marker is an Anthropic-only concern and an
+        # unknown key here is a 400, so strip it on the way out.
+        payload = [
+            {k: v for k, v in msg.items() if k != CACHE_BREAKPOINT}
+            for msg in messages
+        ]
+        kwargs: dict[str, Any] = {
+            "model": m,
+            "messages": payload,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if chat_id is not None:
+            # OpenAI caches automatically but routes by this key; without it
+            # same-prefix requests scatter across nodes and miss each other.
+            # Per chat, because the prefix (persona, capabilities, summary,
+            # facts) is what varies per chat.
+            kwargs["prompt_cache_key"] = f"ipedro-chat-{chat_id}"
         try:
-            resp = await self._openai.chat.completions.create(
-                model=m,
-                messages=list(messages),
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
+            resp = await self._openai.chat.completions.create(**kwargs)
             choice = resp.choices[0]
             usage = getattr(resp, "usage", None)
             pt = getattr(usage, "prompt_tokens", 0) or 0
             ct = getattr(usage, "completion_tokens", 0) or 0
+            details = getattr(usage, "prompt_tokens_details", None)
+            cached = getattr(details, "cached_tokens", 0) or 0
             await self._log_usage(
                 kind="chat", model=m, chat_id=chat_id,
                 prompt_tokens=pt, completion_tokens=ct,
-                cost_usd=_openai_text_price(m, pt, ct),
+                cache_read_tokens=cached,
+                cost_usd=_openai_text_price(m, pt, ct, cached),
             )
             return (choice.message.content or "").strip() or None
         except OpenAIAPIError:
@@ -398,7 +526,7 @@ class AIClient:
             log.error("Claude chat requested but no anthropic_api_key.")
             return None
         m = model or self.claude_model
-        system, chat_messages = _normalize_for_claude(messages)
+        system, chat_messages = _normalize_for_claude(messages, model=m)
         kwargs: dict[str, Any] = {
             "model": m,
             "max_tokens": max_tokens,
@@ -416,12 +544,22 @@ class AIClient:
                 if getattr(block, "type", None) == "text"
             ]
             usage = getattr(resp, "usage", None)
+            # input_tokens is the UNCACHED remainder; cached tokens live in
+            # their own fields. Total prompt size is the sum of all three.
             pt = getattr(usage, "input_tokens", 0) or 0
             ct = getattr(usage, "output_tokens", 0) or 0
+            cw = getattr(usage, "cache_creation_input_tokens", 0) or 0
+            cr = getattr(usage, "cache_read_input_tokens", 0) or 0
+            if cw or cr:
+                log.debug(
+                    "cache: %s read, %s written, %s fresh (%s)",
+                    cr, cw, pt, m,
+                )
             await self._log_usage(
                 kind="chat", model=m, chat_id=chat_id,
-                prompt_tokens=pt, completion_tokens=ct,
-                cost_usd=_claude_text_price(m, pt, ct),
+                prompt_tokens=pt + cw + cr, completion_tokens=ct,
+                cache_write_tokens=cw, cache_read_tokens=cr,
+                cost_usd=_claude_text_price(m, pt, ct, cw, cr),
             )
             out = "\n".join(text_parts).strip()
             return out or None

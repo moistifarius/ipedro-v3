@@ -23,6 +23,7 @@ from ipedro.config import Settings
 from ipedro.db.repositories import StoredMessage
 from ipedro.memory.store import MemoryStore
 from ipedro.memory.tokens import count_tokens
+from ipedro.openai_client import CACHE_BREAKPOINT
 from ipedro.personas import resolve_persona
 
 log = logging.getLogger(__name__)
@@ -238,68 +239,84 @@ async def build_context(
         used += cost
         return True
 
-    # 1. Persona — an explicit override (e.g. impersonation mode) replaces
-    # the resolved persona for this turn; the temporal + name-labeling
-    # system messages below still apply.
-    persona_text = persona_override or resolve_persona(persona, persona_custom)
-    _add({"role": "system", "content": persona_text})
-    # 1a. Current time — gives the model temporal awareness (time of day,
-    # date, how long ago things happened). Always present, independent of
-    # memory: knowing "now" isn't conversation history.
-    _add({"role": "system", "content": _format_now(now, settings.tzinfo)})
-    # 1b. Tell the model the user-name labeling convention so it can
-    # distinguish speakers and address people properly. Kept compact so
-    # the budget hit is small.
-    _add({"role": "system", "content": _NAME_PREFIX_SYSTEM})
-    # 1c. What the bot can and can't do (ipedro.capabilities). Always on,
-    # so it never denies an ability it has or promises one it hasn't. An
-    # impersonation turn is somebody else's voice, so it gets none of it.
-    if capabilities and not persona_override:
-        _add({"role": "system", "content": capabilities})
-    # 1d. Prose rhythm. Always on — it's a standing habit, not a mode. Off
-    # during impersonation, where the target's own cadence is the point and
-    # a generic rhythm rule would flatten the very thing being copied.
-    if not persona_override:
-        _add({"role": "system", "content": _STYLE_SYSTEM})
-    if extra_system:
-        _add({"role": "system", "content": extra_system})
+    # ── the cacheable prefix ────────────────────────────────────────────
+    # Prompt caching is a prefix match: one changed byte invalidates
+    # everything after it. So the system prompt is assembled in stability
+    # order — content that is byte-identical between two messages in the
+    # same chat first, per-request content strictly after it — and the last
+    # stable block carries the breakpoint marker that _normalize_for_claude
+    # turns into cache_control. Ordering IS the optimization; the marker
+    # alone would do nothing.
+    #
+    # This is why the clock is not up here. It reads naturally as part of
+    # the preamble, but a timestamp at the front is the textbook silent
+    # invalidator: every minute it changes and the whole prefix behind it
+    # is re-billed at full price.
+    stable: list[str] = []
 
-    # When memory is disabled, skip every memory-derived layer below
-    # (summary, durable facts, semantic retrieval, recent raw messages).
-    # That's the user-facing semantics of the toggle: each call to the
-    # model is fresh, no chat history influences it. It also stops the
-    # embedding round-trip on semantic_search from churning the OpenAI
-    # quota for chats that have opted out of memory.
+    # Persona — an explicit override (e.g. impersonation mode) replaces the
+    # resolved persona for this turn.
+    stable.append(persona_override or resolve_persona(persona, persona_custom))
+    # The user-name labeling convention, so the model can tell speakers
+    # apart and address people properly.
+    stable.append(_NAME_PREFIX_SYSTEM)
+    # What the bot can and can't do, so it never denies an ability it has or
+    # promises one it hasn't. An impersonation turn is somebody else's
+    # voice, so it gets neither this nor the rhythm rule.
+    if capabilities and not persona_override:
+        stable.append(capabilities)
+    if not persona_override:
+        stable.append(_STYLE_SYSTEM)
+
+    # Summary and facts change only when the summarizer runs (every ~80
+    # messages), so they belong inside the cached prefix rather than after
+    # it: an occasional cache write beats paying full price for ~640 tokens
+    # on every single reply. Both are ordered by id DESC in SQL, so the
+    # rendered bytes are stable rather than incidentally ordered.
+    hits: list[dict] = []
     if memory_enabled:
-        # 2. Running summary
         summary = await store.latest_summary(chat_id)
         if summary:
-            _add({
-                "role": "system",
-                "content": f"Conversation summary so far:\n{summary.summary}",
-            })
+            stable.append(f"Conversation summary so far:\n{summary.summary}")
 
-        # 3. Durable facts (compact)
         facts = await store.list_facts(chat_id, limit=20)
         if facts:
-            fact_block = "Known durable facts about this chat:\n" + "\n".join(
-                f"- {f.fact}" for f in facts
+            stable.append(
+                "Known durable facts about this chat:\n"
+                + "\n".join(f"- {f.fact}" for f in facts)
             )
-            _add({"role": "system", "content": fact_block})
 
-        # 4. Semantic retrieval against the latest user input
+        # Semantic retrieval is keyed on THIS message, so it is volatile by
+        # construction and is emitted below the breakpoint.
         if latest_user_text.strip():
             hits = await store.semantic_search(
                 chat_id, latest_user_text, k=settings.semantic_retrieval_k,
             )
             hits = [h for h in hits if h.get("similarity", 0) >= 0.25]
-            if hits:
-                retrieved = (
-                    "Potentially relevant things said earlier (the name is who "
-                    "said it — attribute accordingly):\n"
-                    + "\n".join(_retrieved_line(h) for h in hits)
-                )
-                _add({"role": "system", "content": retrieved})
+
+    stable_end = -1
+    for block in stable:
+        if _add({"role": "system", "content": block}):
+            stable_end = len(messages) - 1
+    if stable_end >= 0:
+        # Mark the last block that actually survived the budget — marking one
+        # the budget dropped would put the breakpoint in the wrong place.
+        messages[stable_end][CACHE_BREAKPOINT] = True
+
+    # ── the volatile tail ───────────────────────────────────────────────
+    # Everything from here changes per request. It sits after the
+    # breakpoint, so it costs full price but invalidates nothing.
+    _add({"role": "system", "content": _format_now(now, settings.tzinfo)})
+    if extra_system:
+        _add({"role": "system", "content": extra_system})
+    if hits:
+        _add({"role": "system", "content": (
+            "Potentially relevant things said earlier (the name is who "
+            "said it — attribute accordingly):\n"
+            + "\n".join(_retrieved_line(h) for h in hits)
+        )})
+
+    if memory_enabled:
 
         # 5. Recent raw messages (chronological, last N). User-role turns
         # get their speaker's display name prefixed so the model can tell

@@ -546,3 +546,14 @@ CREATE TABLE IF NOT EXISTS media_descriptions (
 -- chat that posts hundreds of images a day and doesn't want them described.
 ALTER TABLE chat_config
     ADD COLUMN IF NOT EXISTS vision_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+
+-- Prompt-cache accounting -----------------------------------------------------
+-- Anthropic bills cached prompt tokens in their own usage fields and EXCLUDES
+-- them from input_tokens, so without these two columns the /cost report silently
+-- under-reports the moment caching is switched on — precisely when you want to
+-- trust it. prompt_tokens now carries the full prompt size (fresh + write +
+-- read) and these split out how it was billed: writes at 1.25x, reads at 0.1x.
+ALTER TABLE openai_usage
+    ADD COLUMN IF NOT EXISTS cache_write_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE openai_usage
+    ADD COLUMN IF NOT EXISTS cache_read_tokens INTEGER NOT NULL DEFAULT 0;
