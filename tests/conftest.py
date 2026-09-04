@@ -35,8 +35,12 @@ def _no_ambient_dice(monkeypatch):
     exercise these paths deliberately (test_reactions, test_dale_sprinkle)
     still set their own value and win.
     """
+    from ipedro import addressed
     from ipedro.handlers import chat
 
+    # The implicit-address window is module state; a bot reply noted by one
+    # test must not make the next test's message look like a follow-up.
+    addressed.reset()
     monkeypatch.setattr(chat, "_REACT_PROBABILITY", 0.0)
     monkeypatch.setattr(chat, "_DALE_GIF_PROBABILITY", 0.0)
     monkeypatch.setattr(chat, "_CREDIT_PROBABILITY", 0.0)

@@ -6,13 +6,14 @@ import asyncio
 import io
 import logging
 import random
+from dataclasses import replace
 import re
 from datetime import datetime, timezone
 
 from aiogram import F, Router
 from aiogram.types import BufferedInputFile, Message, ReactionTypeEmoji
 
-from ipedro import vision
+from ipedro import addressed, vision
 from ipedro.bot_messages import track
 from ipedro.capabilities import capability_brief
 from ipedro.chat_policy import IncomingMessage, should_respond
@@ -623,6 +624,7 @@ def build_router(rt: Runtime) -> Router:
         from_user_id = msg.from_user.id if msg.from_user else None
         if await has_flag(rt.db, msg.chat.id, from_user_id, "shutup"):
             return
+        addressed.note_user_message(msg.chat.id)
 
         # Look at the picture. Whatever the bot sees is folded into the
         # transcript as a bracketed line, so from here down a photo is just
@@ -781,6 +783,24 @@ def build_router(rt: Runtime) -> Router:
             chat_type=msg.chat.type,
         )
 
+        # Nobody said his name and nobody hit reply, but they may still be
+        # talking to him — "why?" right after he spoke, a "you" that means
+        # him, a question to the room. Treated as a mention from here on,
+        # which also keeps the ambient GIF from eating the answer. `reply`
+        # is the operator saying "only when replied to"; it stays strict.
+        if (
+            typed
+            and cfg.response_policy in ("mention", "ambient")
+            and not incoming.has_mention_of_bot
+            and not incoming.is_reply_to_bot
+            and await addressed.wants_reply(
+                rt, msg.chat.id,
+                speaker=display_name(msg.from_user) if msg.from_user else None,
+                text=typed, memory_enabled=cfg.memory_enabled,
+            )
+        ):
+            incoming = replace(incoming, has_mention_of_bot=True)
+
         # Ambient Dale. Deliberately does NOT return: falling through keeps
         # maybe_summarize (below) running on these messages. Skipped whenever
         # the message is addressed to the bot, so a random GIF can never eat a
@@ -918,6 +938,7 @@ def build_router(rt: Runtime) -> Router:
 
         sent = await msg.answer(reply, disable_notification=True)
         track(msg.chat.id, sent.message_id, reply)
+        addressed.note_bot_reply(msg.chat.id)
 
         # Post-send: never let a DB hiccup crash the handler after the user
         # already saw the reply — log it and move on (else stored history

@@ -51,7 +51,9 @@ _SCHEDULED: tuple[tuple[str, str], ...] = (
 
 _POLICY_LINE: dict[str, str] = {
     "always": "every message here",
-    "mention": "messages that say your name or reply to you",
+    "mention": "messages that say your name, reply to you, or are "
+               "plainly talking to you (a follow-up right after you spoke, "
+               "a question to the room)",
     "reply": "only replies to your own messages",
     "ambient": "messages that say your name or reply to you, plus the "
                "occasional random one",
