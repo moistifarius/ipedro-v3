@@ -228,7 +228,6 @@ async def build_context(
     latest_user_text: str,
     latest_user_name: str | None = None,
     extra_system: str | None = None,
-    stable_extra: str | None = None,
     memory_enabled: bool = True,
     now: datetime | None = None,
     persona_override: str | None = None,
@@ -277,11 +276,6 @@ async def build_context(
     if not persona_override:
         stable.append(_STYLE_SYSTEM)
     stable.append(_CLOCK_SYSTEM)
-    # Slow-moving caller context — the chat's mood, word of the day, a
-    # stuck word. Byte-stable for hours at a time, so it belongs here, not
-    # in the per-request tail with the snark flag.
-    if stable_extra:
-        stable.append(stable_extra)
 
     # Summary and facts change only when the summarizer runs (every ~80
     # messages), so they belong inside the cached prefix rather than after

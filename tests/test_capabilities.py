@@ -171,10 +171,6 @@ def _reply_rt(cfg):
     rt = _rt_with()
     rt.chats.get_config.return_value = cfg
     rt.chats.upsert_default_config.return_value = cfg
-    rt.persona_state = SimpleNamespace(
-        current=AsyncMock(return_value=None),
-        to_system_prompt=lambda state: "",
-    )
     rt.openai = SimpleNamespace(chat=AsyncMock(return_value="sh-sha"))
     return rt
 

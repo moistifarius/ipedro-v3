@@ -269,8 +269,6 @@ def build_router(rt: Runtime) -> Router:
           3. chat_config.persona in {"dude", "pedro"} → /master_prompt
              override, or DEFAULT_DUDE_PROMPT if no override is set
           4. anything else → /master_prompt fallback
-        Plus the dynamic ``persona_state`` (mood / word-of-day /
-        stuck-word) appended as a second system message.
         """
         if not await require_admin(msg, rt.settings.admin_ids):
             return
@@ -283,8 +281,6 @@ def build_router(rt: Runtime) -> Router:
                             disable_notification=True)
             return
         resolved = resolve_persona(cfg.persona, cfg.persona_custom)
-        state = await rt.persona_state.current(msg.chat.id)
-        extra = rt.persona_state.to_system_prompt(state)
         master = current_master_prompt()
         master_overridden = master != DEFAULT_DUDE_PROMPT
         custom = (cfg.persona_custom or "").strip()
@@ -305,13 +301,10 @@ def build_router(rt: Runtime) -> Router:
             f"chat_config.persona_custom = "
             f"{'<set, ' + str(len(custom)) + ' chars>' if custom else 'None'}\n"
             f"master_prompt override     = "
-            f"{'yes (' + str(len(master)) + ' chars)' if master_overridden else 'no (using default)'}\n"
-            f"persona_state extras       = "
-            f"{'<set, ' + str(len(extra)) + ' chars>' if extra else 'None'}\n\n"
+            f"{'yes (' + str(len(master)) + ' chars)' if master_overridden else 'no (using default)'}\n\n"
             f"Resolved persona source: {source}\n\n"
             f"--- system prompt actually sent (first 1500 chars) ---\n"
             f"{resolved[:1500]}"
-            + (f"\n\n--- + dynamic extras ---\n{extra[:500]}" if extra else "")
         )
         await msg.reply(body[:4000], disable_notification=True)
 

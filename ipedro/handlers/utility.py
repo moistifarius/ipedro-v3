@@ -1,6 +1,6 @@
 """General-purpose user commands.
 
-/remind, /poll, /whatdid, /mood, /quote(s), /unquote, /tldr,
+/remind, /poll, /whatdid, /quote(s), /unquote, /tldr,
 /birthday, /anniversary, /dates, /catchphrases, /lexicon, /heatmap.
 """
 
@@ -292,18 +292,6 @@ def build_router(rt: Runtime) -> Router:
             out or f"No idea what {target_name} has been doing.",
             disable_notification=True,
         )
-
-    @r.message(Command("mood"))
-    async def mood(msg: Message) -> None:
-        """Show this chat's current persona state (mood, word-of-the-day, stuck word)."""
-        await get_or_create_chat_config(rt, msg)
-        state = await rt.persona_state.current(msg.chat.id)
-        lines = [f"Mood: {state.mood or 'unset'}"]
-        if state.word_of_day:
-            lines.append(f"Word of the day: {state.word_of_day}")
-        if state.stuck_word:
-            lines.append(f"Currently stuck on: {state.stuck_word}")
-        await msg.reply("\n".join(lines), disable_notification=True)
 
     @r.message(Command("poll"))
     async def poll(msg: Message) -> None:

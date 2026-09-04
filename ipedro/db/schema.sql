@@ -187,17 +187,11 @@ CREATE INDEX IF NOT EXISTS reminders_due_idx
     ON reminders (fired, fire_at);
 
 -- Per-chat persona state ----------------------------------------------------
--- Holds the chat's current mood, word-of-the-day, and any currently-stuck
--- word that Pedro fixates on. All three are nullable and refreshed lazily
--- when build_context runs.
+-- Per-chat scheduler bookkeeping: when each ambient loop last fired here.
+-- (The mood / word-of-the-day columns this table was created for are gone;
+-- see the DROP COLUMN block at the end of the file.)
 CREATE TABLE IF NOT EXISTS chat_state (
     chat_id               BIGINT PRIMARY KEY REFERENCES chats(chat_id) ON DELETE CASCADE,
-    mood                  TEXT,
-    mood_set_at           TIMESTAMPTZ,
-    word_of_day           TEXT,
-    word_of_day_at        TIMESTAMPTZ,
-    stuck_word            TEXT,
-    stuck_word_expires_at TIMESTAMPTZ,
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -557,3 +551,13 @@ ALTER TABLE openai_usage
     ADD COLUMN IF NOT EXISTS cache_write_tokens INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE openai_usage
     ADD COLUMN IF NOT EXISTS cache_read_tokens INTEGER NOT NULL DEFAULT 0;
+
+-- The mood / word-of-the-day / stuck-word persona state was removed: it cost
+-- ~70-100 prompt tokens a reply and nobody could tell it was there. The
+-- columns go with it; every other chat_state column is untouched.
+ALTER TABLE chat_state DROP COLUMN IF EXISTS mood;
+ALTER TABLE chat_state DROP COLUMN IF EXISTS mood_set_at;
+ALTER TABLE chat_state DROP COLUMN IF EXISTS word_of_day;
+ALTER TABLE chat_state DROP COLUMN IF EXISTS word_of_day_at;
+ALTER TABLE chat_state DROP COLUMN IF EXISTS stuck_word;
+ALTER TABLE chat_state DROP COLUMN IF EXISTS stuck_word_expires_at;

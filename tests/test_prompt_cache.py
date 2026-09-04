@@ -94,7 +94,7 @@ async def _ctx(text="what about propane", *, when=NOW, store=None, **kw):
         store=store or _Store(), settings=_settings(), chat_id=1,
         persona="dude", persona_custom=None, latest_user_text=text,
         latest_user_name="Matt", capabilities=capability_brief(_cfg()),
-        extra_system="You are in a CRANKY mood right now.", now=when,
+        extra_system="The user you're replying to is on your shit list.", now=when,
     )
     opts.update(kw)
     return await build_context(**opts)
@@ -150,12 +150,12 @@ async def test_the_clock_explainer_is_cached_and_the_stamp_is_not():
 
 @pytest.mark.asyncio
 async def test_per_request_content_lands_after_the_breakpoint():
-    """Semantic hits are keyed on this message and the mood changes on its
-    own schedule; both are volatile by construction."""
+    """Semantic hits are keyed on this message and the snark flag on its
+    sender; both are volatile by construction."""
     stable, _ = _split(await _ctx("propane"))
     cached, volatile = stable[0]["text"], stable[1]["text"]
     assert "an earlier remark" in volatile and "an earlier remark" not in cached
-    assert "CRANKY" in volatile and "CRANKY" not in cached
+    assert "shit list" in volatile and "shit list" not in cached
 
 
 @pytest.mark.asyncio
@@ -414,21 +414,6 @@ async def test_older_models_are_left_exactly_as_before():
         await client.chat([{"role": "user", "content": "hi"}])
         assert "thinking" not in captured, model
         assert captured["temperature"] == 1.0, model
-
-
-# ── slow-moving caller context rides in the prefix ───────────────────────────
-
-@pytest.mark.asyncio
-async def test_stable_extra_is_cached_and_extra_system_is_not():
-    """Mood and word-of-the-day hold still for hours; the snark flag is
-    per message. Same mechanism, opposite sides of the breakpoint."""
-    ctx = await _ctx(
-        stable_extra="You are in a SMUG mood right now.",
-        extra_system="The user you're replying to is on your shit list.",
-    )
-    cached, volatile = (b["text"] for b in _split(ctx)[0])
-    assert "SMUG" in cached and "SMUG" not in volatile
-    assert "shit list" in volatile and "shit list" not in cached
 
 
 # ── retrieval never pays for what is already in the request ──────────────────

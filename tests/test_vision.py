@@ -278,9 +278,6 @@ def _seeing_rt(monkeypatch, *, seen="[photo: a cat in a hat]", policy="always"):
                   "comic_enabled", "fortune_enabled", "ether_enabled"):
         setattr(cfg, field, False)
     rt.memory = SimpleNamespace(record_message=AsyncMock())
-    rt.persona_state = SimpleNamespace(
-        current=AsyncMock(return_value=None), to_system_prompt=lambda s: "",
-    )
     rt.openai = SimpleNamespace(chat=AsyncMock(return_value="sh-sha"))
     monkeypatch.setattr(vision, "describe", AsyncMock(return_value=seen))
     monkeypatch.setattr(chat, "_REACT_PROBABILITY", 0.0)

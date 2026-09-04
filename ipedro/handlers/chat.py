@@ -850,10 +850,6 @@ def build_router(rt: Runtime) -> Router:
 
         await rt.bot.send_chat_action(msg.chat.id, "typing")
 
-        state = await rt.persona_state.current(msg.chat.id)
-        # Mood / word of the day / stuck word hold still for hours, so they
-        # ride in the cached prefix. Everything below is per-message.
-        stable_extra = rt.persona_state.to_system_prompt(state) or None
         extra_bits = []
         # "dale what is this" on someone else's photo: the picture is on the
         # replied-to message, not this one. Described for this turn only —
@@ -903,7 +899,6 @@ def build_router(rt: Runtime) -> Router:
                 display_name(msg.from_user) if msg.from_user else None
             ),
             extra_system=extra,
-            stable_extra=stable_extra,
             memory_enabled=cfg.memory_enabled,
             persona_override=persona_override,
             capabilities=capability_brief(cfg),

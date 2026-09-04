@@ -124,7 +124,6 @@ def _chat_rt(
         duckhunt=SimpleNamespace(),
         openai=SimpleNamespace(cheap_completion=AsyncMock(return_value=fact)),
         memory=memory,
-        persona_state=SimpleNamespace(),
     )
 
 

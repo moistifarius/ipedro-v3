@@ -36,7 +36,6 @@ HELP_TEXT_PUBLIC = (
     "/beneficiality - score whether I'd butt in right now\n"
     "/whatdid @user - summarize what they've been up to\n"
     "/tldr [duration] - summarize the recent chat (default 24h)\n"
-    "/mood - my current mood + word of the day\n"
     "/haiku - haiku about the recent chat\n"
     "/this_or_that A | B - I decide, dramatically\n"
     "/echo @user [topic] - I mimic their style\n"
