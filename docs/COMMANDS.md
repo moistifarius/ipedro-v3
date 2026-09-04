@@ -17,11 +17,6 @@ history. Useful for one-off questions.
 ### `/aigen <prompt>`
 Generate an image with the configured image model (default `gpt-image-1`).
 
-### `/aiedit`, `/aivar`
-Preserved from V1 for compatibility. Currently respond with a "not wired"
-notice — the modern OpenAI SDK requires a different flow for image edits
-and variations; these will be re-enabled when needed.
-
 ### `/aitranslate`
 Reply to a voice note with this command to translate the audio to English.
 
@@ -48,28 +43,95 @@ bot's admin user. Fields:
 | `duckhunt` | `on` / `off` |
 | `voice` | `on` / `off` — transcribe inbound voice notes |
 | `memory` | `on` / `off` — store messages and build context from history |
-| `ether` | `on` / `off` — opt this chat into cross-chat pager garbling (📟). Every ~hour, a recent message from any other ether-opted chat may be picked, garbled (dropped chars, leet subs, blackouts, truncation), and broadcast here with a spooky wrapper. Receiver cooldown: 4h. Needs ≥ 2 chats opted in. |
+| `ether` | `on` / `off` — make this chat reachable as a destination for `/ether` radio transmissions sent from other ether-enabled chats. Off by default. Needs ≥ 2 chats opted in for a transmission to have anywhere to land. |
+| `ducknames` | `on` / `off` — include this chat's named befriended ducks in the global `/ducknames` listing. Default `on`. Turn off if you want your roster private (your in-chat `/duckfriends` and `/duckstats` still work either way). |
+
+### `/ether <text>` (and on voice notes)
+
+Manually transmit into the ether, as a **far-away radio voice** rather
+than the ambient loop's garbled text:
+
+- `/ether <text>` — your text is spoken aloud (OpenAI TTS), then run
+  through a Python DSP chain (numpy + scipy.signal, with ffmpeg only at
+  the edges for decode/encode) that models a long-haul HF/SSB signal:
+  narrow bandpass + 1.2 kHz presence boost, 6:1 compression, light tanh
+  saturation, pitch wobble + slow drift + a constant −20 ¢ "wrong-tuning"
+  detune, subtle ring modulation, multi-LFO QSB fades, 180 ms slapback
+  delay, and a dark convolution reverb. Mixed in parallel: a band-limited
+  **static** bed, a faint FM-swept heterodyne **tuning whistle** that
+  fades in and out, sparse high-frequency **squeals**, and a squelch
+  **click** at the start and end. Mono OGG/Opus, broadcast as a voice
+  note. Every render uses a fresh random seed, so no two transmissions
+  are identical.
+
+  The static bed has a three-tier priority: **live audio fetch** (lazy
+  — pulled on the first `/ether` after a restart, cached for 6 h) →
+  bundled `ipedro/assets/shortwave_*.ogg` files → synthetic pink-noise
+  hash with lightning crackles and carrier ghosts.
+
+  **Live fetch is OFF by default.** To enable it, set
+  `RADIO_FX_LIVE_URLS` in `.env` to a comma-separated list. Two URL
+  schemes are supported:
+
+  - `kiwi://host:port?freq=14040&mode=lsb` — opens a WebSocket to a
+    public **KiwiSDR** node, tunes to the given frequency (kHz) and
+    mode (`lsb` / `usb` / `am` / `cw` / `sam`), decodes the 4-bit
+    IMA-ADPCM stream, and resamples to the working rate. Anonymous
+    connect; optional `&password=...`. Pick a node from
+    [kiwisdr.com/public](http://kiwisdr.com/public). Please use the
+    bot's natural cadence (6 h cache → ≤ a few connects/day) — these
+    are volunteer-operated receivers.
+  - `http://...` / `https://...` — anything ffmpeg can decode in one
+    shot (Icecast relay, direct MP3, etc).
+
+  Failover walks the list in order until one yields ≥ 1 s of audio.
+  The easiest non-SDR alternative is to drop one or more
+  `shortwave_*.ogg` recordings into `ipedro/assets/` — the module picks
+  a random file per broadcast.
+
+  Use `/ether_status` to see which source the last broadcast actually
+  used; `/ether_refresh` drops the live cache so the next call
+  refetches.
+- `/ether` as the **caption of a voice note**, or as a **reply to a voice
+  note** — your actual recording gets the radio treatment instead.
+- `/ether` replying to a **text** message — transmits that message's text.
+
+The destination is a random *other* ether-enabled chat, chosen
+anonymously (the manual command ignores the 4h receiver cooldown but
+still only lands in opted-in chats). Each transmission rolls a random
+intensity — biased heavy, so it always sounds like genuine DX — and a
+rare one barely punches through at all. If TTS or the audio toolchain
+(ffmpeg) is unavailable, a text `/ether` falls back to a garbled text
+broadcast. Requires another chat to have `ether` enabled.
 
 ### Duckhunt
 
 - `/duckhunt` — force-spawn a duck (requires duckhunt enabled for this chat).
 - `/duckstats` — leaderboard for this chat.
 - `/duckfriends` — your roster of ducks you've befriended in this chat.
+- `/ducknames [page]` — every named duck across every chat (100/page,
+  newest first). Skips chats that have opted out via `/chat_config
+  ducknames off` (default is on).
 - `/quackflag` — is there an active duck right now?
 
 Reply tokens (case-insensitive): `bang`, `bef`, `ignore`.
 
+#### How `bang` works
+
+Base hit chance is **40 %**; each shot in a streak adds +4 %, capped at
+**70 %** (so a 5-streak tops out around 60 %). Misses reset your
+streak. About **two misses in three** **spook** you into a captcha /
+trivia / recipe **challenge** — same mechanic as the `bef`-refusal
+challenge below. While that challenge is pending, further `bang`s are
+blocked; clear it (reply with the answer in plain text, or wait for the
+1 h auto-expiry) and you can shoot again.
+
 #### How `bef` works
 
-The AI plays the duck and decides whether it actually wants to be
-friends. It's chaotic — usually agrees, occasionally refuses for absurd
-or trivial reasons.
-
-(Rarity tiers used to bias this decision toward refusal for rarer
-ducks, plus an extra pre-AI dice gate. That whole layer is currently
-disabled — every duck behaves identically. The column is preserved so
-the tiering can be re-enabled later by flipping the helpers in
-`ipedro/duckhunt/scoring.py` back to their lookup forms.)
+The duck refuses outright **just over half the time** (a flat pre-AI
+dice roll), without the AI even being asked. When the dice does pass,
+the AI plays the duck and decides on its own: usually agrees,
+occasionally refuses for absurd or trivial reasons.
 
 A successful `bef` resolves the duck, awards a befriended point, and
 adds the duck to your friendship roster (`/duckfriends`); the bot
@@ -79,6 +141,13 @@ simply try `bef` again. The bot will post a retry **challenge** (a
 captcha, a weird trivia question, or "write me a recipe"). Reply
 directly to that challenge message with your attempt; if the AI judges
 it as good-faith, the challenge clears and you can try `bef` again.
+
+While a challenge is outstanding, any plain text you send in that chat
+is treated as your answer (so you don't have to formally reply). Two
+guardrails keep this from trapping you: slash-commands are never judged
+as answers, and a challenge auto-expires after 1h (the next message
+clears it and is handled normally). An admin can also force-clear a
+stuck challenge with `/debug_clear_challenge [chat_id]`.
 
 Ducks may also wander off on their own at any time — more likely as they
 hang around longer, and almost certainly gone after a day.

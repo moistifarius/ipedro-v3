@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 
 # Tiers preserved for historical compatibility. Not consulted by gameplay
 # anymore; new spawns always tag as "common" via roll_rarity().
@@ -47,6 +47,26 @@ RARITY_BY_NAME: dict[str, tuple[float, int]] = {
 # defaults below. Boss bonus is computed off this too.
 FLAT_DUCK_POINTS = 1
 
+# --------------------------------------------------------------- difficulty
+# Tuned forgiving — shooting a duck should feel good, not like a chore.
+# A clean shot lands most of the time, and a streak takes it to near-certain.
+# Streak still meaningfully lifts the hit chance so chaining shots is rewarding.
+BANG_BASE_HIT = 0.65          # 35% miss rate at streak 0
+BANG_HIT_CAP = 0.90           # max effective hit chance
+BANG_STREAK_BONUS = 0.05      # per streak point, capped at the streak cap
+BANG_STREAK_CAP = 5           # max effective hit at full streak: 0.90
+
+# Probability the AI's verdict gets bypassed in favour of an outright
+# refusal — the duck doesn't even hear you out. The AI can still refuse
+# on top of this, so real bef success rate sits lower.
+BEF_REFUSE_RATE = 0.55
+
+# When a bang misses, the chance the duck "spooks" you into a follow-up
+# captcha/trivia/recipe challenge. Kept low so a miss usually just means
+# "try again", not "now solve a puzzle" — the challenge gates further bangs
+# until cleared (same plumbing the bef refusal uses).
+MISS_CHALLENGE_RATE = 0.25
+
 # (month, day) -> (event name, hint flavor used in the quack line)
 HOLIDAYS: dict[tuple[int, int], tuple[str, str]] = {
     (1, 1):   ("New Year",         "🎆 the duck wears tiny party glasses"),
@@ -61,14 +81,6 @@ HOLIDAYS: dict[tuple[int, int], tuple[str, str]] = {
 }
 
 # Preserved for backwards compatibility; not consulted while rarity is off.
-HOLIDAY_WEIGHTS: tuple[tuple[str, float, int], ...] = (
-    ("common",    0.40, 1),
-    ("uncommon",  0.25, 3),
-    ("rare",      0.20, 7),
-    ("epic",      0.10, 15),
-    ("legendary", 0.05, 40),
-)
-
 # Chance any given spawn is upgraded to a boss duck.
 BOSS_SPAWN_CHANCE = 0.03
 
@@ -78,7 +90,7 @@ def current_holiday(today: date | None = None) -> tuple[str, str] | None:
     return HOLIDAYS.get((d.month, d.day))
 
 
-def boss_required_hits(rarity: str) -> int:
+def boss_required_hits() -> int:
     """Boss takes a fixed number of hits while rarity is neutralized."""
     return 3
 
@@ -112,9 +124,11 @@ def base_points(rarity: str) -> int:
 
 def bang_outcome(rarity: str, current_streak: int, rng: random.Random | None = None) -> ActionOutcome:
     """Trying to shoot the duck. Streak gives a small accuracy bonus.
-    Rarity is accepted but ignored — flat 0.80 base hit chance."""
+    Rarity is accepted but ignored — flat ``BANG_BASE_HIT`` base hit chance,
+    rising with streak up to ``BANG_HIT_CAP``."""
     r = rng if rng is not None else random
-    hit_chance = min(0.95, 0.80 + min(current_streak, 5) * 0.02)
+    streak_bonus = min(current_streak, BANG_STREAK_CAP) * BANG_STREAK_BONUS
+    hit_chance = min(BANG_HIT_CAP, BANG_BASE_HIT + streak_bonus)
     if r.random() <= hit_chance:
         pts = FLAT_DUCK_POINTS
         return ActionOutcome(
@@ -148,9 +162,26 @@ BEF_BASE_CHANCE: dict[str, float] = {
 
 
 def bef_dice_passes(rarity: str, rng: random.Random | None = None) -> bool:
-    """Step 1 of the bef flow. With rarity neutralized, the dice always
-    passes and the outcome is decided entirely by the AI verdict."""
-    return True
+    """Step 1 of the bef flow.
+
+    Returns False with probability ``BEF_REFUSE_RATE`` — the duck refuses
+    outright before the AI verdict is even consulted. This is the harder
+    setting: roughly one bef in three is a flat-out "no" regardless of
+    AI mood.
+    """
+    r = rng if rng is not None else random
+    return r.random() >= BEF_REFUSE_RATE
+
+
+def should_challenge_on_miss(rng: random.Random | None = None) -> bool:
+    """True with probability ``MISS_CHALLENGE_RATE``.
+
+    Rolled after a bang miss to decide whether the duck spooks the
+    shooter into a captcha/trivia/recipe challenge that must be cleared
+    before they can bang again.
+    """
+    r = rng if rng is not None else random
+    return r.random() < MISS_CHALLENGE_RATE
 
 
 def bef_success_outcome(rarity: str, ai_line: str | None) -> ActionOutcome:
@@ -213,3 +244,65 @@ def ignore_outcome(rarity: str, rng: random.Random | None = None) -> ActionOutco
         message=r.choice(_IGNORE_WANDER_FLAVOR),
         resolves_duck=True,
     )
+
+
+# ----------------------------------------------------------- challenge clock
+# How long a player has to answer each challenge kind before the clock runs
+# out. Roomy on purpose — a challenge should be a light speed bump, not a
+# pop quiz you can flunk by being slow. Captcha (Googling doesn't help) and
+# recipe (creative typing takes longer) get the most room.
+CHALLENGE_TIME_LIMITS: dict[str, int] = {
+    "trivia": 60,
+    "captcha": 60,
+    "recipe": 90,
+}
+_DEFAULT_CHALLENGE_TIME_LIMIT = 45
+
+
+def challenge_time_limit_seconds(kind: str) -> int:
+    """Seconds allowed to answer a challenge of this kind."""
+    return CHALLENGE_TIME_LIMITS.get(kind, _DEFAULT_CHALLENGE_TIME_LIMIT)
+
+
+def challenge_seconds_elapsed(
+    created_at: datetime | None, now: datetime | None = None,
+) -> float:
+    """Seconds between when the challenge was issued and ``now`` (default:
+    current UTC). Tolerant of a naive ``created_at`` (assumes UTC) and of a
+    missing one (returns 0.0 so a clockless challenge never times out)."""
+    if created_at is None:
+        return 0.0
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return (current - created_at).total_seconds()
+
+
+def challenge_is_over_time(
+    kind: str, created_at: datetime | None, now: datetime | None = None,
+) -> bool:
+    """True if the answer arrived after this kind's clock expired."""
+    return (
+        challenge_seconds_elapsed(created_at, now)
+        > challenge_time_limit_seconds(kind)
+    )
+
+
+# Said when a challenge answer lands after the clock ran out. Paranoid
+# voice — the duck assumes you were stalling / looking it up, because of
+# course you were. Picked at random.
+_OVER_TIME_FLAVOR: tuple[str, ...] = (
+    "⏱ Time. Too slow — a real answer comes faster than a search bar. Try again.",
+    "⏱ Clock's out. Hesitation like that goes in the file.",
+    "⏱ Buzzer. You stalled, the duck noticed, no deal.",
+    "⏱ Too slow. Sh-sha. You were looking that up, weren't you. Weren't you.",
+    "⏱ Time's up. Civilians answer on instinct. That was a stall.",
+    "⏱ Too late. Whatever you were typing into that other tab — forget it.",
+)
+
+
+def over_time_line(rng: random.Random | None = None) -> str:
+    r = rng if rng is not None else random
+    return r.choice(_OVER_TIME_FLAVOR)

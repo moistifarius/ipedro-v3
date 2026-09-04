@@ -158,7 +158,7 @@ def test_custom_value_handler_predicate_for_unparked_admin():
     behaviour by exercising the dict membership check that backs it."""
     _PENDING_CUSTOM_VALUES.clear()
     assert 42 not in _PENDING_CUSTOM_VALUES
-    _PENDING_CUSTOM_VALUES[42] = (1, 2, "points", time.time())
+    _PENDING_CUSTOM_VALUES[42] = (1, 2, "points", time.time(), 42)
     assert 42 in _PENDING_CUSTOM_VALUES
     _PENDING_CUSTOM_VALUES.clear()
 
@@ -229,11 +229,16 @@ async def test_custom_value_caps_at_int_max():
 
 # --- Fix #1 — _has_parked_value enforces the 60s TTL ---------------------
 
-def _msg_stub(user_id: int, text: str):
-    """Tiny stand-in for aiogram Message that satisfies _has_parked_value."""
+def _msg_stub(user_id: int, text: str, chat_id: int | None = None):
+    """Tiny stand-in for aiogram Message that satisfies _has_parked_value.
+
+    ``chat_id`` defaults to ``user_id`` — Telegram DM semantics, where the
+    private chat's id equals the user's id. Pass a different value to
+    simulate the admin typing in a group."""
     return SimpleNamespace(
         from_user=SimpleNamespace(id=user_id),
         text=text,
+        chat=SimpleNamespace(id=chat_id if chat_id is not None else user_id),
     )
 
 
@@ -241,7 +246,7 @@ def test_has_parked_value_returns_false_when_entry_expired():
     """Stale (past-TTL) entry must (a) cause the predicate to return False
     so the message keeps propagating and (b) be popped from the dict."""
     _PENDING_CUSTOM_VALUES.clear()
-    _PENDING_CUSTOM_VALUES[123] = (1, 2, "points", time.time() - 999.0)
+    _PENDING_CUSTOM_VALUES[123] = (1, 2, "points", time.time() - 999.0, 123)
     msg = _msg_stub(123, "1234")
     assert _has_parked_value(msg) is False
     assert 123 not in _PENDING_CUSTOM_VALUES
@@ -252,7 +257,7 @@ def test_has_parked_value_returns_true_when_entry_fresh():
     """Within-TTL entry must return True and stay in the dict (the handler
     pops it later — the predicate must not consume it)."""
     _PENDING_CUSTOM_VALUES.clear()
-    _PENDING_CUSTOM_VALUES[123] = (1, 2, "points", time.time() - 5.0)
+    _PENDING_CUSTOM_VALUES[123] = (1, 2, "points", time.time() - 5.0, 123)
     msg = _msg_stub(123, "1234")
     assert _has_parked_value(msg) is True
     assert 123 in _PENDING_CUSTOM_VALUES
@@ -263,11 +268,26 @@ def test_has_parked_value_ignores_slash_commands():
     """Even with a fresh entry, a /command must NOT be captured — the
     admin's slash commands have to keep flowing to their own handlers."""
     _PENDING_CUSTOM_VALUES.clear()
-    _PENDING_CUSTOM_VALUES[123] = (1, 2, "points", time.time())
+    _PENDING_CUSTOM_VALUES[123] = (1, 2, "points", time.time(), 123)
     assert _has_parked_value(_msg_stub(123, "/help")) is False
     # Slash check must not pop the entry — the admin might still
     # complete the custom-value flow with a real number.
     assert 123 in _PENDING_CUSTOM_VALUES
+    _PENDING_CUSTOM_VALUES.clear()
+
+
+def test_has_parked_value_ignores_other_chats():
+    """An entry parked in the admin DM (chat 123) must NOT capture a plain
+    message the admin types in a GROUP within the TTL window — that group
+    chatter would otherwise be swallowed and applied as a duckstat value.
+    The entry stays parked so the flow can still finish in the DM."""
+    _PENDING_CUSTOM_VALUES.clear()
+    _PENDING_CUSTOM_VALUES[123] = (1, 2, "points", time.time(), 123)
+    group_msg = _msg_stub(123, "1234", chat_id=-100987654321)
+    assert _has_parked_value(group_msg) is False
+    assert 123 in _PENDING_CUSTOM_VALUES
+    # Same message typed in the parked chat is still captured.
+    assert _has_parked_value(_msg_stub(123, "1234")) is True
     _PENDING_CUSTOM_VALUES.clear()
 
 
@@ -278,7 +298,7 @@ def test_dse_navigation_clears_parked_custom_value():
     later typed number can't silently write to a field the admin has
     already navigated away from. Regression test for Fix #2."""
     _PENDING_CUSTOM_VALUES.clear()
-    _PENDING_CUSTOM_VALUES[42] = (1, 2, "points", time.time())
+    _PENDING_CUSTOM_VALUES[42] = (1, 2, "points", time.time(), 42)
     # 'field' is the navigation that happens when the admin re-opens a
     # different field's picker.
     _pop_parked_on_navigation("field", 42)
@@ -290,7 +310,7 @@ def test_dse_custom_does_not_clear_parked_entry():
     """The 'custom' verb is the one that ARMS the parked entry — popping
     here would defeat the feature."""
     _PENDING_CUSTOM_VALUES.clear()
-    _PENDING_CUSTOM_VALUES[42] = (1, 2, "points", time.time())
+    _PENDING_CUSTOM_VALUES[42] = (1, 2, "points", time.time(), 42)
     _pop_parked_on_navigation("custom", 42)
     assert 42 in _PENDING_CUSTOM_VALUES
     _PENDING_CUSTOM_VALUES.clear()

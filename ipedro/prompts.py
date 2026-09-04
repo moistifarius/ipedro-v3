@@ -20,8 +20,13 @@ BENEFICIALITY_PROMPT = (
 )
 
 DUCK_QUACK_PROMPT = (
-    "Generate a short Telegram-friendly ASCII/emoji art of a happy little duck "
-    "saying 'quack'. Output ONLY the art - no preface, no explanation."
+    "Generate a short Telegram-friendly ASCII art of a DUCK saying 'quack'. "
+    "It MUST be a duck — not a cow, dog, cat, owl, fish, or any other "
+    "animal. Ducks have a round body, a small head, and a flat bill. "
+    "Use only basic characters (letters, parens, hyphens, underscores, "
+    "slashes, dots, quotes, the < character for the bill). End the art with "
+    "the word 'quack' (with optional emoji). 5 lines or fewer. Output ONLY "
+    "the art — no preface, no explanation, no commentary."
 )
 
 # Bef decision: the AI gates a successful dice roll. It MUST reply with one
@@ -56,11 +61,18 @@ DUCK_BEF_CHALLENGE_PROMPT = (
     "  or explanation. Just the challenge text itself.\n"
     "- Address the user directly. Keep it under 280 characters.\n\n"
     "Type-specific rules:\n"
-    "- trivia: One weird, off-the-wall, obscure trivia question with a real "
-    "  answer. Do not hint at or reveal the answer.\n"
+    "- trivia: One quick GAME-SHOW trivia question with a single real, "
+    "  well-known answer that a knowledgeable person could recall in a few "
+    "  seconds WITHOUT looking it up. This is on a tight timer — no obscure "
+    "  deep cuts that would force a search, but not insultingly easy either. "
+    "  Pull from any field: history, science, geography, language, pop "
+    "  culture, animals, mythology, food, music. Write it in the game-show "
+    "  style specified below. Do not hint at or reveal the answer.\n"
+    "{style_block}"
     "- recipe: Ask for a brief recipe for something specific and absurd "
     "  (e.g. 'a duck-themed sandwich', 'soup that tastes like Tuesday'). "
-    "  Do not list ingredients or steps yourself."
+    "  Do not list ingredients or steps yourself.\n\n"
+    "{avoid_block}"
 )
 
 DUCK_BEF_CHALLENGE_JUDGE_PROMPT = (
@@ -82,6 +94,11 @@ SUMMARIZE_PROMPT = (
     "You are condensing a chat log into a compact running summary. Keep names, "
     "key topics, ongoing jokes, decisions, plans, and durable facts. Drop "
     "small-talk filler. Write in 4-10 bullet points, third-person, no preamble.\n"
+    "ATTRIBUTION IS CRITICAL: each message below is prefixed with the exact "
+    "speaker's name ('Name: ...'). Attribute every statement, opinion, and "
+    "fact to the correct person using ONLY those labels. Never guess who said "
+    "something and never swap one person's words onto another. If you're not "
+    "sure who said something, leave the name out rather than guess.\n"
     "Existing summary (may be empty):\n{prior}\n\nNew messages:\n{messages}\n"
 )
 
@@ -139,6 +156,90 @@ FORTUNE_PROMPT = (
     "Generate a single fortune-cookie style fortune. One sentence (max 20 "
     "words). Be weird, oddly specific, oracular. Avoid generic 'good things "
     "come' clichés. Output ONLY the fortune, no preamble, no number."
+)
+
+ON_THIS_DAY_PROMPT = (
+    "Below are real messages someone in this group chat sent on this same "
+    "calendar day {when}. In ONE short, in-character line (under 25 words), "
+    "react to them like a wry observer dredging up the past — amused, a "
+    "little nostalgic, maybe mock-suspicious. Do NOT quote them back or "
+    "summarize literally; just give the reaction line. Output ONLY that "
+    "line, no preamble, no quotes.\n\n"
+    "Messages:\n{messages}"
+)
+
+MONTHLY_RECAP_PROMPT = (
+    "Below are real messages from a group chat over the past month ({month}). "
+    "Write a short, in-character 'month in review' — 2 to 4 sentences capturing "
+    "the vibe, the running jokes, and the standout moments. Refer to people BY "
+    "NAME. The name before each message is EXACTLY who said it — attribute "
+    "things to the right person and never put one person's words in another's "
+    "mouth. Be wry and affectionate, not a dry summary. Output ONLY the recap, "
+    "no preamble, no bullet list.\n\n"
+    "Messages:\n{messages}"
+)
+
+MEME_QUERIES_PROMPT = (
+    "Below are the latest messages from a group chat. Output THREE "
+    "alternative reddit search queries for finding a meme about what the "
+    "group is currently discussing — one per line, most specific first:\n"
+    "  line 1: the core subject in 2-4 words\n"
+    "  line 2: the broader concept in 1-2 words\n"
+    "  line 3: a different angle or synonym for the same topic\n"
+    "Plain lowercase words only. No punctuation, no numbering, no quotes, "
+    "no explanations. Ignore messages that ask the bot for a meme — find "
+    "the topic UNDER that request.\n\n"
+    "Messages:\n{messages}"
+)
+
+MEME_TEXT_PROMPT = (
+    "Write a short, funny meme about: {topic}. Output EXACTLY two lines "
+    "and nothing else:\n"
+    "TOP: <top caption, under 8 words>\n"
+    "BOTTOM: <bottom caption, under 8 words>\n"
+    "Relatable, punchy, actually funny. No hashtags, no quotes, no emoji."
+)
+
+MEME_GENERATE_PROMPT = (
+    "A classic internet meme image macro: one bold, high-contrast photo or "
+    "illustration that fits the joke, with caption text in large white "
+    "Impact font with a thick black outline (top and bottom). Render this "
+    "caption text EXACTLY, spelled correctly:\n"
+    "TOP TEXT: {top}\n"
+    "BOTTOM TEXT: {bottom}\n"
+    "Funny, clean, shareable. No watermark, no signature."
+)
+
+MEME_REQUEST_CLASSIFY_PROMPT = (
+    "A group-chat bot can post memes on request. Decide whether the "
+    "message below is ASKING for a meme to be posted/found/made (by the "
+    "bot, or just 'someone'). Reacting to a meme, discussing memes, or "
+    "narrating plans ('I'll send a meme later') is NOT a request.\n\n"
+    "Message: {text}\n\n"
+    "Reply with EXACTLY one line:\n"
+    "NO            — not a meme request\n"
+    "THIS          — asking for a meme about the current conversation "
+    "('this', 'that', no subject given)\n"
+    "TOPIC: <subject> — asking for a meme about a specific subject"
+)
+
+MEME_PICK_PROMPT = (
+    "You are choosing a MEME for a group chat.\n"
+    "Topic: {topic}\n\n"
+    "Candidates (upvotes in parentheses when known, flair in [brackets]):\n"
+    "{candidates}\n\n"
+    "Pick the candidate most likely to actually get a laugh:\n"
+    "  1. It MUST be an actual meme — joke/image-macro/shitpost format. "
+    "NOT a news photo, article screenshot, game highlight, product shot, "
+    "or ordinary picture. Meme subreddits and flairs like [Meme]/"
+    "[Shitpost] are strong signals; sober titles that read like headlines "
+    "are not memes.\n"
+    "  2. LOOSE topical relevance is enough. A heavily-upvoted, genuinely "
+    "funny meme that's only loosely related BEATS a precisely on-topic "
+    "meme with few upvotes. Upvotes are the crowd's verdict on funny — "
+    "weigh them heavily.\n"
+    "Reply with ONLY its number. Reply 0 only if nothing is both a meme "
+    "and at least loosely related to the topic."
 )
 
 HAIKU_PROMPT = (

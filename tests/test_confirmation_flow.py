@@ -115,6 +115,57 @@ async def test_dsra_cancel_does_not_fire_DELETE():
 
 
 @pytest.mark.asyncio
+async def test_dsru_first_tap_prompts_confirmation_not_immediate_delete():
+    """Tapping a user in the /duckstats_reset picker must PROMPT, not wipe.
+    Regression: it used to DELETE the row on the first tap, and the picker
+    looks identical to the safe /duckstats_edit picker — one mis-tap wiped a
+    user's stats."""
+    db = _RecordingDB(fetchrow_results=[{"display_name": "alice", "points": 42}])
+    rt = SimpleNamespace(
+        settings=SimpleNamespace(admin_ids=frozenset({1})),
+        db=db,
+    )
+    r = build_router(rt)
+    on_dsru = _find_handler(r, "on_dsr_user_picked")
+    cb = _fake_cb("dsru:42:7")
+    await on_dsru(cb)
+    # Nothing deleted yet…
+    assert db.executes == []
+    # …and a confirm/cancel keyboard was offered for exactly this user.
+    kb = cb.message.edit_text.await_args.kwargs["reply_markup"]
+    assert kb.inline_keyboard[0][0].callback_data == "dsru:42:7:confirm"
+    assert kb.inline_keyboard[0][1].callback_data == "dsru:42:7:cancel"
+
+
+@pytest.mark.asyncio
+async def test_dsru_cancel_does_not_fire_DELETE():
+    db = _RecordingDB()
+    rt = SimpleNamespace(
+        settings=SimpleNamespace(admin_ids=frozenset({1})),
+        db=db,
+    )
+    r = build_router(rt)
+    on_dsru = _find_handler(r, "on_dsr_user_picked")
+    await on_dsru(_fake_cb("dsru:42:7:cancel"))
+    assert [q for (q, _a) in db.executes if "DELETE" in q.upper()] == []
+
+
+@pytest.mark.asyncio
+async def test_dsru_confirm_fires_the_scoped_delete():
+    db = _RecordingDB()
+    rt = SimpleNamespace(
+        settings=SimpleNamespace(admin_ids=frozenset({1})),
+        db=db,
+    )
+    r = build_router(rt)
+    on_dsru = _find_handler(r, "on_dsr_user_picked")
+    await on_dsru(_fake_cb("dsru:42:7:confirm"))
+    deletes = [(q, a) for (q, a) in db.executes if "DELETE FROM duck_stats" in q]
+    assert len(deletes) == 1
+    assert deletes[0][1] == (42, 7)      # scoped to (chat_id, user_id)
+
+
+@pytest.mark.asyncio
 async def test_dse_reset_cancel_does_not_fire_DELETE():
     """Tapping 'Cancel' on the per-user row-reset confirmation must NOT
     execute any DELETE. The cancel branch re-renders the editor view via

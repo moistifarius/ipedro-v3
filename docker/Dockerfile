@@ -8,8 +8,10 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# ffmpeg powers the /ether radio-transmission audio effect (bandpass +
+# static + tremolo filtergraph, and OGG/Opus encode for voice notes).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl \
+ && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./

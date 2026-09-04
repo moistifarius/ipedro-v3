@@ -21,10 +21,16 @@ from ipedro.duckhunt.debug_toggles import (
     DEBUG_TOGGLE_NAMES, all_for as debug_toggles_all_for, set_toggle as set_debug_toggle,
 )
 from ipedro.duckhunt.spawner import (
-    build_quack_message, duckhunt_enabled_chat_ids, duckhunt_enabled_chats,
+    build_quack_message_for, duckhunt_enabled_chat_ids, duckhunt_enabled_chats,
+)
+from ipedro.handlers.command_catalog import (
+    CATEGORIES, COMMANDS,
+    Command as CatalogCommand,
+    categories_in_order, category_by_key, command_by_slug,
+    commands_in_category,
 )
 from ipedro.handlers.common import require_admin
-from ipedro.kv import kv_delete, kv_get, kv_set
+from ipedro.kv import kv_delete, kv_set
 from ipedro.logging_setup import recent_log_lines
 from ipedro.memory.summarizer import force_summarize
 from ipedro.memory.tokens import count_tokens
@@ -317,90 +323,145 @@ def _aip_keyboard() -> InlineKeyboardMarkup:
 
 
 # ----- /manage hub keyboards -------------------------------------------------
+# The /manage hub is generated from ipedro.handlers.command_catalog.COMMANDS.
+# Top menu = one button per Category in declaration order. Each category
+# submenu lists every command tagged that category, generated below.
+# Tapping a command-leaf with a wired ``action`` routes to that existing
+# mgm:<…> leaf; tapping a card-leaf shows a description + usage hint.
+#
+# The leaf manifest ``_MGM_LEAVES`` is derived from the catalog so adding a
+# new command (or wiring an existing action) updates the manifest
+# automatically — no parallel list to keep in sync.
+
+# Category-key → menu callback for the top-level grid. Stable shape so old
+# tests that reach for ``mgm:memory`` / ``mgm:duck`` / etc. still resolve;
+# the new categories (basics, ai, quotes, …) extend the set.
+def _mgm_cat_data(category_key: str) -> str:
+    """Callback data for a top-level category button.
+
+    For backwards compatibility, the original five admin categories keep
+    their short callback names (mgm:memory, mgm:duck, mgm:ai, mgm:chats,
+    mgm:debug). New categories use the generic ``mgm:cat:<key>`` form.
+    """
+    legacy = {
+        "memory":   "mgm:memory",
+        "duckhunt": "mgm:duck",
+        "ai_admin": "mgm:ai",
+        "chats":    "mgm:chats",
+        "debug":    "mgm:debug",
+    }
+    return legacy.get(category_key, f"mgm:cat:{category_key}")
+
+
 def _mgm_top_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💾 Memory",          callback_data="mgm:memory")],
-        [InlineKeyboardButton(text="🦆 Duckhunt",        callback_data="mgm:duck")],
-        [InlineKeyboardButton(text="🤖 AI providers",    callback_data="mgm:ai")],
-        [InlineKeyboardButton(text="💬 Chats",           callback_data="mgm:chats")],
-        [InlineKeyboardButton(text="🛠 Debug & status",  callback_data="mgm:debug")],
+    """Top-of-hub keyboard — one row per category, in catalog order."""
+    rows = [
+        [InlineKeyboardButton(
+            text=cat.label, callback_data=_mgm_cat_data(cat.key),
+        )]
+        for cat in categories_in_order()
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _mgm_category_submenu(category_key: str) -> InlineKeyboardMarkup:
+    """Submenu for one category: a button per command + a 'back' row.
+
+    Wired commands (action != None) route to their existing mgm: leaf;
+    card commands show a usage-hint screen at mgm:cmd:<slug>.
+    """
+    cat_back = _mgm_cat_data(category_key)
+    # The back row links back to the hub. The category-specific submenu
+    # IS the second-level screen, so 'back' from here goes to the top.
+    rows: list[list[InlineKeyboardButton]] = []
+    for cmd in commands_in_category(category_key):
+        data = cmd.action or f"mgm:cmd:{cmd.slug}"
+        rows.append([InlineKeyboardButton(text=cmd.name, callback_data=data)])
+    rows.append([
+        InlineKeyboardButton(text="← back", callback_data="mgm:top"),
     ])
+    # ``cat_back`` is captured here purely for future use (e.g. nested
+    # subsections); intentionally unused at this depth.
+    _ = cat_back
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+# Backwards-compatible aliases for the original five admin submenus. Tests
+# (and the legacy dispatcher path) reach for these names — keeping them
+# avoids churn.
 def _mgm_memory_submenu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Facts (per chat)",        callback_data="mgm:memory:facts")],
-        [InlineKeyboardButton(text="Stats (per chat)",        callback_data="mgm:memory:stats")],
-        [InlineKeyboardButton(text="Summary (per chat)",      callback_data="mgm:memory:summary")],
-        [InlineKeyboardButton(text="Force summarize",         callback_data="mgm:memory:force")],
-        [InlineKeyboardButton(text="← back",                  callback_data="mgm:top")],
-    ])
+    return _mgm_category_submenu("memory")
 
 
 def _mgm_duck_submenu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Edit user's stats",       callback_data="mgm:duck:edit")],
-        [InlineKeyboardButton(text="Reset stats",             callback_data="mgm:duck:reset")],
-        [InlineKeyboardButton(text="Spawn in one chat",       callback_data="mgm:duck:spawn")],
-        [InlineKeyboardButton(text="Spawn in all chats",      callback_data="mgm:duck:spawnall")],
-        [InlineKeyboardButton(text="← back",                  callback_data="mgm:top")],
-    ])
+    """Duckhunt admin submenu (chat-spawn + stats editing).
+
+    The catalog also includes the public /duckhunt /quackflag /duckstats
+    rows under the same 'duckhunt' category; admins see all of them here,
+    which is the whole point of the unified hub.
+    """
+    return _mgm_category_submenu("duckhunt")
 
 
 def _mgm_ai_submenu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Show provider",           callback_data="mgm:ai:show")],
-        [InlineKeyboardButton(text="→ Claude",                callback_data="aip:switch:claude")],
-        [InlineKeyboardButton(text="→ OpenAI",                callback_data="aip:switch:openai")],
-        [InlineKeyboardButton(text="Claude models",           callback_data="aip:list:claude")],
-        [InlineKeyboardButton(text="OpenAI models",           callback_data="aip:list:openai")],
-        [InlineKeyboardButton(text="← back",                  callback_data="mgm:top")],
-    ])
+    """AI-provider admin submenu plus cross-links into the aip:* picker."""
+    base_rows = list(_mgm_category_submenu("ai_admin").inline_keyboard)
+    # Insert provider/model cross-links above the 'back' row so the
+    # existing aip:* dispatcher (lives in admin.py's /ai_provider section)
+    # remains directly tappable from /manage.
+    cross_links = [
+        [InlineKeyboardButton(text="→ Claude", callback_data="aip:switch:claude")],
+        [InlineKeyboardButton(text="→ OpenAI", callback_data="aip:switch:openai")],
+        [InlineKeyboardButton(text="Claude models", callback_data="aip:list:claude")],
+        [InlineKeyboardButton(text="OpenAI models", callback_data="aip:list:openai")],
+    ]
+    base_rows[-1:-1] = cross_links
+    return InlineKeyboardMarkup(inline_keyboard=base_rows)
 
 
 def _mgm_chats_submenu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="List chat ids",           callback_data="mgm:chats:list")],
-        [InlineKeyboardButton(text="Pick chat (copy id)",     callback_data="mgm:chats:pick")],
-        [InlineKeyboardButton(text="Configure a chat",        callback_data="mgm:chats:config")],
-        [InlineKeyboardButton(text="🤫 Silenced chats",        callback_data="mgm:chats:silenced")],
-        [InlineKeyboardButton(text="← back",                  callback_data="mgm:top")],
-    ])
+    return _mgm_category_submenu("chats")
 
 
 def _mgm_debug_submenu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Status",                  callback_data="mgm:debug:status")],
-        [InlineKeyboardButton(text="Recent logs",             callback_data="mgm:debug:logs")],
-        [InlineKeyboardButton(text="Cost (7d)",               callback_data="mgm:debug:cost")],
-        [InlineKeyboardButton(text="Command log",             callback_data="mgm:debug:cmdlog")],
-        [InlineKeyboardButton(text="Toggles (/debug_toggle)", callback_data="mgm:debug:toggles")],
-        [InlineKeyboardButton(text="Clear duck (/debug_clear_duck)", callback_data="mgm:debug:cleard")],
-        [InlineKeyboardButton(text="← back",                  callback_data="mgm:top")],
-    ])
+    return _mgm_category_submenu("debug")
 
 
-# Manifest of valid mgm:* leaves used by the dispatcher and the
-# completeness test. Keep this in sync with the submenu builders above.
-_MGM_LEAVES: tuple[str, ...] = (
+def _all_catalog_leaves() -> tuple[str, ...]:
+    """Every mgm: callback the catalog can emit."""
+    cmd_card_leaves = tuple(f"mgm:cmd:{c.slug}" for c in COMMANDS)
+    cat_leaves = tuple(_mgm_cat_data(cat.key) for cat in CATEGORIES)
+    return cmd_card_leaves + cat_leaves
+
+
+# Static action leaves wired to dedicated handlers below the catalog (chat
+# pickers, status panels, the silent-chat add flow). Pair with
+# _all_catalog_leaves() to get the complete manifest.
+_STATIC_MGM_LEAVES: tuple[str, ...] = (
     "mgm:top",
-    "mgm:memory", "mgm:memory:facts", "mgm:memory:stats",
+    "mgm:memory:facts", "mgm:memory:stats",
     "mgm:memory:summary", "mgm:memory:force",
-    "mgm:duck", "mgm:duck:edit", "mgm:duck:reset",
+    "mgm:duck:edit", "mgm:duck:reset",
     "mgm:duck:spawn", "mgm:duck:spawnall",
-    "mgm:ai", "mgm:ai:show",
-    "mgm:chats", "mgm:chats:list", "mgm:chats:pick", "mgm:chats:config",
+    "mgm:ai:show",
+    "mgm:chats:list", "mgm:chats:pick", "mgm:chats:config",
     "mgm:chats:silenced", "mgm:chats:silenced:add",
-    "mgm:debug", "mgm:debug:status", "mgm:debug:logs",
+    "mgm:debug:status", "mgm:debug:logs",
     "mgm:debug:cost", "mgm:debug:cmdlog",
     "mgm:debug:toggles", "mgm:debug:cleard",
 )
+
+
+_MGM_LEAVES: tuple[str, ...] = tuple(sorted(set(
+    _STATIC_MGM_LEAVES + _all_catalog_leaves()
+)))
 
 
 # Known text models for /ai_model and aip:list pickers. Promotes the
 # private price-table keys without coupling admin.py to openai_client
 # internals. Update by hand when adding a new model price entry.
 _KNOWN_CLAUDE_TEXT_MODELS: tuple[str, ...] = (
+    "claude-sonnet-5", "claude-opus-5", "claude-opus-4-8",
     "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5",
     "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5",
 )
@@ -410,8 +471,11 @@ _KNOWN_OPENAI_TEXT_MODELS: tuple[str, ...] = (
 
 
 # Pending custom-value entries for the /duckstats_edit "Set to custom…"
-# button. Keyed by admin user_id → (chat_id, user_id, field, ts).
-_PENDING_CUSTOM_VALUES: dict[int, tuple[int, int, str, float]] = {}
+# button. Keyed by admin user_id →
+# (chat_id, user_id, field, ts, source_chat_id) where source_chat_id is
+# the chat the "Send me the new value" prompt was shown in (the admin
+# DM) — only a plain message typed in that same chat is captured.
+_PENDING_CUSTOM_VALUES: dict[int, tuple[int, int, str, float, int]] = {}
 _CUSTOM_VALUE_TTL = 60.0  # seconds
 
 
@@ -419,10 +483,16 @@ def _has_parked_value(msg: "Message") -> bool:
     """Predicate for the custom-value DM handler.
 
     True only when (a) the sender has a parked entry, (b) the entry is
-    fresh (within ``_CUSTOM_VALUE_TTL``), and (c) the message is plain
-    text (no leading slash). When the entry has aged past the TTL we
-    drop it here so the message keeps propagating to the regular chat
-    router instead of being captured by a stale 'custom value' reply.
+    fresh (within ``_CUSTOM_VALUE_TTL``), (c) the message is plain
+    text (no leading slash), and (d) the message arrives in the same
+    chat where the value was parked. Without (d) an admin who tapped
+    "Set to custom…" in their DM and then chatted in a GROUP within the
+    TTL would have that group message swallowed and applied as a stat.
+    When the entry has aged past the TTL we drop it here so the message
+    keeps propagating to the regular chat router instead of being
+    captured by a stale 'custom value' reply. A wrong-chat message does
+    NOT pop the entry — the admin can still finish the flow where it
+    began.
     """
     if msg.from_user is None or msg.text is None:
         return False
@@ -432,9 +502,11 @@ def _has_parked_value(msg: "Message") -> bool:
     entry = _PENDING_CUSTOM_VALUES.get(uid)
     if entry is None:
         return False
-    _, _, _, ts = entry
+    _, _, _, ts, source_chat_id = entry
     if time.time() - ts > _CUSTOM_VALUE_TTL:
         _PENDING_CUSTOM_VALUES.pop(uid, None)
+        return False
+    if msg.chat is None or msg.chat.id != source_chat_id:
         return False
     return True
 
@@ -756,7 +828,6 @@ def build_router(rt: Runtime) -> Router:
                 disable_notification=True,
             )
             return
-        body = "\n".join(lines)
         # Telegram caps a single message at 4096 chars; chunk and send.
         chunks: list[str] = []
         buf = ""
@@ -810,7 +881,7 @@ def build_router(rt: Runtime) -> Router:
                 duck = await rt.duckhunt.spawn_duck(
                     chat_id, rt.settings.duckhunt_duck_lifetime_seconds,
                 )
-                text = await build_quack_message(rt.openai, duck.rarity)
+                text = await build_quack_message_for(rt.openai, duck)
                 await rt.bot.send_message(
                     chat_id, text, disable_notification=True,
                 )
@@ -883,7 +954,7 @@ def build_router(rt: Runtime) -> Router:
             duck = await rt.duckhunt.spawn_duck(
                 target, rt.settings.duckhunt_duck_lifetime_seconds,
             )
-            text = await build_quack_message(rt.openai, duck.rarity)
+            text = await build_quack_message_for(rt.openai, duck)
             await rt.bot.send_message(target, text, disable_notification=True)
         except Exception as exc:
             log.warning("quack_chat failed for chat %s: %s", target, exc)
@@ -1030,14 +1101,18 @@ def build_router(rt: Runtime) -> Router:
                 ambient_probability=s.default_ambient_probability,
                 persona=s.default_persona,
                 duckhunt_enabled=s.duckhunt_enabled_by_default,
+                share_photo_enabled=s.share_photo_enabled_by_default,
             )
         body = _config_wizard_header(cfg, target_chat_id, is_dm_scoped=True)
         kb = _config_keyboard(cfg, target_chat_id=target_chat_id)
         if reply_to:
-            await reply_to.reply(body, reply_markup=kb, disable_notification=True)
+            await reply_to.reply(
+                body, reply_markup=kb, disable_notification=True,
+                parse_mode="HTML",
+            )
         elif edit_in:
             try:
-                await edit_in.edit_text(body, reply_markup=kb)
+                await edit_in.edit_text(body, reply_markup=kb, parse_mode="HTML")
             except TelegramBadRequest:
                 pass
 
@@ -1749,7 +1824,7 @@ def build_router(rt: Runtime) -> Router:
         if sub == "show":
             current = current_master_prompt()
             is_default = current == DEFAULT_DUDE_PROMPT
-            tag = "(default Dude)" if is_default else "(override active)"
+            tag = "(default Dale)" if is_default else "(override active)"
             tokens = count_tokens(current)
             head = (
                 f"Master persona prompt {tag} "
@@ -1766,7 +1841,7 @@ def build_router(rt: Runtime) -> Router:
             await kv_delete(rt.db, "pedro_master_prompt")  # legacy key
             set_master_prompt_override(None)
             await msg.reply(
-                "Reset to default Dude prompt.", disable_notification=True,
+                "Reset to default Dale prompt.", disable_notification=True,
             )
             return
         if sub == "set":
@@ -1790,8 +1865,8 @@ def build_router(rt: Runtime) -> Router:
             if doc is None:
                 await msg.reply(
                     "Send the new prompt as a .txt file and either caption "
-                    "it `/master_prompt setfile` or reply to the file with "
-                    "`/master_prompt setfile`.",
+                    "it /master_prompt setfile or reply to the file with "
+                    "/master_prompt setfile.",
                     disable_notification=True,
                 )
                 return
@@ -1860,7 +1935,10 @@ def build_router(rt: Runtime) -> Router:
             rows = await rt.db.fetch(
                 "SELECT kind, COUNT(*) AS calls, "
                 "       COALESCE(SUM(total_tokens), 0) AS tokens, "
-                "       COALESCE(SUM(cost_usd), 0) AS cost "
+                "       COALESCE(SUM(cost_usd), 0) AS cost, "
+                "       COALESCE(SUM(prompt_tokens), 0) AS prompt, "
+                "       COALESCE(SUM(cache_read_tokens), 0) AS cached, "
+                "       COALESCE(SUM(cache_write_tokens), 0) AS written "
                 "  FROM openai_usage "
                 " WHERE chat_id = $1 AND created_at >= NOW() - INTERVAL '7 days' "
                 " GROUP BY kind ORDER BY cost DESC",
@@ -1871,7 +1949,10 @@ def build_router(rt: Runtime) -> Router:
             rows = await rt.db.fetch(
                 "SELECT kind, COUNT(*) AS calls, "
                 "       COALESCE(SUM(total_tokens), 0) AS tokens, "
-                "       COALESCE(SUM(cost_usd), 0) AS cost "
+                "       COALESCE(SUM(cost_usd), 0) AS cost, "
+                "       COALESCE(SUM(prompt_tokens), 0) AS prompt, "
+                "       COALESCE(SUM(cache_read_tokens), 0) AS cached, "
+                "       COALESCE(SUM(cache_write_tokens), 0) AS written "
                 "  FROM openai_usage "
                 " WHERE created_at >= NOW() - INTERVAL '7 days' "
                 " GROUP BY kind ORDER BY cost DESC"
@@ -1882,14 +1963,27 @@ def build_router(rt: Runtime) -> Router:
             return
         lines = [header]
         total = 0.0
+        cached_total = written_total = prompt_total = 0
         for r in rows:
             c = float(r["cost"] or 0)
             total += c
+            cached_total += int(r["cached"] or 0)
+            written_total += int(r["written"] or 0)
+            prompt_total += int(r["prompt"] or 0)
             lines.append(
                 f"  {r['kind']:<10}  {r['calls']:>5} calls  "
                 f"{int(r['tokens']):>8} tokens  ${c:.4f}"
             )
         lines.append(f"  TOTAL: ${total:.4f}")
+        # Cache hit rate is the one number that says whether prompt caching
+        # is actually working. It fails silently — requests still succeed,
+        # the bill is just higher — so it has to be visible somewhere.
+        if prompt_total:
+            pct = cached_total / prompt_total * 100
+            lines.append(
+                f"  cache: {cached_total} of {prompt_total} prompt tokens "
+                f"read from cache ({pct:.0f}%), {written_total} written"
+            )
         await msg.reply("\n".join(lines), disable_notification=True)
 
     async def _send_facts_for(target: int, reply_to: Message | None,
@@ -2497,6 +2591,55 @@ def build_router(rt: Runtime) -> Router:
         await rt.memory.delete_fact(fid)
         await msg.reply(f"Deleted fact {fid}.", disable_notification=True)
 
+    @r.message(Command("memory_wipe"))
+    async def memory_wipe(msg: Message) -> None:
+        """Erase a chat's stored conversation so a new persona takes hold.
+
+        The bot's own past replies (stored as assistant messages), the
+        running summary, and the semantic-search embeddings all feed back
+        into the context window — so an old persona keeps leaking through
+        even after /master_prompt is changed. This wipes that precedent.
+
+        Usage:
+          /memory_wipe                 → wipe THIS chat's conversation memory
+          /memory_wipe <chat_id>       → wipe that chat's memory
+          /memory_wipe <chat_id> facts → also delete durable facts
+          /memory_wipe facts           → this chat, including facts
+
+        Durable facts are kept by default (they're usually about people,
+        not the bot's voice). Add 'facts' to nuke those too. Does NOT
+        touch duck stats, quotes, or chat config.
+        """
+        if not await require_admin(msg, admin_ids):
+            return
+        args = (msg.text or "").split()[1:]
+        include_facts = False
+        target = msg.chat.id
+        for a in args:
+            if a.lower() == "facts":
+                include_facts = True
+            else:
+                try:
+                    target = int(a)
+                except ValueError:
+                    await msg.reply(
+                        "Usage: /memory_wipe [chat_id] [facts]",
+                        disable_notification=True,
+                    )
+                    return
+        counts = await rt.memory.wipe_conversation(
+            target, include_facts=include_facts,
+        )
+        parts = [f"{v} {k}" for k, v in counts.items()]
+        await msg.reply(
+            f"🧹 Wiped chat {target}'s conversation memory: "
+            f"{', '.join(parts)}.\n"
+            "The next reply starts fresh on the current persona. "
+            + ("(Durable facts were cleared too.)" if include_facts else
+               "(Durable facts kept — add 'facts' to clear those too.)"),
+            disable_notification=True,
+        )
+
     # ---------------------------------------------------------------- duckstats reset
     async def _render_chat_user_resetter(target: int) -> tuple[str, InlineKeyboardMarkup | None]:
         """Build the leaderboard-style picker used to choose a user (or
@@ -2645,13 +2788,54 @@ def build_router(rt: Runtime) -> Router:
     async def on_dsr_user_picked(cb: CallbackQuery) -> None:
         if not await _gate_callback(cb):
             return
-        try:
-            _, chat_id_s, user_id_s = cb.data.split(":", 2)
-            chat_id = int(chat_id_s)
-            user_id = int(user_id_s)
-        except (ValueError, IndexError):
+        # dsru:CHAT:USER                 → prompt confirmation
+        # dsru:CHAT:USER:confirm|cancel  → execute / abort
+        # Deleting a user's row is irreversible, and this picker looks
+        # identical to the (safe) /duckstats_edit picker — so require a
+        # confirm tap, matching the reset-ALL flow, instead of wiping on the
+        # first tap.
+        parts = cb.data.split(":")
+        if len(parts) < 3:
             await cb.answer(_expired("duckstats_reset"), show_alert=True)
             return
+        try:
+            chat_id = int(parts[1])
+            user_id = int(parts[2])
+        except ValueError:
+            await cb.answer(_expired("duckstats_reset"), show_alert=True)
+            return
+        if len(parts) == 3:
+            row = await rt.db.fetchrow(
+                "SELECT display_name, points FROM duck_stats "
+                " WHERE chat_id = $1 AND user_id = $2",
+                chat_id, user_id,
+            )
+            who = (row["display_name"] if row else None) or str(user_id)
+            pts = row["points"] if row else 0
+            body = (
+                f"Reset duck_stats for {who} (user {user_id}) in chat {chat_id}?\n"
+                f"This deletes their row — {pts} point(s) gone for good."
+            )
+            if cb.message:
+                try:
+                    await cb.message.edit_text(
+                        body,
+                        reply_markup=_confirmation_keyboard(
+                            f"dsru:{chat_id}:{user_id}"),
+                    )
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        if parts[3] == "cancel":
+            if cb.message:
+                try:
+                    await cb.message.edit_text("Cancelled. Nothing changed.")
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        # confirm
         n = await _do_reset_user_stats(chat_id, user_id)
         body = (
             f"Reset duck_stats for user {user_id} in chat {chat_id} "
@@ -2993,18 +3177,22 @@ def build_router(rt: Runtime) -> Router:
             if cb.from_user is None:
                 await cb.answer("Can't identify caller.", show_alert=True)
                 return
+            if cb.message is None:
+                # Without the prompt message we don't know which chat to
+                # listen in — refuse to park rather than capture blindly.
+                await cb.answer(_expired("duckstats_edit"), show_alert=True)
+                return
             _PENDING_CUSTOM_VALUES[cb.from_user.id] = (
-                chat_id, user_id, field, time.time(),
+                chat_id, user_id, field, time.time(), cb.message.chat.id,
             )
-            if cb.message:
-                try:
-                    await cb.message.edit_text(
-                        f"Send me the new value for `{field}` as your "
-                        "next message. I'll wait up to 60 seconds. "
-                        "(Send a non-number to cancel.)",
-                    )
-                except TelegramBadRequest:
-                    pass
+            try:
+                await cb.message.edit_text(
+                    f"Send me the new value for {field} as your "
+                    "next message. I'll wait up to 60 seconds. "
+                    "(Send a non-number to cancel.)",
+                )
+            except TelegramBadRequest:
+                pass
             await cb.answer()
             return
 
@@ -3074,7 +3262,7 @@ def build_router(rt: Runtime) -> Router:
         entry = _PENDING_CUSTOM_VALUES.pop(msg.from_user.id, None)
         if entry is None:
             return
-        chat_id, user_id, field, ts = entry
+        chat_id, user_id, field, ts, _source_chat_id = entry
         if time.time() - ts > _CUSTOM_VALUE_TTL:
             await msg.reply(
                 _expired("duckstats_edit"), disable_notification=True,
@@ -3128,6 +3316,42 @@ def build_router(rt: Runtime) -> Router:
             disable_notification=True,
         )
 
+    async def _mgm_render_command_card(edit_in: Message, cmd: CatalogCommand) -> None:
+        """Render the generic command card.
+
+        The catalog row's usage line is wrapped in <code> so Telegram
+        renders a tap-to-copy block — perfect for free-text commands
+        that an inline keyboard can't gather arguments for.
+        """
+        # Escape only & < > so user-supplied catalog text can't break HTML;
+        # the catalog is all admin-controlled but defensive escaping is
+        # cheap.
+        def esc(s: str) -> str:
+            return (
+                s.replace("&", "&amp;")
+                 .replace("<", "&lt;")
+                 .replace(">", "&gt;")
+            )
+
+        body = (
+            f"<b>{esc(cmd.name)}</b>\n"
+            f"{esc(cmd.desc)}\n"
+            f"\n"
+            f"<b>Usage</b> (tap to copy):\n"
+            f"<code>{esc(cmd.usage)}</code>"
+        )
+        # Resolve which parent submenu to surface in the back row so the
+        # admin lands one screen up instead of all the way at the hub.
+        back_data = _mgm_cat_data(cmd.category)
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="← back", callback_data=back_data),
+            _home_button(),
+        ]])
+        try:
+            await edit_in.edit_text(body, reply_markup=kb, parse_mode="HTML")
+        except TelegramBadRequest:
+            pass
+
     async def _mgm_render_status(edit_in: Message) -> None:
         """Render the Debug → Status panel."""
         # Memory diagnostics via existing repo APIs.
@@ -3135,12 +3359,20 @@ def build_router(rt: Runtime) -> Router:
         msg_total = await rt.db.fetchval("SELECT COUNT(*) FROM messages")
         fact_total = await rt.db.fetchval("SELECT COUNT(*) FROM facts")
         summary_total = await rt.db.fetchval("SELECT COUNT(*) FROM summaries")
+        # Surface the clock the bot reasons with, so it's obvious when
+        # BOT_TIMEZONE needs adjusting (defaults to America/Los_Angeles).
+        from datetime import datetime, timezone
+        tz = rt.settings.tzinfo
+        local_now = datetime.now(timezone.utc).astimezone(tz)
         lines = [
             "🛠 Status",
             "",
             f"text provider: {rt.openai.text_provider}",
             f"  claude model: {rt.openai.claude_model}",
             f"  openai model: {rt.openai.text_model}",
+            "",
+            f"timezone: {rt.settings.bot_timezone}",
+            f"bot clock: {local_now.strftime('%a %d %b %Y, %H:%M %Z')}",
             "",
             f"chats known: {chat_count}",
             f"messages: {msg_total}",
@@ -3273,7 +3505,7 @@ def build_router(rt: Runtime) -> Router:
                     duck = await rt.duckhunt.spawn_duck(
                         chat_id, rt.settings.duckhunt_duck_lifetime_seconds,
                     )
-                    text = await build_quack_message(rt.openai, duck.rarity)
+                    text = await build_quack_message_for(rt.openai, duck)
                     await rt.bot.send_message(
                         chat_id, text, disable_notification=True,
                     )
@@ -3367,6 +3599,33 @@ def build_router(rt: Runtime) -> Router:
                     )
                 except TelegramBadRequest:
                     pass
+            await cb.answer()
+            return
+        # New top-level categories (basics, ai, quotes, reminders, dm,
+        # mod) and any future ones — the legacy five above use shorter
+        # callback names for backwards compat.
+        if data.startswith("mgm:cat:"):
+            cat_key = data.split(":", 2)[2]
+            cat = category_by_key(cat_key)
+            if msg and cat:
+                try:
+                    await msg.edit_text(
+                        f"{cat.label}\n{cat.blurb}",
+                        reply_markup=_mgm_category_submenu(cat_key),
+                    )
+                except TelegramBadRequest:
+                    pass
+            await cb.answer()
+            return
+        # Command card — generic renderer for any catalog row WITHOUT a
+        # wired action. Shows the description plus a copyable
+        # <code>/usage</code> hint so the admin can grab the form,
+        # paste it, and fill in args.
+        if data.startswith("mgm:cmd:"):
+            slug = data.split(":", 2)[2]
+            cmd = command_by_slug(slug)
+            if msg and cmd:
+                await _mgm_render_command_card(msg, cmd)
             await cb.answer()
             return
 

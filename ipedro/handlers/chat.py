@@ -2,32 +2,69 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import random
+from dataclasses import replace
 import re
+from datetime import datetime, timezone
 
 from aiogram import F, Router
-from aiogram.types import Message, ReactionTypeEmoji
+from aiogram.types import BufferedInputFile, Message, ReactionTypeEmoji
 
+from ipedro import addressed, vision
 from ipedro.bot_messages import track
+from ipedro.capabilities import capability_brief
 from ipedro.chat_policy import IncomingMessage, should_respond
 from ipedro.duckhunt.captcha_gen import matches as captcha_matches
 from ipedro.duckhunt.debug_toggles import is_on as debug_is_on
+from ipedro.duckhunt.scoring import challenge_is_over_time, over_time_line
 from ipedro.duckhunt.verdicts import parse_verdict
-from ipedro.handlers.common import catify, get_or_create_chat_config
-from ipedro.memory.context_builder import build_context
+from ipedro import dale_gifs as dale
+from ipedro.handlers.automod import (
+    DaleGif, MediaResponse, _automod_response, fetch_automod_media,
+)
+from ipedro.handlers.common import (
+    catify, display_name, fallback_cat_fact, get_or_create_chat_config,
+)
+from ipedro.impersonate import build_impersonation_prompt, resolve_impersonation
+from ipedro.meme_finder import (
+    classify_meme_request, derive_topic_queries, find_relevant_meme,
+    generate_meme,
+)
+from ipedro.memory.context_builder import build_context, reaction_note
 from ipedro.memory.summarizer import maybe_summarize
 from ipedro.prompts import CAT_FACT_PROMPT, DUCK_BEF_CHALLENGE_JUDGE_PROMPT
+from ipedro.reddit import (
+    detect_meme_request, fetch_meme, is_meme_generation_request,
+)
 from ipedro.runtime import Runtime
 from ipedro.user_flags import has_flag, maybe_auto_grudge
 
 log = logging.getLogger(__name__)
 
-# Bare "dude" / "man" are way too common, so only the specific Dude
-# aliases trigger a name mention. Legacy "pedro" mentions still trigger.
+# A pending bef challenge gates the chat: while one is outstanding, any
+# plain text the user sends is judged as their answer. Without an upper
+# bound a forgotten challenge would hijack the chat forever (most painful
+# in a 1:1 DM, where there's nothing else to talk past). After this many
+# seconds we treat the challenge as abandoned: clear it silently and let
+# the message flow through as normal conversation.
+_BEF_CHALLENGE_TTL_SECONDS = 3600  # 1h
+
+# Name-mention triggers — when someone calls the bot by name, it tends
+# to engage. The current persona is Dale (idale); legacy Boomhauer / Dude
+# / Pedro aliases still match so people who knew the bot under earlier
+# personas keep getting a response. Bare "dale" is allowed even though
+# it's a common name — the bot can handle the occasional false hit.
 _DUDE_NAME_RE = re.compile(
-    r"\bthe\s+dude\b"
+    r"\bdale\s+gribble\b"
+    r"|\brusty\s+shackleford\b"
+    r"|\bidale\b"
+    r"|\bdale\b"
+    r"|\bboomhauer\b"
+    r"|\bboomhaur\b"           # common misspelling
+    r"|\bthe\s+dude\b"
     r"|\bduder(ino)?\b"
     r"|\bel\s+duderino\b"
     r"|\bhis\s+dudeness\b"
@@ -49,6 +86,15 @@ _REACTION_POOL = (
 
 _REACT_PROBABILITY = 0.04
 
+# Ambient Dale: how often an un-addressed TEXT message just gets a GIF
+# back — one in fifty. A module constant on purpose, like
+# _REACT_PROBABILITY above it; the per-chat off switch is /chat_config
+# automod off, which covers the whole canned-reaction surface rather than
+# adding a second overlapping toggle. Was 3%, and felt like constant once
+# media messages started flowing through this handler too (see the guard
+# at the roll).
+_DALE_GIF_PROBABILITY = 0.02
+
 _POSITIVITY_RE = re.compile(
     r"\b(thanks?|thank\s*you|ty|tysm|appreciate|love\s+(it|this|that)|"
     r"great|awesome|amazing|nice|cool|good\s+(job|idea|call)|"
@@ -57,39 +103,41 @@ _POSITIVITY_RE = re.compile(
 )
 _CREDIT_PROBABILITY = 0.25
 _CREDIT_LINES = (
-    "yeah, man, that was me",
-    "you're welcome, dude",
-    "i may have had a hand in that. or maybe not. who can say.",
-    "ahem.",
-    "i'm not saying it was me. but it was me.",
-    "happy to help, more or less",
-    "i had a hunch, man",
-    "credit where it's due, you know",
-    "the dude abides — also occasionally the dude assists",
-    "this aggression will not stand. but you're welcome.",
+    "sh-sha. that was me, by the way",
+    "rusty shackleford. you're welcome",
+    "ahem. that was me",
+    "i'm not saying it was me. but it was me",
+    "you noticed. good. most don't",
+    "sh-sha. credit where it's due",
+    "i had a hunch",
+    "pocket sand! ...also, you're welcome",
+    "filed under: things i did",
+    "yeah. that was me. don't tell anyone",
 )
 
-# "thanks pedro" / "thanks dude" / "thanks man" — common ways someone
-# might thank the bot directly.
+# "thanks dale" / "thanks rusty" / "thanks man" — common ways someone
+# might thank the bot directly. Legacy dude/duder/pedro still match.
 _THANKS_PEDRO_RE = re.compile(
     r"\b(thanks|thank\s*you|ty|tysm|cheers|thx)\b"
-    r"[\s,!.]*\b(dude|duder|pedro|man)\b"
-    r"|\b(dude|duder|pedro|man)\b"
+    r"[\s,!.]*\b(dale|rusty|idale|dude|duder|pedro|boomhauer|man)\b"
+    r"|\b(dale|rusty|idale|dude|duder|pedro|boomhauer|man)\b"
     r"[\s,!.]*\b(thanks|thank\s*you|ty|cheers|thx)\b",
     re.IGNORECASE,
 )
 _THANKS_PEDRO_LINES = (
-    "yeah, no problem, man",
-    "the dude abides",
-    "that's just, like, your gratitude, man",
-    "ah, you're alright",
-    "no big deal, dude",
-    "right on",
-    "easy, man",
-    "i'd say something but i'm pretty mellow right now",
-    "well, you know — that's just what i do",
-    "this aggression will not stand. wait. what?",
+    "sh-sha. don't mention it",
+    "rusty shackleford. at your service",
+    "any time. but you didn't hear it from me",
+    "noted. you're on the trusted list now",
+    "no big deal. keep it between us",
+    "sh-sha. of course",
+    "easy. eyes peeled out there",
+    "pocket sand! ...sorry. you're welcome",
+    "filed under: favors rendered",
+    "don't get used to it",
 )
+
+
 _CAT_WORD_RE = re.compile(
     r"\b("
     r"cats?|kitt(y|ies|en|ens)|felines?|"
@@ -99,6 +147,10 @@ _CAT_WORD_RE = re.compile(
     re.IGNORECASE,
 )
 _CAT_EMOJI = frozenset("🐈🐱😺😸😹😻😼😽🙀😿😾")
+
+# Gate for the AI meme-request fallback: only consult the classifier when
+# the message actually says 'meme' (and the bot was replying anyway).
+_MEME_WORD_RE = re.compile(r"\bmemes?\b", re.IGNORECASE)
 
 
 def _mentions_pedro(text: str | None) -> bool:
@@ -118,11 +170,48 @@ def _is_command(text: str | None) -> bool:
     return bool(text) and text.startswith("/")
 
 
-def _bot_username(rt: Runtime) -> str | None:
-    me = getattr(rt.bot, "_me", None)
-    if me and getattr(me, "username", None):
-        return me.username
-    return None
+def _challenge_is_stale(challenge) -> bool:
+    """True if a pending bef challenge is older than the TTL.
+
+    Tolerant of a missing/naive ``created_at``: a challenge we can't age
+    is treated as fresh (never auto-cleared) so we don't drop a freshly
+    issued one on a clock quirk.
+    """
+    created = getattr(challenge, "created_at", None)
+    if created is None:
+        return False
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - created).total_seconds()
+    return age > _BEF_CHALLENGE_TTL_SECONDS
+
+
+async def _reply_automod_media(msg: Message, media: MediaResponse) -> None:
+    """Send an automod media response; fall back to its text on any failure."""
+    data = await fetch_automod_media(media)
+    sent = None
+    if data is not None:
+        try:
+            file = BufferedInputFile(
+                data,
+                filename="automod.gif" if media.kind == "gif" else "automod.jpg",
+            )
+            if media.kind == "gif":
+                sent = await msg.reply_animation(
+                    file, caption=media.caption, disable_notification=True,
+                )
+            else:
+                sent = await msg.reply_photo(
+                    file, caption=media.caption, disable_notification=True,
+                )
+        except Exception as exc:
+            log.warning("automod media send failed in %s: %s", msg.chat.id, exc)
+            sent = None
+    if sent is None:
+        sent = await msg.reply(media.fallback, disable_notification=True)
+        track(msg.chat.id, sent.message_id, media.fallback)
+    else:
+        track(msg.chat.id, sent.message_id, media.caption)
 
 
 def _has_bot_mention(msg: Message, bot_username: str | None) -> bool:
@@ -160,11 +249,221 @@ async def _transcribe_voice(rt: Runtime, msg: Message) -> str | None:
         return None
 
 
+async def _derive_meme_queries(
+    rt: Runtime, chat_id: int, memory_on: bool,
+) -> list[str]:
+    """Distill the current conversation into up to 3 candidate search
+    queries (specific → broad → synonym). Only HUMAN messages feed the
+    prompt — the bot's own replies and the meme request itself would skew
+    the topic. Returns [] when there's nothing to work with (memory off,
+    empty chat, AI down)."""
+    if not memory_on:
+        return []
+    try:
+        recent = await rt.memory.recent_messages(chat_id, 16)
+    except Exception as exc:  # pragma: no cover - defensive
+        log.info("meme queries: recent_messages failed for %s: %s", chat_id, exc)
+        return []
+    lines = []
+    for m in recent:
+        content = (m.content or "").strip()
+        if not content or content.startswith("/") or m.role != "user":
+            continue
+        # Drop the meme request(s) themselves — the topic is UNDER them.
+        if detect_meme_request(content) is not None:
+            continue
+        lines.append(f"{m.author_name or 'someone'}: {content}")
+    if not lines:
+        return []
+    snippet = "\n".join(lines)[-3000:]
+    return await derive_topic_queries(rt.openai, snippet, chat_id=chat_id)
+
+
+async def _record_bot_turn(rt: Runtime, cfg, chat_id: int, text: str) -> None:
+    """Record one of the bot's meme-path outputs as an assistant turn and
+    give the summarizer its usual chance to run. Without this, stored
+    history shows the user's meme request going unanswered — and the model
+    starts believing it ignores (or can't serve) such requests."""
+    if not cfg.memory_enabled:
+        return
+    try:
+        await rt.memory.record_message(
+            chat_id=chat_id, role="assistant", content=text,
+            message_id=None, user_id=None,
+        )
+        await maybe_summarize(rt.memory, rt.openai, rt.settings, chat_id)
+    except Exception as exc:  # pragma: no cover - defensive
+        log.info("meme-turn memory record failed for %s: %s", chat_id, exc)
+
+
+async def _hunt_with_indicator(rt: Runtime, chat_id: int, coro):
+    """Await a slow meme hunt while keeping the chat-action indicator alive.
+
+    Telegram shows "sending a photo..." for ~5s per send_chat_action; a
+    judged hunt can take 30-60s, leaving the chat looking dead. Re-send
+    the action every ~4s until the hunt completes."""
+    async def _pulse() -> None:
+        while True:
+            await asyncio.sleep(4)
+            try:
+                await rt.bot.send_chat_action(chat_id, "upload_photo")
+            except Exception:  # indicator is cosmetic; never kill the hunt
+                pass
+
+    task = asyncio.create_task(_pulse())
+    try:
+        return await coro
+    finally:
+        task.cancel()
+
+
+async def _meme_subject(rt: Runtime, msg: Message, cfg, topic: str) -> str:
+    """Resolve the subject for a meme: the explicit topic, else the first
+    query distilled from the conversation ('' if nothing usable)."""
+    if topic:
+        return topic
+    queries = await _derive_meme_queries(rt, msg.chat.id, cfg.memory_enabled)
+    return queries[0] if queries else ""
+
+
+async def _handle_meme_generate(rt: Runtime, msg: Message, cfg, topic: str) -> None:
+    """'make/create a meme about X' → GENERATE one (image model) rather
+    than search Reddit for an existing one."""
+    subject = await _meme_subject(rt, msg, cfg, topic)
+    if not subject:
+        miss = "Sh-sha. Couldn't read a topic to meme. Say what it's about."
+        await msg.reply(miss, disable_notification=True)
+        await _record_bot_turn(rt, cfg, msg.chat.id, miss)
+        return
+    result = await generate_meme(rt.openai, subject, chat_id=msg.chat.id)
+    if result is None:
+        fail = "Sh-sha. Couldn't cook one up right now. Try again in a bit."
+        await msg.reply(fail, disable_notification=True)
+        await _record_bot_turn(rt, cfg, msg.chat.id, fail)
+        return
+    image, caption = result
+    try:
+        sent = await msg.answer_photo(
+            BufferedInputFile(image, filename="meme.png"),
+            caption=caption, disable_notification=True,
+        )
+        track(msg.chat.id, sent.message_id, caption)
+    except Exception as exc:
+        log.warning("meme generate send failed in %s: %s", msg.chat.id, exc)
+        await msg.reply(
+            "Made one but Telegram wouldn't take it. Try again.",
+            disable_notification=True,
+        )
+        return
+    await _record_bot_turn(rt, cfg, msg.chat.id, f"[generated a meme] {caption}")
+
+
+async def _handle_meme_request(
+    rt: Runtime, msg: Message, cfg, topic: str, *, generate: bool = False,
+) -> None:
+    """Serve a natural-language meme request ("give me a meme about X").
+
+    ``generate`` routes 'make/create a meme' asks to the image generator.
+    Otherwise: ``topic`` is '' when the ask was deictic ("about this") —
+    derive queries from the conversation. Candidates come from the topic's
+    own subreddit first, then the meme subs, then sitewide; the cheap model
+    judges which candidate actually matches. When the derived-topic hunt
+    finds nothing, we say so and post a random pull — labeled, so it
+    doesn't read like a failed relevance match. Every visible output is
+    recorded to memory like any other bot reply."""
+    # Local import: utility imports nothing from chat, but keeping this
+    # lazy makes the no-cycle property robust to future refactors.
+    from ipedro.handlers.utility import post_meme_to_chat
+
+    if generate:
+        await rt.bot.send_chat_action(msg.chat.id, "upload_photo")
+        await _handle_meme_generate(rt, msg, cfg, topic)
+        return
+
+    await rt.bot.send_chat_action(msg.chat.id, "upload_photo")
+    creds = dict(
+        user_agent=rt.settings.reddit_user_agent,
+        client_id=rt.settings.reddit_client_id,
+        client_secret=rt.settings.reddit_client_secret,
+    )
+    # Extra sources for the judged hunt only — fetch_meme (the random
+    # r/popular fallback) is reddit-only and must not see these kwargs.
+    finder_creds = dict(
+        creds,
+        giphy_api_key=rt.settings.giphy_api_key,
+        imgur_client_id=rt.settings.imgur_client_id,
+    )
+    if topic:
+        # Explicit subject — judged search; a dry result (including the
+        # judge deciding nothing found is a relevant MEME) is an honest
+        # miss, not a cue to post something random.
+        meme = await _hunt_with_indicator(rt, msg.chat.id, find_relevant_meme(
+            rt.openai, [topic], topic_label=topic,
+            chat_id=msg.chat.id, **finder_creds,
+        ))
+        if meme is None:
+            miss = (
+                f"Sh-sha. Swept the feeds for “{topic}” — nothing usable. "
+                f"Try different words."
+            )
+            await msg.reply(miss, disable_notification=True)
+            await _record_bot_turn(rt, cfg, msg.chat.id, miss)
+            return
+    else:
+        # "about this" / bare ask — derive queries from the conversation
+        # and hunt with the judge. If that comes up dry, fall back to a
+        # random r/popular pull, SAYING SO, so the user knows it's not a
+        # failed relevance match.
+        queries = await _derive_meme_queries(rt, msg.chat.id, cfg.memory_enabled)
+        meme = None
+        if queries:
+            log.info(
+                "meme request: derived queries %r for chat %s",
+                queries, msg.chat.id,
+            )
+            meme = await _hunt_with_indicator(rt, msg.chat.id, find_relevant_meme(
+                rt.openai, queries, topic_label=queries[0],
+                chat_id=msg.chat.id, **finder_creds,
+            ))
+        if meme is None:
+            meme = await fetch_meme(**creds)
+            if meme is None:
+                quiet = (
+                    "Sh-sha. Feeds are quiet or blocking me. Try again "
+                    "in a bit."
+                )
+                await msg.reply(quiet, disable_notification=True)
+                await _record_bot_turn(rt, cfg, msg.chat.id, quiet)
+                return
+            note = (
+                f"Sh-sha. Nothing solid on “{queries[0]}” — wire's top "
+                f"pull instead:"
+                if queries else
+                "Sh-sha. Couldn't read a topic off the room — wire's top "
+                "pull:"
+            )
+            try:
+                sent = await msg.reply(note, disable_notification=True)
+                track(msg.chat.id, sent.message_id, note)
+                await _record_bot_turn(rt, cfg, msg.chat.id, note)
+            except Exception:  # pragma: no cover - defensive
+                pass
+    caption = await post_meme_to_chat(rt, msg, meme)
+    if caption is None:
+        fail = "Found one but couldn't deliver the media. Try again."
+        await msg.reply(fail, disable_notification=True)
+        await _record_bot_turn(rt, cfg, msg.chat.id, fail)
+        return
+    await _record_bot_turn(
+        rt, cfg, msg.chat.id, f"[shared a meme] {caption}",
+    )
+
+
 def build_router(rt: Runtime) -> Router:
     r = Router(name="chat")
 
-    # Reply-to-bot "bad bot" / "bad dude" deletion shortcut.
-    @r.message(F.text.lower().in_({"bad bot", "bad pedro", "bad dude", "bad duder"}))
+    # Reply-to-bot "bad bot" / "bad dale" deletion shortcut.
+    @r.message(F.text.lower().in_({"bad bot", "bad pedro", "bad dude", "bad duder", "bad dale", "bad boomhauer", "bad rusty"}))
     async def remove_message(msg: Message) -> None:
         if not msg.reply_to_message:
             return
@@ -195,10 +494,17 @@ def build_router(rt: Runtime) -> Router:
         #      outstanding challenge per (chat, user), so any text they send
         #      while a challenge is pending becomes the attempt. This mirrors
         #      the "Solve the challenge first" rule the bef action enforces.
+        # Slash-commands are never challenge answers: a user mid-challenge
+        # must still be able to run /chat_config, /help, /debug_*, etc.
+        # (Registered commands route to their own handlers before this
+        # catch-all, but an unrecognized /foo would otherwise fall through
+        # and get judged — and worse, block the escape hatches.)
+        _challenge_text = (msg.text or msg.caption or "")
         if (
             cfg.duckhunt_enabled
             and msg.from_user is not None
-            and (msg.text or msg.caption)
+            and _challenge_text
+            and not _is_command(_challenge_text)
         ):
             challenge = None
             if msg.reply_to_message is not None:
@@ -209,6 +515,17 @@ def build_router(rt: Runtime) -> Router:
                 challenge = await rt.duckhunt.get_bef_challenge(
                     msg.chat.id, msg.from_user.id,
                 )
+            # Stale challenge → abandon it and fall through to normal
+            # handling instead of judging this message as an answer.
+            if challenge is not None and _challenge_is_stale(challenge):
+                log.info(
+                    "Clearing stale bef challenge: chat=%s user=%s age>%ss",
+                    msg.chat.id, challenge.user_id, _BEF_CHALLENGE_TTL_SECONDS,
+                )
+                await rt.duckhunt.clear_bef_challenge(
+                    msg.chat.id, challenge.user_id,
+                )
+                challenge = None
             if challenge and challenge.user_id == msg.from_user.id:
                 answer = (msg.text or msg.caption or "").strip()
                 verdict: bool | None
@@ -216,6 +533,26 @@ def build_router(rt: Runtime) -> Router:
                 # Debug toggles let an admin short-circuit the judge so they
                 # can rapidly walk both branches of the challenge flow.
                 admin_id = msg.from_user.id
+                # Time limit: a late answer fails fast (no AI judge spend)
+                # and clears the challenge, so the next bef earns a fresh,
+                # different question — looking the old one up is useless.
+                # Admins driving the pass/fail toggles bypass the clock.
+                _debug_challenge = (
+                    debug_is_on(admin_id, "always_pass_challenge")
+                    or debug_is_on(admin_id, "always_fail_challenge")
+                )
+                if not _debug_challenge and challenge_is_over_time(
+                    challenge.kind, challenge.created_at,
+                ):
+                    await rt.duckhunt.clear_bef_challenge(
+                        msg.chat.id, msg.from_user.id,
+                    )
+                    log.info(
+                        "bef challenge timed out: chat=%s user=%s kind=%s",
+                        msg.chat.id, msg.from_user.id, challenge.kind,
+                    )
+                    await msg.reply(over_time_line(), disable_notification=True)
+                    return
                 if debug_is_on(admin_id, "always_pass_challenge"):
                     verdict = True
                     line = "Passed. [debug: always_pass_challenge]"
@@ -226,7 +563,8 @@ def build_router(rt: Runtime) -> Router:
                     verdict = captcha_matches(challenge.challenge, answer)
                     line = None
                 else:
-                    ai_text = await rt.openai.chat(
+                    # PASS/FAIL judge — classification, not creative work.
+                    ai_text = await rt.openai.cheap_chat(
                         [{
                             "role": "user",
                             "content": DUCK_BEF_CHALLENGE_JUDGE_PROMPT.format(
@@ -255,17 +593,26 @@ def build_router(rt: Runtime) -> Router:
                     )
                 return
 
+        # What the human actually typed. Every keyword intercept below
+        # (automod, cat facts, meme requests, "thanks dale") matches on
+        # THIS, never on the machine-written media description folded into
+        # `text` further down — a canned bit firing off the bot's own
+        # words about a picture would be nonsense.
+        typed = msg.text or msg.caption or ""
+
         # Voice notes: optionally transcribe and treat the transcript as user text.
-        text = msg.text or msg.caption
-        if not text and msg.voice and cfg.voice_transcribe:
+        if not typed and msg.voice and cfg.voice_transcribe:
             transcription = await _transcribe_voice(rt, msg)
             if transcription:
-                text = f"[voice transcript] {transcription}"
+                typed = f"[voice transcript] {transcription}"
 
-        if not text:
+        # A bare photo or sticker carries no text at all, so "no text" can
+        # no longer mean "nothing happened" — check for media before
+        # dropping the message.
+        if not typed and vision.extract_media(msg) is None:
             return  # nothing actionable
 
-        if _is_command(text):
+        if _is_command(typed):
             # Commands are handled by their own routers; nothing to do here.
             return
 
@@ -277,12 +624,27 @@ def build_router(rt: Runtime) -> Router:
         from_user_id = msg.from_user.id if msg.from_user else None
         if await has_flag(rt.db, msg.chat.id, from_user_id, "shutup"):
             return
+        addressed.note_user_message(msg.chat.id)
+
+        # Look at the picture. Whatever the bot sees is folded into the
+        # transcript as a bracketed line, so from here down a photo is just
+        # something that was said: recorded in memory, summarized, embedded,
+        # recallable months later. Placed after the shut-up gate so a muted
+        # user's images never cost a vision call.
+        text = typed
+        if cfg.vision_enabled and cfg.response_policy != "commands":
+            seen = await vision.describe(rt, msg)
+            if seen:
+                text = f"{seen}\n{typed}" if typed else seen
+
+        if not text:
+            return  # media we couldn't see and nothing typed
 
         # Auto-grudge: insults toward the bot earn a 24h snark flag.
-        if await maybe_auto_grudge(rt.db, msg.chat.id, from_user_id, text):
+        if await maybe_auto_grudge(rt.db, msg.chat.id, from_user_id, typed):
             log.info(
                 "Auto-grudge added: chat=%s user=%s text=%r",
-                msg.chat.id, from_user_id, text[:80],
+                msg.chat.id, from_user_id, typed[:80],
             )
 
         # Record the inbound message (token-counted, optionally embedded).
@@ -297,7 +659,7 @@ def build_router(rt: Runtime) -> Router:
 
         # "thanks pedro" → passive-aggressive line. Intercepts before the
         # normal flow so we don't also run an AI reply.
-        if cfg.response_policy != "commands" and _THANKS_PEDRO_RE.search(text):
+        if cfg.response_policy != "commands" and _THANKS_PEDRO_RE.search(typed):
             line = random.choice(_THANKS_PEDRO_LINES)
             sent = await msg.reply(line, disable_notification=True)
             track(msg.chat.id, sent.message_id, line)
@@ -308,49 +670,157 @@ def build_router(rt: Runtime) -> Router:
                 )
             return
 
+        # AutoModerator-style canned responses (e.g. 'gay' → the copypasta,
+        # 'stonks' → the actual image). Fixed intercept; skip the AI reply.
+        # Not written to memory — canned bits aren't conversational context.
+        automod = (
+            _automod_response(typed)
+            if cfg.automod_enabled and cfg.response_policy != "commands"
+            else None
+        )
+        if automod is not None:
+            if isinstance(automod, MediaResponse):
+                await _reply_automod_media(msg, automod)
+            elif isinstance(automod, DaleGif):
+                await dale.send_random(
+                    rt.db, msg, automod.tag,
+                    caption=automod.caption or None,
+                    fallback=automod.fallback,
+                )
+            else:
+                sent = await msg.reply(automod, disable_notification=True)
+                track(msg.chat.id, sent.message_id, automod)
+            return
+
         # Ambient emoji reaction (rare, never on commands or our own intercepts).
         if (
             cfg.response_policy != "commands"
             and msg.message_id
             and random.random() < _REACT_PROBABILITY
         ):
+            # Bound to a local, not inlined into the call: the bot has to be
+            # able to say WHICH emoji it used. Telegram never reports a bot's
+            # own reactions back to it and there's no "list my reactions" API,
+            # so recording it here is the only chance we get.
+            emoji = random.choice(_REACTION_POOL)
+            reacted = False
             try:
                 await rt.bot.set_message_reaction(
                     chat_id=msg.chat.id,
                     message_id=msg.message_id,
-                    reaction=[ReactionTypeEmoji(emoji=random.choice(_REACTION_POOL))],
+                    reaction=[ReactionTypeEmoji(emoji=emoji)],
                 )
+                reacted = True
             except Exception as exc:
                 log.debug("Reaction failed: %s", exc)
+            if reacted and cfg.memory_enabled:
+                # A synthetic assistant turn so the reaction shows up in the
+                # bot's own history. message_id=None is the schema's sanctioned
+                # synthetic path; do_embed=False keeps these out of semantic
+                # retrieval. Quote the text, not just the name — stored user
+                # turns carry no speaker labels, so the snippet is what lets
+                # the model tie the reaction to the right message.
+                try:
+                    await rt.memory.record_message(
+                        chat_id=msg.chat.id,
+                        role="assistant",
+                        content=reaction_note(emoji, text),
+                        message_id=None,
+                        user_id=None,
+                        do_embed=False,
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "reaction record failed for %s: %s", msg.chat.id, exc,
+                    )
 
         # Cat mention: drop a dubious cat fact and stop. Skip the regular
-        # AI reply so the bot doesn't both fact and chat.
-        if _mentions_cat(text):
+        # AI reply so the bot doesn't both fact and chat. Meme requests
+        # win though — "meme about cats" wants a meme, not a cat fact —
+        # and any message that says 'meme' is left for the meme intercept
+        # (with its AI fallback) to evaluate. Respects the commands-only
+        # opt-out; deliberately NOT gated on automod_enabled — that kill
+        # switch covers exactly the canned-response table, and cat facts
+        # are a separate ambient feature.
+        if (
+            cfg.response_policy != "commands"
+            and _mentions_cat(typed)
+            and _MEME_WORD_RE.search(typed) is None
+        ):
             await rt.bot.send_chat_action(msg.chat.id, "typing")
-            fact = await rt.openai.short_completion(CAT_FACT_PROMPT, max_tokens=120)
-            reply_text = catify(fact or "🐈")
+            fact = await rt.openai.cheap_completion(CAT_FACT_PROMPT, max_tokens=120)
+            reply_text = catify(fact or fallback_cat_fact())
             sent = await msg.reply(reply_text, disable_notification=True)
             track(msg.chat.id, sent.message_id, reply_text)
+            # Post-send bookkeeping must never bubble: the user already saw
+            # the reply, so a DB hiccup here would only leave the turn out
+            # of history AND crash the handler (same spirit as
+            # _record_bot_turn, which we can't reuse — it drops message_id).
             if cfg.memory_enabled:
-                await rt.memory.record_message(
-                    chat_id=msg.chat.id,
-                    role="assistant",
-                    content=reply_text,
-                    message_id=sent.message_id,
-                    user_id=None,
-                )
-                await maybe_summarize(rt.memory, rt.openai, rt.settings, msg.chat.id)
+                try:
+                    await rt.memory.record_message(
+                        chat_id=msg.chat.id,
+                        role="assistant",
+                        content=reply_text,
+                        message_id=sent.message_id,
+                        user_id=None,
+                    )
+                    await maybe_summarize(rt.memory, rt.openai, rt.settings, msg.chat.id)
+                except Exception as exc:
+                    log.warning(
+                        "post-send memory record failed for %s: %s",
+                        msg.chat.id, exc,
+                    )
             return
 
         incoming = IncomingMessage(
-            text=text,
+            text=typed,
             has_mention_of_bot=(
-                _has_bot_mention(msg, bot_username) or _mentions_pedro(text)
+                _has_bot_mention(msg, bot_username) or _mentions_pedro(typed)
             ),
             is_reply_to_bot=_is_reply_to_bot(msg, bot_id),
             is_command=False,
             chat_type=msg.chat.type,
         )
+
+        # Nobody said his name and nobody hit reply, but they may still be
+        # talking to him — "why?" right after he spoke, a "you" that means
+        # him, a question to the room. Treated as a mention from here on,
+        # which also keeps the ambient GIF from eating the answer. `reply`
+        # is the operator saying "only when replied to"; it stays strict.
+        if (
+            typed
+            and cfg.response_policy in ("mention", "ambient")
+            and not incoming.has_mention_of_bot
+            and not incoming.is_reply_to_bot
+            and await addressed.wants_reply(
+                rt, msg.chat.id,
+                speaker=display_name(msg.from_user) if msg.from_user else None,
+                text=typed, memory_enabled=cfg.memory_enabled,
+            )
+        ):
+            incoming = replace(incoming, has_mention_of_bot=True)
+
+        # Ambient Dale. Deliberately does NOT return: falling through keeps
+        # maybe_summarize (below) running on these messages. Skipped whenever
+        # the message is addressed to the bot, so a random GIF can never eat a
+        # real answer, and given no text fallback — an empty library means
+        # silence, not noise. Text only: since vision, stickers and photos
+        # reach this point too, and a sticker volley rolling the dice on
+        # every frame turned "occasional" into "constant" — and a GIF fired
+        # back at a GIF reads as a reply, not a stray.
+        if (
+            typed
+            and cfg.automod_enabled
+            and cfg.response_policy != "commands"
+            and not incoming.has_mention_of_bot
+            and not incoming.is_reply_to_bot
+            and random.random() < _DALE_GIF_PROBABILITY
+        ):
+            try:
+                await dale.send_random(rt.db, msg, "")
+            except Exception as exc:
+                log.debug("ambient dale gif failed in %s: %s", msg.chat.id, exc)
 
         if not should_respond(
             cfg.response_policy, incoming,
@@ -361,7 +831,7 @@ def build_router(rt: Runtime) -> Router:
             # Skipped under the explicit commands-only opt-out.
             if (
                 cfg.response_policy != "commands"
-                and _POSITIVITY_RE.search(text)
+                and _POSITIVITY_RE.search(typed)
                 and random.random() < _CREDIT_PROBABILITY
             ):
                 line = random.choice(_CREDIT_LINES)
@@ -377,13 +847,48 @@ def build_router(rt: Runtime) -> Router:
                 await maybe_summarize(rt.memory, rt.openai, rt.settings, msg.chat.id)
             return
 
+        # "hey pedro give me a meme about this" → fetch a relevant meme
+        # (topic explicit, or distilled from the current conversation) and
+        # post it with its top comment instead of a text reply. Fast regex
+        # grammar first; when it misses but the message says 'meme', a
+        # cheap AI classifier decides — that's the net for natural
+        # phrasings the grammar can't enumerate. Both only run on messages
+        # the bot was answering anyway.
+        meme_topic = detect_meme_request(typed)
+        if meme_topic is None and _MEME_WORD_RE.search(typed):
+            try:
+                meme_topic = await classify_meme_request(
+                    rt.openai, typed, chat_id=msg.chat.id,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                log.info("meme classify failed in %s: %s", msg.chat.id, exc)
+                meme_topic = None
+            if meme_topic is not None:
+                log.info(
+                    "meme request via AI classifier in %s: topic=%r",
+                    msg.chat.id, meme_topic,
+                )
+        if meme_topic is not None:
+            await _handle_meme_request(
+                rt, msg, cfg, meme_topic,
+                generate=is_meme_generation_request(typed),
+            )
+            return
+
         await rt.bot.send_chat_action(msg.chat.id, "typing")
 
-        state = await rt.persona_state.current(msg.chat.id)
         extra_bits = []
-        base_extra = rt.persona_state.to_system_prompt(state)
-        if base_extra:
-            extra_bits.append(base_extra)
+        # "dale what is this" on someone else's photo: the picture is on the
+        # replied-to message, not this one. Described for this turn only —
+        # it already has its own history row from when it arrived, and the
+        # description is cached by file id, so this is almost always free.
+        if cfg.vision_enabled and msg.reply_to_message is not None:
+            quoted = await vision.describe(rt, msg.reply_to_message)
+            if quoted:
+                extra_bits.append(
+                    f"The message being replied to contains {quoted}"
+                )
+
         snark_flag = await has_flag(rt.db, msg.chat.id, from_user_id, "snark")
         grudge_flag = await has_flag(rt.db, msg.chat.id, from_user_id, "grudge")
         if snark_flag or grudge_flag:
@@ -394,6 +899,22 @@ def build_router(rt: Runtime) -> Router:
                 f"without being cruel. Don't acknowledge the list."
             )
         extra = "\n\n".join(extra_bits) or None
+
+        # Impersonation: "act like Luke" / "talk like Luke" / "do a Luke
+        # impression" → resolve Luke to a real member and reply in their
+        # voice, learned from their message history. Overrides the persona
+        # for just this turn; falls through to a normal reply when there's
+        # no request, no matching member, or too little history.
+        persona_override = None
+        impersonation = await resolve_impersonation(rt.db, msg.chat.id, typed)
+        if impersonation is not None:
+            member, samples = impersonation
+            persona_override = build_impersonation_prompt(member.name, samples)
+            log.info(
+                "Impersonating %s (%d samples) in chat %s.",
+                member.name, len(samples), msg.chat.id,
+            )
+
         ctx = await build_context(
             store=rt.memory,
             settings=rt.settings,
@@ -401,7 +922,13 @@ def build_router(rt: Runtime) -> Router:
             persona=cfg.persona,
             persona_custom=cfg.persona_custom,
             latest_user_text=text,
+            latest_user_name=(
+                display_name(msg.from_user) if msg.from_user else None
+            ),
             extra_system=extra,
+            memory_enabled=cfg.memory_enabled,
+            persona_override=persona_override,
+            capabilities=capability_brief(cfg),
         )
         reply = await rt.openai.chat(
             ctx.messages, max_tokens=500, chat_id=msg.chat.id,
@@ -411,15 +938,25 @@ def build_router(rt: Runtime) -> Router:
 
         sent = await msg.answer(reply, disable_notification=True)
         track(msg.chat.id, sent.message_id, reply)
+        addressed.note_bot_reply(msg.chat.id)
 
+        # Post-send: never let a DB hiccup crash the handler after the user
+        # already saw the reply — log it and move on (else stored history
+        # shows the bot ignoring the user, and the model learns from that).
         if cfg.memory_enabled:
-            await rt.memory.record_message(
-                chat_id=msg.chat.id,
-                role="assistant",
-                content=reply,
-                message_id=sent.message_id,
-                user_id=None,
-            )
-            await maybe_summarize(rt.memory, rt.openai, rt.settings, msg.chat.id)
+            try:
+                await rt.memory.record_message(
+                    chat_id=msg.chat.id,
+                    role="assistant",
+                    content=reply,
+                    message_id=sent.message_id,
+                    user_id=None,
+                )
+                await maybe_summarize(rt.memory, rt.openai, rt.settings, msg.chat.id)
+            except Exception as exc:
+                log.warning(
+                    "post-send memory record failed for %s: %s",
+                    msg.chat.id, exc,
+                )
 
     return r

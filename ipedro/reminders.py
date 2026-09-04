@@ -1,4 +1,8 @@
-"""Reminder background loop. Fires due reminders into their chat."""
+"""Reminder background loop. Fires due reminders into their chat.
+
+Deliberately ignores the admin silence override (silenced_chats): a reminder
+is something a user explicitly asked for, not ambient chatter.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,9 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
+from ipedro.bot_messages import track
 from ipedro.db.pool import Database
 
 log = logging.getLogger(__name__)
@@ -54,12 +60,9 @@ async def _due_reminders(db: Database) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-async def _mark_fired(db: Database, ids: list[int]) -> None:
-    if not ids:
-        return
+async def _mark_fired(db: Database, reminder_id: int) -> None:
     await db.execute(
-        "UPDATE reminders SET fired = TRUE WHERE id = ANY($1::bigint[])",
-        ids,
+        "UPDATE reminders SET fired = TRUE WHERE id = $1", reminder_id,
     )
 
 
@@ -70,17 +73,26 @@ async def run_reminders_loop(
     while not stop.is_set():
         try:
             due = await _due_reminders(db)
-            fired_ids: list[int] = []
             for r in due:
+                # Mark fired only after a successful send, one reminder at a
+                # time — a transient Telegram failure must NOT lose the
+                # reminder (it retries next tick). A permanent failure (bot
+                # kicked/blocked, chat gone) marks it fired so it doesn't
+                # retry forever.
                 try:
                     body = f"⏰ Reminder: {r['text']}"
-                    await bot.send_message(r["chat_id"], body)
+                    sent = await bot.send_message(r["chat_id"], body)
+                    track(r["chat_id"], sent.message_id, body)
+                except (TelegramForbiddenError, TelegramBadRequest) as exc:
+                    log.warning(
+                        "Reminder %s undeliverable (dropping): %s", r["id"], exc,
+                    )
                 except Exception as exc:
                     log.warning(
-                        "Reminder %s send failed: %s", r["id"], exc,
+                        "Reminder %s send failed (will retry): %s", r["id"], exc,
                     )
-                fired_ids.append(r["id"])
-            await _mark_fired(db, fired_ids)
+                    continue
+                await _mark_fired(db, r["id"])
             wait = 30
         except Exception as exc:
             log.exception("Reminders iteration failed: %s", exc)

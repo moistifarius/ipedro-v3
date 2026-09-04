@@ -27,6 +27,14 @@ class ChatConfig:
     comic_enabled: bool = False
     fortune_enabled: bool = False
     ether_enabled: bool = False
+    duck_names_public: bool = True
+    # Vestigial: the daily on-this-day auto-post was replaced by the monthly
+    # recap. Column and field kept only to avoid a pointless migration;
+    # /onthisday is manual-only and unconditional.
+    on_this_day_enabled: bool = True
+    monthly_recap_enabled: bool = True
+    automod_enabled: bool = True
+    vision_enabled: bool = True
 
 
 class ChatRepo:
@@ -71,6 +79,11 @@ class ChatRepo:
             comic_enabled=bool(row["comic_enabled"]),
             fortune_enabled=bool(row["fortune_enabled"]),
             ether_enabled=bool(row["ether_enabled"]),
+            duck_names_public=bool(row["duck_names_public"]),
+            on_this_day_enabled=bool(row["on_this_day_enabled"]),
+            monthly_recap_enabled=bool(row["monthly_recap_enabled"]),
+            automod_enabled=bool(row["automod_enabled"]),
+            vision_enabled=bool(row["vision_enabled"]),
         )
 
     async def upsert_default_config(
@@ -108,6 +121,11 @@ class ChatRepo:
             comic_enabled=bool(row["comic_enabled"]),
             fortune_enabled=bool(row["fortune_enabled"]),
             ether_enabled=bool(row["ether_enabled"]),
+            duck_names_public=bool(row["duck_names_public"]),
+            on_this_day_enabled=bool(row["on_this_day_enabled"]),
+            monthly_recap_enabled=bool(row["monthly_recap_enabled"]),
+            automod_enabled=bool(row["automod_enabled"]),
+            vision_enabled=bool(row["vision_enabled"]),
         )
 
     async def update_config(self, chat_id: int, **fields: Any) -> None:
@@ -115,7 +133,8 @@ class ChatRepo:
             "response_policy", "ambient_probability", "persona", "persona_custom",
             "duckhunt_enabled", "voice_transcribe", "memory_enabled",
             "share_photo_enabled", "comic_enabled", "fortune_enabled",
-            "ether_enabled",
+            "ether_enabled", "duck_names_public", "on_this_day_enabled",
+            "monthly_recap_enabled", "automod_enabled", "vision_enabled",
         }
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
@@ -165,6 +184,29 @@ class StoredMessage:
     content: str
     tokens: int | None
     created_at: datetime
+    # Display name of the speaker, joined from the users table when the
+    # message is fetched via MessageRepo.recent / .range_for_summary.
+    # None for the bot's own assistant turns and for rows fetched through
+    # paths that don't perform the join. Callers that need to label a
+    # message in the AI context / summary use this directly.
+    author_name: str | None = None
+
+
+# SQL fragment used by every SELECT that wants a speaker-labeled row.
+# COALESCE picks the best name available: first_name+last_name → username
+# → a stable 'user<id>' fallback. Kept here so the format never drifts.
+_MESSAGE_WITH_NAME_SELECT = """
+    SELECT m.id, m.chat_id, m.message_id, m.user_id, m.role, m.content,
+           m.tokens, m.created_at,
+           COALESCE(
+               NULLIF(TRIM(CONCAT_WS(' ', u.first_name, u.last_name)), ''),
+               u.username,
+               CASE WHEN m.user_id IS NOT NULL
+                    THEN 'user' || m.user_id::text END
+           ) AS author_name
+      FROM messages m
+      LEFT JOIN users u ON u.user_id = m.user_id
+"""
 
 
 class MessageRepo:
@@ -195,13 +237,8 @@ class MessageRepo:
 
     async def recent(self, chat_id: int, limit: int) -> list[StoredMessage]:
         rows = await self.db.fetch(
-            """
-            SELECT id, chat_id, message_id, user_id, role, content, tokens, created_at
-              FROM messages
-             WHERE chat_id = $1
-             ORDER BY id DESC
-             LIMIT $2
-            """,
+            _MESSAGE_WITH_NAME_SELECT
+            + " WHERE m.chat_id = $1 ORDER BY m.id DESC LIMIT $2",
             chat_id, limit,
         )
         return [StoredMessage(**dict(r)) for r in reversed(rows)]
@@ -217,13 +254,8 @@ class MessageRepo:
         self, chat_id: int, after_id: int, limit: int
     ) -> list[StoredMessage]:
         rows = await self.db.fetch(
-            """
-            SELECT id, chat_id, message_id, user_id, role, content, tokens, created_at
-              FROM messages
-             WHERE chat_id = $1 AND id > $2
-             ORDER BY id ASC
-             LIMIT $3
-            """,
+            _MESSAGE_WITH_NAME_SELECT
+            + " WHERE m.chat_id = $1 AND m.id > $2 ORDER BY m.id ASC LIMIT $3",
             chat_id, after_id, limit,
         )
         return [StoredMessage(**dict(r)) for r in rows]
@@ -244,8 +276,10 @@ class SummaryRepo:
         self.db = db
 
     async def latest(self, chat_id: int) -> StoredSummary | None:
+        # Explicit columns: a future ADD COLUMN must not explode the splat.
         row = await self.db.fetchrow(
-            "SELECT * FROM summaries WHERE chat_id = $1 ORDER BY id DESC LIMIT 1",
+            "SELECT id, chat_id, summary, covers_until_id, created_at "
+            "  FROM summaries WHERE chat_id = $1 ORDER BY id DESC LIMIT 1",
             chat_id,
         )
         return StoredSummary(**dict(row)) if row else None
@@ -286,8 +320,10 @@ class FactRepo:
         return int(val)
 
     async def list_for_chat(self, chat_id: int, limit: int = 50) -> list[StoredFact]:
+        # Explicit columns: a future ADD COLUMN must not explode the splat.
         rows = await self.db.fetch(
-            "SELECT * FROM facts WHERE chat_id = $1 ORDER BY id DESC LIMIT $2",
+            "SELECT id, chat_id, user_id, fact, source_msg, created_at "
+            "  FROM facts WHERE chat_id = $1 ORDER BY id DESC LIMIT $2",
             chat_id, limit,
         )
         return [StoredFact(**dict(r)) for r in rows]
@@ -329,11 +365,18 @@ class EmbeddingRepo:
         try:
             rows = await self.db.fetch(
                 """
-                SELECT ref_kind, ref_id, content,
-                       1 - (embedding <=> $2) AS similarity
-                  FROM embeddings
-                 WHERE chat_id = $1 AND embedding IS NOT NULL
-                 ORDER BY embedding <=> $2
+                SELECT e.ref_kind, e.ref_id, e.content,
+                       1 - (e.embedding <=> $2) AS similarity,
+                       COALESCE(
+                           NULLIF(TRIM(CONCAT_WS(' ', u.first_name, u.last_name)), ''),
+                           u.username
+                       ) AS author_name
+                  FROM embeddings e
+                  LEFT JOIN messages m
+                         ON e.ref_kind = 'message' AND m.id = e.ref_id
+                  LEFT JOIN users u ON u.user_id = m.user_id
+                 WHERE e.chat_id = $1 AND e.embedding IS NOT NULL
+                 ORDER BY e.embedding <=> $2
                  LIMIT $3
                 """,
                 chat_id, list(embedding), k,

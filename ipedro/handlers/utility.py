@@ -1,15 +1,16 @@
 """General-purpose user commands.
 
-/remind, /poll, /whatdid, /mood, /quote(s), /unquote, /tldr,
+/remind, /poll, /whatdid, /quote(s), /unquote, /tldr,
 /birthday, /anniversary, /dates, /catchphrases, /lexicon, /heatmap.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections import Counter
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -18,7 +19,13 @@ from aiogram.types import (
     InlineKeyboardMarkup, Message,
 )
 
-from ipedro.handlers.common import display_name, get_or_create_chat_config
+from ipedro.bot_messages import track
+from ipedro.handlers.common import (
+    display_name, get_or_create_chat_config, require_memory,
+)
+from ipedro.on_this_day import build_on_this_day, render_on_this_day
+from ipedro.meme_finder import find_relevant_meme
+from ipedro.reddit import build_caption, download_media, fetch_meme
 from ipedro.prompts import (
     COMPLIMENT_PROMPT, ECHO_PROMPT, HAIKU_PROMPT, MISHEARD_LYRIC_PROMPT,
     ROAST_PROMPT, THIS_OR_THAT_PROMPT, TLDR_PROMPT,
@@ -70,6 +77,108 @@ def _parse_user_date(raw: str) -> tuple[int, int, int | None] | None:
     return None
 
 
+async def _can_edit_config(
+    rt: Runtime, user_id: int | None, host_chat, target_chat_id: int,
+) -> bool:
+    """Authorization for editing chat_config via /config or the cfg: wizard.
+
+    Allowed: bot admins (anywhere, any target — they drive /config_for from
+    their DM), OR a chat admin/creator editing THEIR OWN chat. Non-bot-admins
+    may only touch the chat the wizard lives in (target must equal the host
+    chat), so a hand-crafted 'cfg:<other_chat>:…' callback can't mutate a
+    different chat's settings."""
+    if user_id is None:
+        return False
+    if user_id in rt.settings.admin_ids:
+        return True
+    if host_chat is None or target_chat_id != host_chat.id:
+        return False
+    if getattr(host_chat, "type", None) == "private":
+        return False
+    try:
+        member = await rt.bot.get_chat_member(host_chat.id, user_id)
+    except Exception:
+        return False
+    return getattr(member, "status", None) in ("creator", "administrator")
+
+
+async def _answer_reddit_media(
+    msg: Message, data: bytes, kind: str, caption: str | None,
+):
+    """Send downloaded Reddit media as the right Telegram type. Shared by
+    the meme post and its (possibly gif) top comment."""
+    if kind == "photo":
+        return await msg.answer_photo(
+            BufferedInputFile(data, filename="meme.jpg"),
+            caption=caption, disable_notification=True,
+        )
+    if kind == "animation":
+        return await msg.answer_animation(
+            BufferedInputFile(data, filename="meme.gif"),
+            caption=caption, disable_notification=True,
+        )
+    return await msg.answer_video(
+        BufferedInputFile(data, filename="meme.mp4"),
+        caption=caption, disable_notification=True,
+    )
+
+
+
+async def _with_chat_action(bot, chat_id: int, action: str, coro):
+    """Await ``coro`` while re-sending a chat action every ~4s.
+
+    Telegram's typing/upload indicator expires after ~5s; a judged meme
+    hunt can take 30-60s and used to look like the bot went dead."""
+    async def _pinger():
+        while True:
+            try:
+                await bot.send_chat_action(chat_id, action)
+            except Exception:
+                pass
+            await asyncio.sleep(4)
+
+    task = asyncio.create_task(_pinger())
+    try:
+        return await coro
+    finally:
+        task.cancel()
+
+
+async def post_meme_to_chat(rt: Runtime, msg: Message, meme) -> str | None:
+    """Download a fetched Meme's media and post it (caption = verbatim top
+    comment via build_caption), plus the gif follow-up when the top comment
+    is itself media. Returns the posted caption on success (so callers can
+    record the bot's turn into memory), None on failure. Shared by
+    /redditmeme and the natural-language 'meme about X' trigger."""
+    ua = rt.settings.reddit_user_agent
+    data = await download_media(meme.media, user_agent=ua)
+    if not data:
+        return None
+    caption = build_caption(meme)
+    try:
+        sent = await _answer_reddit_media(msg, data, meme.media.kind, caption)
+        track(msg.chat.id, sent.message_id, caption)
+    except Exception as exc:
+        log.warning("reddit meme send failed in %s: %s", msg.chat.id, exc)
+        return None
+    # When the top comment is itself a gif/image, post it as a follow-up
+    # so the reply reads as the actual gif — not raw '![gif](...)' text.
+    if meme.comment_media is not None:
+        cdata = await download_media(meme.comment_media, user_agent=ua)
+        if cdata:
+            try:
+                gsent = await _answer_reddit_media(
+                    msg, cdata, meme.comment_media.kind, None,
+                )
+                track(msg.chat.id, gsent.message_id, "[reddit comment gif]")
+            except Exception as exc:
+                log.info(
+                    "reddit comment-media send failed in %s: %s",
+                    msg.chat.id, exc,
+                )
+    return caption
+
+
 async def _resolve_target_user(
     rt: Runtime, msg: Message,
 ) -> tuple[int | None, str]:
@@ -90,6 +199,9 @@ async def _resolve_target_user(
                 f"{row['first_name'] or ''} {row['last_name'] or ''}"
             ).strip() or row["username"] or arg
             return row["user_id"], name
+        # An @arg was given but nobody matched: hand the arg back so the
+        # caller can say "unknown user" instead of implying bad syntax.
+        return None, arg
     return None, ""
 
 
@@ -132,6 +244,8 @@ def build_router(rt: Runtime) -> Router:
     @r.message(Command("whatdid"))
     async def whatdid(msg: Message) -> None:
         """Confidently summarize what a user has been up to."""
+        if not await require_memory(rt, msg):
+            return
         await get_or_create_chat_config(rt, msg)
         target_user_id: int | None = None
         target_name = "they"
@@ -170,26 +284,14 @@ def build_router(rt: Runtime) -> Router:
         joined = "\n".join(f"- {r['content']}" for r in reversed(rows)) or "(none)"
 
         await rt.bot.send_chat_action(msg.chat.id, "typing")
-        out = await rt.openai.short_completion(
+        out = await rt.openai.cheap_completion(
             _WHATDID_PROMPT.format(name=target_name, messages=joined),
-            max_tokens=200,
+            max_tokens=200, chat_id=msg.chat.id,
         )
         await msg.reply(
             out or f"No idea what {target_name} has been doing.",
             disable_notification=True,
         )
-
-    @r.message(Command("mood"))
-    async def mood(msg: Message) -> None:
-        """Show this chat's current persona state (mood, word-of-the-day, stuck word)."""
-        await get_or_create_chat_config(rt, msg)
-        state = await rt.persona_state.current(msg.chat.id)
-        lines = [f"Mood: {state.mood or 'unset'}"]
-        if state.word_of_day:
-            lines.append(f"Word of the day: {state.word_of_day}")
-        if state.stuck_word:
-            lines.append(f"Currently stuck on: {state.stuck_word}")
-        await msg.reply("\n".join(lines), disable_notification=True)
 
     @r.message(Command("poll"))
     async def poll(msg: Message) -> None:
@@ -221,31 +323,55 @@ def build_router(rt: Runtime) -> Router:
 
     @r.message(Command("quote"))
     async def quote(msg: Message) -> None:
-        """/quote (reply to a message) saves it; /quote on its own = random quote."""
+        """/quote (reply to a text message) saves it; /quote alone = random quote."""
         await get_or_create_chat_config(rt, msg)
-        if msg.reply_to_message and (
-            msg.reply_to_message.text or msg.reply_to_message.caption
-        ):
-            target = msg.reply_to_message
+        target = msg.reply_to_message
+        if target is not None:
+            # Saving mode. Reject two kinds of junk that used to sail through:
+            #  1. The bot's own messages — replying /quote to my /quotes list
+            #     used to save the whole list back into itself (quote-ception:
+            #     "📜 #2 Dale: 📜 #12 Matt: …").
+            #  2. Non-text messages (stickers, un-captioned photos) — these used
+            #     to fall through to random-quote mode, so a user trying to save
+            #     a sticker got a random old quote dumped on them instead.
+            if target.from_user and target.from_user.is_bot:
+                await msg.reply(
+                    "I can only save what people say — not my own messages.",
+                    disable_notification=True,
+                )
+                return
             body = (target.text or target.caption or "").strip()
+            if not body:
+                await msg.reply(
+                    "Nothing to quote there — reply to a message with actual "
+                    "words (plain text or a captioned photo).",
+                    disable_notification=True,
+                )
+                return
             qname = display_name(target.from_user) if target.from_user else "anonymous"
-            qid = await rt.db.fetchval(
-                "INSERT INTO quotes (chat_id, quoted_user_id, quoted_name, "
+            # Allocate the next per-chat number atomically inside the INSERT so
+            # each chat gets contiguous #1, #2, #3… instead of the global id.
+            seq = await rt.db.fetchval(
+                "INSERT INTO quotes (chat_id, seq, quoted_user_id, quoted_name, "
                 "                    text, saved_by, source_message_id) "
-                "VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+                "VALUES ($1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM quotes "
+                "             WHERE chat_id = $1), $2, $3, $4, $5, $6) "
+                "RETURNING seq",
                 msg.chat.id,
                 target.from_user.id if target.from_user else None,
                 qname, body[:2000],
                 msg.from_user.id if msg.from_user else None,
                 target.message_id,
             )
+            snippet = body[:80] + ("…" if len(body) > 80 else "")
             await msg.reply(
-                f"📜 Saved as quote #{qid}.", disable_notification=True,
+                f"📜 Saved #{seq} — {qname}: \"{snippet}\"",
+                disable_notification=True,
             )
             return
         # No reply → random quote
         row = await rt.db.fetchrow(
-            "SELECT id, quoted_name, text FROM quotes "
+            "SELECT seq, quoted_name, text FROM quotes "
             " WHERE chat_id = $1 ORDER BY random() LIMIT 1",
             msg.chat.id,
         )
@@ -256,7 +382,7 @@ def build_router(rt: Runtime) -> Router:
             )
             return
         await msg.reply(
-            f"📜 #{row['id']} — {row['quoted_name']}:\n\"{row['text']}\"",
+            f"📜 #{row['seq']} — {row['quoted_name']}:\n\"{row['text']}\"",
             disable_notification=True,
         )
 
@@ -264,40 +390,51 @@ def build_router(rt: Runtime) -> Router:
     async def quotes_list(msg: Message) -> None:
         await get_or_create_chat_config(rt, msg)
         rows = await rt.db.fetch(
-            "SELECT id, quoted_name, text FROM quotes "
-            " WHERE chat_id = $1 ORDER BY id DESC LIMIT 20",
+            "SELECT seq, quoted_name, text FROM quotes "
+            " WHERE chat_id = $1 ORDER BY seq DESC LIMIT 20",
             msg.chat.id,
         )
         if not rows:
-            await msg.reply("No quotes yet.", disable_notification=True)
+            await msg.reply(
+                "No quotes yet. Reply to a message with /quote to save one.",
+                disable_notification=True,
+            )
             return
-        lines = [f"📜 #{r['id']} {r['quoted_name']}: {r['text'][:120]}" for r in rows]
+        lines = [f"📜 #{r['seq']} {r['quoted_name']}: {r['text'][:120]}" for r in rows]
         await msg.reply("\n".join(lines)[:4000], disable_notification=True)
 
     @r.message(Command("unquote"))
     async def unquote(msg: Message) -> None:
+        await get_or_create_chat_config(rt, msg)
         parts = (msg.text or "").split()
         if len(parts) < 2:
-            await msg.reply("Usage: /unquote <id>", disable_notification=True)
+            await msg.reply(
+                "Usage: /unquote <#>  (the number shown in /quotes)",
+                disable_notification=True,
+            )
             return
+        # Tolerate a leading "#" so users can paste "/unquote #3" straight from
+        # the list.
         try:
-            qid = int(parts[1])
+            seq = int(parts[1].lstrip("#"))
         except ValueError:
-            await msg.reply("Bad id.", disable_notification=True)
+            await msg.reply("Bad number. Try /unquote 3", disable_notification=True)
             return
         res = await rt.db.execute(
-            "DELETE FROM quotes WHERE id = $1 AND chat_id = $2",
-            qid, msg.chat.id,
+            "DELETE FROM quotes WHERE seq = $1 AND chat_id = $2",
+            seq, msg.chat.id,
         )
         deleted = int(res.split()[-1]) if res else 0
         await msg.reply(
-            "Deleted." if deleted else "Not found in this chat.",
+            f"🗑 Deleted #{seq}." if deleted else "No quote with that number here.",
             disable_notification=True,
         )
 
     @r.message(Command("tldr"))
     async def tldr(msg: Message) -> None:
         """/tldr [duration] — summarize the last window (default 24h)."""
+        if not await require_memory(rt, msg):
+            return
         await get_or_create_chat_config(rt, msg)
         parts = (msg.text or "").split()
         window_seconds = 86400
@@ -325,8 +462,9 @@ def build_router(rt: Runtime) -> Router:
             return
         joined = "\n".join(f"{r['role']}: {r['content']}" for r in rows)
         await rt.bot.send_chat_action(msg.chat.id, "typing")
-        out = await rt.openai.short_completion(
+        out = await rt.openai.cheap_completion(
             TLDR_PROMPT.format(messages=joined[:12000]), max_tokens=400,
+            chat_id=msg.chat.id,
         )
         await msg.reply(out or "(empty)", disable_notification=True)
 
@@ -366,17 +504,27 @@ def build_router(rt: Runtime) -> Router:
             )
             year_part = f"/{r['year']}" if r["year"] else ""
             note_part = f" ({r['note']})" if r["note"] else ""
+            base_label = r["label"].split(":", 1)[0]   # anniversary:wedding → anniversary
             lines.append(
                 f"{r['month']:02d}-{r['day']:02d}{year_part}  "
-                f"{r['label']:<12} {who}{note_part}"
+                f"{base_label:<12} {who}{note_part}"
             )
         await msg.reply("\n".join(lines)[:4000], disable_notification=True)
 
     @r.message(Command("catchphrases"))
     async def catchphrases(msg: Message) -> None:
+        if not await require_memory(rt, msg):
+            return
         await get_or_create_chat_config(rt, msg)
         user_id, name = await _resolve_target_user(rt, msg)
         if user_id is None:
+            if name:
+                await msg.reply(
+                    f"I don't know @{name} yet — they need to have "
+                    "spoken here first.",
+                    disable_notification=True,
+                )
+                return
             await msg.reply(
                 "Usage: /catchphrases @username (or reply to someone).",
                 disable_notification=True,
@@ -414,9 +562,18 @@ def build_router(rt: Runtime) -> Router:
 
     @r.message(Command("lexicon"))
     async def lexicon(msg: Message) -> None:
+        if not await require_memory(rt, msg):
+            return
         await get_or_create_chat_config(rt, msg)
         user_id, name = await _resolve_target_user(rt, msg)
         if user_id is None:
+            if name:
+                await msg.reply(
+                    f"I don't know @{name} yet — they need to have "
+                    "spoken here first.",
+                    disable_notification=True,
+                )
+                return
             await msg.reply(
                 "Usage: /lexicon @username (or reply to someone).",
                 disable_notification=True,
@@ -453,6 +610,8 @@ def build_router(rt: Runtime) -> Router:
 
     @r.message(Command("heatmap"))
     async def heatmap(msg: Message) -> None:
+        if not await require_memory(rt, msg):
+            return
         await get_or_create_chat_config(rt, msg)
         rows = await rt.db.fetch(
             "SELECT EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC')::int AS h, "
@@ -478,6 +637,8 @@ def build_router(rt: Runtime) -> Router:
     @r.message(Command("haiku"))
     async def haiku(msg: Message) -> None:
         """/haiku — compose a haiku about the recent chat."""
+        if not await require_memory(rt, msg):
+            return
         await get_or_create_chat_config(rt, msg)
         rows = await rt.db.fetch(
             "SELECT role, content FROM messages "
@@ -494,9 +655,83 @@ def build_router(rt: Runtime) -> Router:
         )
         await msg.reply(out or "🪷", disable_notification=True)
 
+    @r.message(Command("onthisday"))
+    async def onthisday(msg: Message) -> None:
+        """/onthisday — resurface what people said on this calendar day in
+        the past. On-demand pull; ignores the once-a-day auto-post stamp."""
+        await get_or_create_chat_config(rt, msg)
+        await rt.bot.send_chat_action(msg.chat.id, "typing")
+        result = await build_on_this_day(
+            rt.db, rt.openai, rt.settings, msg.chat.id,
+        )
+        if result is None:
+            await msg.reply(
+                "Sh-sha. Nothing in the archive for this day yet. "
+                "Give it time — the record's still filling in.",
+                disable_notification=True,
+            )
+            return
+        await msg.reply(
+            render_on_this_day(result), disable_notification=True,
+        )
+
+    @r.message(Command("redditmeme", "rmeme"))
+    async def redditmeme(msg: Message) -> None:
+        """/redditmeme [topic] (/rmeme) — no topic: a post from Reddit's
+        r/popular; with a topic: search Reddit for a meme about it. Either
+        way the caption is the post's top comment."""
+        await get_or_create_chat_config(rt, msg)
+        await rt.bot.send_chat_action(msg.chat.id, "upload_photo")
+        parts = (msg.text or "").split(None, 1)
+        topic = parts[1].strip() if len(parts) > 1 else ""
+        creds = dict(
+            user_agent=rt.settings.reddit_user_agent,
+            client_id=rt.settings.reddit_client_id,
+            client_secret=rt.settings.reddit_client_secret,
+        )
+        if topic:
+            # Judged search: candidates from the topic's own subreddit,
+            # the meme subs, sitewide, plus Giphy/Imgur when keys are
+            # configured; the cheap model picks the one that is BOTH an
+            # actual meme and about the topic — a judge rejection is an
+            # honest miss, never a random post.
+            meme = await _with_chat_action(
+                rt.bot, msg.chat.id, "upload_photo",
+                find_relevant_meme(
+                    rt.openai, [topic], topic_label=topic,
+                    chat_id=msg.chat.id,
+                    giphy_api_key=rt.settings.giphy_api_key,
+                    imgur_client_id=rt.settings.imgur_client_id,
+                    **creds,
+                ),
+            )
+        else:
+            meme = await _with_chat_action(
+                rt.bot, msg.chat.id, "upload_photo", fetch_meme(**creds),
+            )
+        if meme is None:
+            if topic:
+                await msg.reply(
+                    f"Sh-sha. Swept the feeds for “{topic}” — nothing "
+                    f"usable. Try different words.",
+                    disable_notification=True,
+                )
+            else:
+                await msg.reply(
+                    "Sh-sha. Feeds are quiet or blocking me. Try again in "
+                    "a bit. (Admin: /debug_redditmeme to see why.)",
+                    disable_notification=True,
+                )
+            return
+        if await post_meme_to_chat(rt, msg, meme) is None:
+            await msg.reply(
+                "Found one but couldn't deliver the media. Try again.",
+                disable_notification=True,
+            )
+
     @r.message(Command("this_or_that"))
     async def this_or_that(msg: Message) -> None:
-        """/this_or_that A | B — the Dude decides dramatically."""
+        """/this_or_that A | B — Dale decides, dramatically."""
         await get_or_create_chat_config(rt, msg)
         raw = (msg.text or "").split(None, 1)
         if len(raw) < 2 or "|" not in raw[1]:
@@ -513,7 +748,7 @@ def build_router(rt: Runtime) -> Router:
             )
             return
         await rt.bot.send_chat_action(msg.chat.id, "typing")
-        out = await rt.openai.short_completion(
+        out = await rt.openai.cheap_completion(
             THIS_OR_THAT_PROMPT.format(a=a, b=b),
             max_tokens=120, chat_id=msg.chat.id,
         )
@@ -521,10 +756,19 @@ def build_router(rt: Runtime) -> Router:
 
     @r.message(Command("echo"))
     async def echo(msg: Message) -> None:
-        """/echo @user [topic] — the Dude mimics that user's style."""
+        """/echo @user [topic] — Dale mimics that user's style."""
+        if not await require_memory(rt, msg):
+            return
         await get_or_create_chat_config(rt, msg)
         user_id, name = await _resolve_target_user(rt, msg)
         if user_id is None:
+            if name:
+                await msg.reply(
+                    f"I don't know @{name} yet — they need to have "
+                    "spoken here first.",
+                    disable_notification=True,
+                )
+                return
             await msg.reply(
                 "Usage: /echo @username [topic]  (or reply to someone).",
                 disable_notification=True,
@@ -547,7 +791,7 @@ def build_router(rt: Runtime) -> Router:
             return
         examples = "\n".join(f"- {r['content']}" for r in rows)
         await rt.bot.send_chat_action(msg.chat.id, "typing")
-        out = await rt.openai.short_completion(
+        out = await rt.openai.cheap_completion(
             ECHO_PROMPT.format(name=name, topic=topic, messages=examples[:4000]),
             max_tokens=200, chat_id=msg.chat.id,
         )
@@ -555,6 +799,69 @@ def build_router(rt: Runtime) -> Router:
             await msg.reply("(couldn't echo)", disable_notification=True)
             return
         await msg.reply(f"[{name} voice] {out}", disable_notification=True)
+
+    @r.message(Command("fixname"))
+    async def fixname(msg: Message) -> None:
+        """/fixname <wrong> -> <right> — correct a name the bot keeps
+        getting wrong, recursively across summaries, facts, and my own
+        past messages. Use an arrow for multi-word names; otherwise the
+        first two words are taken as <wrong> <right>."""
+        cfg = await get_or_create_chat_config(rt, msg)
+        raw = (msg.text or "").split(None, 1)
+        if len(raw) < 2 or not raw[1].strip():
+            await msg.reply(
+                "Usage: /fixname <wrong> -> <right>\n"
+                "e.g. /fixname Matt -> Sarah   (or: /fixname Matt Sarah)",
+                disable_notification=True,
+            )
+            return
+        arg = raw[1].strip()
+        if "->" in arg:
+            wrong, right = (s.strip() for s in arg.split("->", 1))
+        elif "→" in arg:
+            wrong, right = (s.strip() for s in arg.split("→", 1))
+        else:
+            parts = arg.split()
+            if len(parts) < 2:
+                await msg.reply(
+                    "Need both names: /fixname <wrong> -> <right>",
+                    disable_notification=True,
+                )
+                return
+            wrong, right = parts[0], parts[1]
+        if not wrong or not right:
+            await msg.reply(
+                "Both names need to be non-empty.", disable_notification=True,
+            )
+            return
+        if not cfg.memory_enabled:
+            await msg.reply(
+                "Memory's off in this chat, so there's nothing stored to "
+                "correct.",
+                disable_notification=True,
+            )
+            return
+        counts = await rt.memory.correct_name(msg.chat.id, wrong, right)
+        total = counts["summaries"] + counts["facts"] + counts["messages"]
+        await rt.command_log.add(
+            msg.chat.id, msg.from_user.id if msg.from_user else None,
+            "/fixname", f"{wrong} -> {right}", True,
+        )
+        if total == 0:
+            await msg.reply(
+                f"Couldn't find “{wrong}” anywhere in my notes — nothing to "
+                f"fix. (I never rewrite what people actually typed, only my "
+                f"own notes and summaries.)",
+                disable_notification=True,
+            )
+            return
+        await msg.reply(
+            f"Fixed. Replaced “{wrong}” → “{right}” across "
+            f"{counts['summaries']} summary, {counts['facts']} fact(s), and "
+            f"{counts['messages']} of my own message(s). Sh-sha. The record's "
+            f"straight now.",
+            disable_notification=True,
+        )
 
     @r.message(Command("roast"))
     async def roast(msg: Message) -> None:
@@ -580,7 +887,16 @@ def build_router(rt: Runtime) -> Router:
                         "or you defeat the anonymous part.",
                     )
             except Exception:
-                pass
+                # They've never DM'd the bot, so the explanation can't be
+                # delivered — without this note their message just vanishes.
+                try:
+                    await msg.answer(
+                        "(That /confess was removed — confessions only work "
+                        "in my DM, so they stay anonymous.)",
+                        disable_notification=True,
+                    )
+                except Exception:
+                    pass
             return
         parts = (msg.text or "").split(None, 1)
         if len(parts) < 2:
@@ -604,7 +920,7 @@ def build_router(rt: Runtime) -> Router:
 
     @r.message(Command("lyric"))
     async def lyric(msg: Message) -> None:
-        """/lyric <line> — the Dude confidently mishears the lyric."""
+        """/lyric <line> — Dale confidently mishears the lyric."""
         await get_or_create_chat_config(rt, msg)
         parts = (msg.text or "").split(None, 1)
         if len(parts) < 2:
@@ -615,7 +931,7 @@ def build_router(rt: Runtime) -> Router:
             return
         line = parts[1].strip()[:300]
         await rt.bot.send_chat_action(msg.chat.id, "typing")
-        out = await rt.openai.short_completion(
+        out = await rt.openai.cheap_completion(
             MISHEARD_LYRIC_PROMPT.format(line=line),
             max_tokens=120, chat_id=msg.chat.id,
         )
@@ -630,6 +946,8 @@ def build_router(rt: Runtime) -> Router:
     @r.message(Command("whoslurking"))
     async def whoslurking(msg: Message) -> None:
         """/whoslurking — users who've spoken here but not in the last 7 days."""
+        if not await require_memory(rt, msg):
+            return
         await get_or_create_chat_config(rt, msg)
         rows = await rt.db.fetch(
             """
@@ -697,11 +1015,21 @@ def build_router(rt: Runtime) -> Router:
     @r.message(Command("config"))
     async def config_wizard(msg: Message) -> None:
         await get_or_create_chat_config(rt, msg)
+        if not await _can_edit_config(
+            rt, msg.from_user.id if msg.from_user else None,
+            msg.chat, msg.chat.id,
+        ):
+            await msg.reply(
+                "Only chat admins can open the settings wizard.",
+                disable_notification=True,
+            )
+            return
         cfg = await rt.chats.get_config(msg.chat.id)
         await msg.reply(
             _config_wizard_header(cfg, msg.chat.id, is_dm_scoped=False),
             reply_markup=_config_keyboard(cfg, target_chat_id=msg.chat.id),
             disable_notification=True,
+            parse_mode="HTML",
         )
 
     @r.callback_query(F.data.startswith("cfg:"))
@@ -722,8 +1050,12 @@ def build_router(rt: Runtime) -> Router:
             await cb.answer("Stale wizard — re-open /config.", show_alert=True)
             return
         field = parts[2]
-        if field == "noop":
-            await cb.answer()
+        if not await _can_edit_config(
+            rt, cb.from_user.id if cb.from_user else None,
+            cb.message.chat, target_chat_id,
+        ):
+            await cb.answer("Only chat admins can change settings.",
+                            show_alert=True)
             return
         cfg = await rt.chats.get_config(target_chat_id)
         if not cfg:
@@ -737,6 +1069,10 @@ def build_router(rt: Runtime) -> Router:
             "voice": ("voice_transcribe", not cfg.voice_transcribe),
             "memory": ("memory_enabled", not cfg.memory_enabled),
             "ether": ("ether_enabled", not cfg.ether_enabled),
+            "ducknames": ("duck_names_public", not cfg.duck_names_public),
+            "monthlyrecap": ("monthly_recap_enabled", not cfg.monthly_recap_enabled),
+            "automod": ("automod_enabled", not cfg.automod_enabled),
+            "vision": ("vision_enabled", not cfg.vision_enabled),
         }
         if field in toggles:
             col, new_val = toggles[field]
@@ -747,20 +1083,37 @@ def build_router(rt: Runtime) -> Router:
                 await rt.chats.update_config(
                     target_chat_id, response_policy=new_policy,
                 )
+        elif field.startswith("ambient:"):
+            try:
+                new_ambient = float(field.split(":", 1)[1])
+            except ValueError:
+                await cb.answer("Bad ambient value.", show_alert=True)
+                return
+            new_ambient = max(0.0, min(1.0, new_ambient))
+            await rt.chats.update_config(
+                target_chat_id, ambient_probability=new_ambient,
+            )
         elif field.startswith("persona:"):
             new_persona = field.split(":", 1)[1]
             if new_persona in ("dude", "pedro", "neutral"):
                 await rt.chats.update_config(
                     target_chat_id, persona=new_persona, persona_custom=None,
                 )
+        elif field == "custompersona:clear":
+            await rt.chats.update_config(target_chat_id, persona_custom=None)
         new_cfg = await rt.chats.get_config(target_chat_id)
         # DM-scoped means the cb.message.chat.id (where the wizard is shown)
         # differs from the target_chat_id (whose config we're editing).
         is_dm_scoped = cb.message.chat.id != target_chat_id
         try:
             await cb.message.edit_text(
-                _config_wizard_header(new_cfg, target_chat_id, is_dm_scoped=is_dm_scoped),
-                reply_markup=_config_keyboard(new_cfg, target_chat_id=target_chat_id),
+                _config_wizard_header(
+                    new_cfg, target_chat_id, is_dm_scoped=is_dm_scoped,
+                ),
+                reply_markup=_config_keyboard(
+                    new_cfg, target_chat_id=target_chat_id,
+                ),
+                parse_mode="HTML",
             )
         except Exception:
             pass
@@ -770,22 +1123,97 @@ def build_router(rt: Runtime) -> Router:
 
 
 def _config_wizard_header(cfg, target_chat_id: int, *, is_dm_scoped: bool) -> str:
-    """Build the header line shown above the wizard keyboard.
+    """Build the multi-line status panel shown above the wizard keyboard.
 
-    DM-scoped renders surface the target chat id so the admin can see at a
-    glance which chat they're editing. In-group renders keep the original
-    short label.
+    Displays every field on a ChatConfig row so the admin can see the full
+    state of a chat in one glance. The format below is paired with the
+    keyboard so a button-press → row refresh shows the new value in-line.
+    DM-scoped renders include the target chat id in the title.
     """
-    if is_dm_scoped:
-        return f"⚙️ Settings for chat {target_chat_id}:"
-    return "⚙️ Chat settings:"
+    on, off = "✅", "⛔️"
+    title = (
+        f"⚙️ <b>Settings for chat <code>{target_chat_id}</code></b>"
+        if is_dm_scoped else "⚙️ <b>Chat settings</b>"
+    )
+
+    custom = (cfg.persona_custom or "").strip()
+    custom_line = (
+        f"   custom override: <i>{_truncate(custom, 80)}</i>"
+        if custom else "   custom override: <i>(none)</i>"
+    )
+
+    # 'g' trims trailing zeros so 0.03→'3%', 0.075→'7.5%', 0.00→'0%'.
+    ambient_pct = f"{cfg.ambient_probability * 100:g}%"
+
+    return (
+        f"{title}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📡 <b>Response policy:</b> <code>{cfg.response_policy}</code>\n"
+        f"   ambient probability: <code>{ambient_pct}</code> "
+        f"(<code>{cfg.ambient_probability:.2f}</code>)\n"
+        f"🎭 <b>Persona:</b> <code>{cfg.persona}</code>\n"
+        f"{custom_line}\n"
+        f"\n"
+        f"<b>Features</b>\n"
+        f"   {on if cfg.duckhunt_enabled else off} duckhunt"
+        f"   {on if cfg.share_photo_enabled else off} sharephoto\n"
+        f"   {on if cfg.comic_enabled else off} comic"
+        f"   {on if cfg.fortune_enabled else off} fortune\n"
+        f"   {on if cfg.voice_transcribe else off} voice"
+        f"   {on if cfg.memory_enabled else off} memory\n"
+        f"   {on if cfg.ether_enabled else off} ether"
+        f"   {on if cfg.duck_names_public else off} duck-names public\n"
+        f"   {on if cfg.monthly_recap_enabled else off} monthly-recap\n"
+        f"   {on if cfg.automod_enabled else off} automod"
+        f"   {on if cfg.vision_enabled else off} vision\n"
+    )
+
+
+def _truncate(text: str, limit: int) -> str:
+    """Shorten text to ``limit`` chars with an ellipsis when it overflows.
+    Used by the wizard header for persona_custom previews."""
+    text = text.replace("\n", " ").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+# Ambient probability presets exposed in the wizard. Tuned so an admin can
+# hit any reasonable spot (effectively-off → talkative) without having to
+# drop to the /chat_config slash for a precise number; the slash command is
+# still the way to set an arbitrary value like 0.07.
+_AMBIENT_PRESETS: tuple[tuple[str, float], ...] = (
+    ("0%",   0.00),
+    ("1%",   0.01),
+    ("3%",   0.03),
+    ("10%",  0.10),
+    ("25%",  0.25),
+    ("50%",  0.50),
+    ("100%", 1.00),
+)
+
+
+def _ambient_label(label: str, current: float, target: float) -> str:
+    """Mark the currently-active ambient preset with a leading dot so the
+    admin can see at a glance which preset (if any) matches the live value."""
+    return f"• {label}" if abs(current - target) < 1e-6 else label
 
 
 def _config_keyboard(cfg, *, target_chat_id: int) -> InlineKeyboardMarkup:
-    """Build the /config wizard keyboard. Mirrors fields editable via /chat_config.
+    """Build the /config wizard keyboard.
 
-    target_chat_id is encoded into every callback so the handler can edit the
-    config row of an arbitrary chat (used by the DM-scoped /config_for flow).
+    Every chat_config field is reachable from this keyboard:
+      - All 8 feature booleans (duckhunt, sharephoto, comic, fortune,
+        voice, memory, ether, ducknames public).
+      - response_policy (5 named options).
+      - ambient_probability (preset row from 0% to 100%; slash command
+        still owns the in-between values).
+      - persona (built-in choices) + clear-custom button so a stale
+        persona_custom override can be wiped in one tap.
+
+    target_chat_id is encoded into every callback so the handler can edit
+    the config row of an arbitrary chat (used by the DM-scoped
+    /config_for flow).
     """
 
     def b(label: str, data: str) -> InlineKeyboardButton:
@@ -793,18 +1221,14 @@ def _config_keyboard(cfg, *, target_chat_id: int) -> InlineKeyboardMarkup:
             text=label, callback_data=f"cfg:{target_chat_id}:{data}",
         )
 
-    def noop_btn(label: str) -> InlineKeyboardButton:
-        return InlineKeyboardButton(
-            text=label, callback_data=f"cfg:{target_chat_id}:noop",
-        )
-
     on = "ON"
     off = "off"
 
-    rows = [
+    rows: list[list[InlineKeyboardButton]] = [
         [
             b(f"Duckhunt: {on if cfg.duckhunt_enabled else off}", "duckhunt"),
-            b(f"Sharephoto: {on if cfg.share_photo_enabled else off}", "sharephoto"),
+            b(f"Sharephoto: {on if cfg.share_photo_enabled else off}",
+              "sharephoto"),
         ],
         [
             b(f"Comic: {on if cfg.comic_enabled else off}", "comic"),
@@ -816,9 +1240,18 @@ def _config_keyboard(cfg, *, target_chat_id: int) -> InlineKeyboardMarkup:
         ],
         [
             b(f"📟 Ether: {on if cfg.ether_enabled else off}", "ether"),
+            b(f"🦆 Duck names public: {on if cfg.duck_names_public else off}",
+              "ducknames"),
         ],
         [
-            noop_btn(f"Policy: {cfg.response_policy}"),
+            b(f"🗓️ Monthly recap: {on if cfg.monthly_recap_enabled else off}",
+              "monthlyrecap"),
+        ],
+        [
+            b(f"🤖 Automod bits: {on if cfg.automod_enabled else off}",
+              "automod"),
+            b(f"👁 Sees pictures: {on if cfg.vision_enabled else off}",
+              "vision"),
         ],
         [
             b("commands", "policy:commands"),
@@ -829,14 +1262,23 @@ def _config_keyboard(cfg, *, target_chat_id: int) -> InlineKeyboardMarkup:
             b("ambient", "policy:ambient"),
             b("always", "policy:always"),
         ],
-        [
-            noop_btn(f"Persona: {cfg.persona}"),
-        ],
-        [
-            b("dude", "persona:dude"),
-            b("neutral", "persona:neutral"),
-        ],
     ]
+    # Ambient probability presets: split into two rows of 4 + 3 so labels
+    # stay readable on a narrow mobile screen.
+    ambient_buttons = [
+        b(_ambient_label(label, cfg.ambient_probability, target),
+          f"ambient:{target:.2f}")
+        for label, target in _AMBIENT_PRESETS
+    ]
+    rows.append(ambient_buttons[:4])
+    rows.append(ambient_buttons[4:])
+    # Persona row + clear-custom (only useful when an override is set, but
+    # we show it always so the keyboard shape is stable).
+    rows.append([
+        b("dude", "persona:dude"),
+        b("neutral", "persona:neutral"),
+        b("🧹 clear custom", "custompersona:clear"),
+    ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -844,9 +1286,17 @@ async def _do_burn(
     rt: Runtime, msg: Message, *, prompt: str, fallback: str,
 ) -> None:
     """Shared body for /roast and /compliment."""
-    await get_or_create_chat_config(rt, msg)
+    if not await require_memory(rt, msg):
+        return
     user_id, name = await _resolve_target_user(rt, msg)
     if user_id is None:
+        if name:
+            await msg.reply(
+                f"I don't know @{name} yet — they need to have spoken "
+                "here first.",
+                disable_notification=True,
+            )
+            return
         await msg.reply(
             "Usage: that command needs an @user (or reply to them).",
             disable_notification=True,
@@ -860,7 +1310,7 @@ async def _do_burn(
     )
     examples = "\n".join(f"- {r['content']}" for r in rows) or "(no history)"
     await rt.bot.send_chat_action(msg.chat.id, "typing")
-    out = await rt.openai.short_completion(
+    out = await rt.openai.cheap_completion(
         prompt.format(name=name, messages=examples[:4000]),
         max_tokens=200, chat_id=msg.chat.id,
     )
@@ -892,7 +1342,15 @@ async def _set_date(rt: Runtime, msg: Message, *, label: str) -> None:
                 "SELECT user_id FROM users WHERE LOWER(username) = LOWER($1)",
                 tok[1:],
             )
-            target_user_id = row["user_id"] if row else None
+            if row is None:
+                # Don't silently save an ownerless date and claim success.
+                await msg.reply(
+                    f"I don't know {tok} yet — they need to have spoken "
+                    "here first.",
+                    disable_notification=True,
+                )
+                return
+            target_user_id = row["user_id"]
         else:
             arg_tokens.append(tok)
     if not arg_tokens:
@@ -909,13 +1367,18 @@ async def _set_date(rt: Runtime, msg: Message, *, label: str) -> None:
         )
         return
     month, day, year = parsed
+    # The uniqueness key is (chat_id, user_id, label). A birthday is truly
+    # one-per-user, but named anniversaries must not overwrite each other —
+    # fold the name into the stored label so "wedding" and "moving-day"
+    # coexist. Display sites strip the suffix (label.split(':')[0]).
+    stored_label = f"{label}:{note}" if label == "anniversary" and note else label
     await rt.db.execute(
         "INSERT INTO chat_dates (chat_id, user_id, label, month, day, year, note) "
         "VALUES ($1, $2, $3, $4, $5, $6, $7) "
         "ON CONFLICT (chat_id, user_id, label) DO UPDATE "
         "SET month = EXCLUDED.month, day = EXCLUDED.day, year = EXCLUDED.year, "
         "    note = EXCLUDED.note",
-        msg.chat.id, target_user_id, label, month, day, year, note,
+        msg.chat.id, target_user_id, stored_label, month, day, year, note,
     )
     await msg.reply(
         f"Got it: {label} on {month:02d}-{day:02d}"

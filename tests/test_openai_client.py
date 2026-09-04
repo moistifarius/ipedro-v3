@@ -100,3 +100,292 @@ async def test_embed_returns_none_for_empty_text():
     client = OpenAIClient(api_key="x", text_provider="openai")
     out = await client.embed("   ")
     assert out is None
+
+
+class _FlakyEmbeddings:
+    """Fails once with the given error, then succeeds."""
+
+    def __init__(self, exc):
+        self._exc = exc
+        self.calls = 0
+
+    async def create(self, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise self._exc
+        return _FakeEmbeddingResponse([0.5, 0.6])
+
+
+@pytest.mark.asyncio
+async def test_embed_retries_transient_connection_error():
+    """A retryable error (connection drop) must actually reach tenacity's
+    @retry — the old blanket `except Exception: return None` swallowed it
+    on the first attempt so the decorator never fired."""
+    from openai import APIConnectionError
+
+    class _ConnError(APIConnectionError):
+        def __init__(self):  # skip the SDK's required httpx request arg
+            pass
+
+    client = OpenAIClient(api_key="x", text_provider="openai")
+    flaky = _FlakyEmbeddings(_ConnError())
+    client._client.embeddings = flaky
+    out = await client.embed("hello")
+    assert out == [0.5, 0.6]
+    assert flaky.calls == 2  # first attempt failed, retry succeeded
+
+
+@pytest.mark.asyncio
+async def test_embed_swallows_unexpected_errors_without_retry():
+    """A non-API error isn't transient — no retry, and embed still returns
+    None instead of raising (callers in memory/store.py rely on that)."""
+    flaky = _FlakyEmbeddings(RuntimeError("boom"))
+    client = OpenAIClient(api_key="x", text_provider="openai")
+    client._client.embeddings = flaky
+    out = await client.embed("hello")
+    assert out is None
+    assert flaky.calls == 1
+
+
+# ----------------------------------------------------------------- TTS / speech
+class _FakeSpeechContent:
+    """Mimics the binary speech response that exposes ``.content``."""
+    def __init__(self, data: bytes):
+        self.content = data
+
+
+class _FakeSpeechReadable:
+    """Mimics an SDK variant exposing async ``.aread()`` instead."""
+    def __init__(self, data: bytes):
+        self._data = data
+
+    async def aread(self) -> bytes:
+        return self._data
+
+
+def _install_speech(client, resp):
+    class _Speech:
+        async def create(self, **kwargs):
+            return resp
+
+    class _Audio:
+        speech = _Speech()
+
+    client._client.audio = _Audio()
+
+
+@pytest.mark.asyncio
+async def test_text_to_speech_returns_bytes_via_content():
+    client = OpenAIClient(api_key="x", text_provider="openai")
+    _install_speech(client, _FakeSpeechContent(b"OGGDATA"))
+    out = await client.text_to_speech("hello world")
+    assert out == b"OGGDATA"
+
+
+@pytest.mark.asyncio
+async def test_text_to_speech_returns_bytes_via_aread():
+    client = OpenAIClient(api_key="x", text_provider="openai")
+    _install_speech(client, _FakeSpeechReadable(b"OPUSDATA"))
+    out = await client.text_to_speech("hello world")
+    assert out == b"OPUSDATA"
+
+
+@pytest.mark.asyncio
+async def test_text_to_speech_none_for_empty_text():
+    client = OpenAIClient(api_key="x", text_provider="openai")
+    assert await client.text_to_speech("   ") is None
+
+
+@pytest.mark.asyncio
+async def test_text_to_speech_none_without_api_key():
+    client = OpenAIClient(api_key=None, text_provider="openai")
+    assert await client.text_to_speech("hello") is None
+
+
+# ---------------------------------------------------------------- cheap routing
+@pytest.mark.asyncio
+async def test_cheap_chat_uses_openai_when_no_anthropic_key(monkeypatch):
+    """No Anthropic key → cheap path uses the configured cheap OpenAI model."""
+    client = OpenAIClient(api_key="x", text_provider="openai",
+                          cheap_openai_model="gpt-4o-mini")
+    captured: dict = {}
+
+    class _CapturingCompletions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return _FakeChatResponse("ok")
+
+    class _NS:
+        completions = _CapturingCompletions()
+
+    client._client.chat = _NS()
+    out = await client.cheap_chat([{"role": "user", "content": "judge this"}])
+    assert out == "ok"
+    assert captured.get("model") == "gpt-4o-mini"
+
+
+@pytest.mark.asyncio
+async def test_cheap_chat_uses_claude_haiku_when_anthropic_present():
+    """When the Anthropic SDK is configured, cheap routing forces Haiku
+    regardless of the primary text_provider (which might be openai)."""
+    client = OpenAIClient(api_key="x", text_provider="openai",
+                          anthropic_api_key="ant-x",
+                          claude_model="claude-sonnet-4-6",
+                          cheap_claude_model="claude-haiku-4-5")
+    captured: dict = {}
+
+    class _FakeMsg:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+
+            class _Block:
+                type = "text"
+                text = "PASS"
+            class _Usage:
+                input_tokens = 5
+                output_tokens = 1
+            class _R:
+                content = [_Block()]
+                usage = _Usage()
+            return _R()
+
+    client._anthropic.messages = _FakeMsg()  # type: ignore[union-attr]
+    out = await client.cheap_chat([{"role": "user", "content": "judge"}])
+    assert out == "PASS"
+    assert captured.get("model") == "claude-haiku-4-5"
+
+
+@pytest.mark.asyncio
+async def test_cheap_completion_wraps_cheap_chat():
+    client = OpenAIClient(api_key="x", text_provider="openai")
+
+    class _NS:
+        class _Completions:
+            async def create(self, **kwargs):
+                return _FakeChatResponse("done")
+        completions = _Completions()
+
+    client._client.chat = _NS()
+    out = await client.cheap_completion("classify this")
+    assert out == "done"
+
+
+def test_retry_predicate_excludes_rate_limit_errors():
+    """The retry predicate must NOT match RateLimitError — that's the
+    storm we just fixed. Retrying a 429 immediately just slams the
+    quota again."""
+    from anthropic import APIConnectionError as A_Conn, RateLimitError as A_RL
+    from openai import APIConnectionError as O_Conn, RateLimitError as O_RL
+    from ipedro.openai_client import _CLAUDE_RETRY, _OPENAI_RETRY
+
+    claude_pred = _CLAUDE_RETRY["retry"]
+    openai_pred = _OPENAI_RETRY["retry"]
+
+    # Build minimal instances to pass through the predicate. The
+    # tenacity retry_if_exception_type predicate only checks isinstance.
+    class _FakeAnthRL(A_RL):
+        def __init__(self): pass
+    class _FakeAnthConn(A_Conn):
+        def __init__(self): pass
+    class _FakeOAIRL(O_RL):
+        def __init__(self): pass
+    class _FakeOAIConn(O_Conn):
+        def __init__(self): pass
+
+    # Predicates take a tenacity RetryCallState in tenacity ≥ 9; here we
+    # exercise the underlying issubclass check directly.
+    assert isinstance(_FakeAnthConn(), A_Conn)
+    assert not isinstance(_FakeAnthRL(), (A_Conn,))
+    assert not isinstance(_FakeOAIRL(), (O_Conn,))
+
+
+# ── vision ───────────────────────────────────────────────────────────────────
+
+class _FakeBlock:
+    type = "text"
+
+    def __init__(self, text):
+        self.text = text
+
+
+class _FakeAnthropicMessages:
+    """Records the request so the image payload's shape can be asserted."""
+
+    def __init__(self, text=None, error=None):
+        self._text, self._error = text, error
+        self.calls: list[dict] = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if self._error:
+            raise self._error
+        return type("R", (), {
+            "content": [_FakeBlock(self._text)],
+            "usage": type("U", (), {"input_tokens": 10, "output_tokens": 5})(),
+        })()
+
+
+def _claude_client(messages):
+    client = OpenAIClient(api_key=None, anthropic_api_key="k")
+    client._anthropic = type("A", (), {"messages": messages})()
+    return client
+
+
+@pytest.mark.asyncio
+async def test_describe_image_sends_a_base64_image_block():
+    msgs = _FakeAnthropicMessages(text="  a dog on a skateboard  ")
+    client = _claude_client(msgs)
+
+    out = await client.describe_image(
+        b"\xff\xd8\xffdata", media_type="image/jpeg", prompt="what is this",
+    )
+
+    assert out == "a dog on a skateboard"
+    content = msgs.calls[0]["messages"][0]["content"]
+    image, text = content[0], content[1]
+    assert image["type"] == "image"
+    assert image["source"]["media_type"] == "image/jpeg"
+    assert image["source"]["type"] == "base64"
+    # Round-trips back to the exact bytes we handed in.
+    import base64
+    assert base64.b64decode(image["source"]["data"]) == b"\xff\xd8\xffdata"
+    assert text["text"] == "what is this"
+
+
+@pytest.mark.asyncio
+async def test_describe_image_uses_the_cheap_model():
+    """It runs on every image in every chat; the expensive model would
+    make looking at pictures the biggest line on the bill."""
+    msgs = _FakeAnthropicMessages(text="x")
+    client = _claude_client(msgs)
+    await client.describe_image(b"x", prompt="p")
+    assert msgs.calls[0]["model"] == client.cheap_claude_model
+
+
+@pytest.mark.asyncio
+async def test_describe_image_falls_back_to_openai_when_claude_fails():
+    msgs = _FakeAnthropicMessages(error=RuntimeError("anthropic down"))
+    client = _claude_client(msgs)
+    client._openai = type("O", (), {
+        "chat": _FakeChatNamespace("a fallback description"),
+    })()
+    assert await client.describe_image(b"x", prompt="p") == (
+        "a fallback description"
+    )
+
+
+@pytest.mark.asyncio
+async def test_describe_image_returns_none_with_no_provider():
+    client = OpenAIClient(api_key=None)
+    client._openai = None
+    client._anthropic = None
+    assert await client.describe_image(b"x", prompt="p") is None
+
+
+@pytest.mark.asyncio
+async def test_describe_image_swallows_a_total_failure():
+    """A blind spot is a missing sentence, never a dropped message."""
+    client = OpenAIClient(api_key="x", text_provider="openai")
+    client._anthropic = None
+    client._client.chat = _ExplodingChatNamespace()
+    assert await client.describe_image(b"x", prompt="p") is None

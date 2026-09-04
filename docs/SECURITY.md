@@ -33,9 +33,6 @@
 
 ## Known limitations
 
-- `/aiedit` and `/aivar` are intentionally stubbed: the legacy API they
-  used was deprecated. They are kept for command-name compatibility; the
-  user receives a clear message.
 - Voice transcription is disabled if the chat sets `voice off`. Voice
   notes themselves are downloaded to memory only — they are not persisted
   to disk.

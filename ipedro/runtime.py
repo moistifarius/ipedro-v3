@@ -12,7 +12,6 @@ from ipedro.db.repositories import ChatRepo, CommandLogRepo, UserRepo
 from ipedro.duckhunt.service import DuckhuntService
 from ipedro.memory.store import MemoryStore
 from ipedro.openai_client import OpenAIClient
-from ipedro.persona_state import PersonaStateService
 
 
 @dataclass
@@ -26,5 +25,4 @@ class Runtime:
     chats: ChatRepo
     users: UserRepo
     command_log: CommandLogRepo
-    persona_state: PersonaStateService
     pgvector_available: bool

@@ -13,9 +13,7 @@ from ipedro.auth import is_admin_user
 from ipedro.handlers.common import display_name
 from ipedro.reminders import parse_duration
 from ipedro.runtime import Runtime
-from ipedro.user_flags import (
-    clear_flag, has_flag, list_flags, set_flag, VALID_FLAGS,
-)
+from ipedro.user_flags import clear_flag, list_flags, set_flag
 
 log = logging.getLogger(__name__)
 
@@ -33,9 +31,13 @@ async def _admin_or_chat_admin(rt: Runtime, msg: Message) -> bool:
         return False
 
 
-async def _resolve_target_user(rt: Runtime, msg: Message) -> int | None:
+async def _resolve_target_user(
+    rt: Runtime, msg: Message,
+) -> tuple[int, str] | None:
+    """Resolve the target to (user_id, human label) for replies."""
     if msg.reply_to_message and msg.reply_to_message.from_user:
-        return msg.reply_to_message.from_user.id
+        u = msg.reply_to_message.from_user
+        return u.id, display_name(u)
     parts = (msg.text or "").split()
     for tok in parts[1:]:
         if tok.startswith("@"):
@@ -44,7 +46,7 @@ async def _resolve_target_user(rt: Runtime, msg: Message) -> int | None:
                 tok[1:],
             )
             if row:
-                return row["user_id"]
+                return row["user_id"], tok
     return None
 
 
@@ -71,20 +73,23 @@ def build_router(rt: Runtime) -> Router:
                 disable_notification=True,
             )
             return
+        target_id, label = target
         # Optional duration is the last non-@ arg.
         parts = (msg.text or "").split()
         ttl = None
+        dur_tok = None
         for tok in reversed(parts[1:]):
             if tok.startswith("@"):
                 continue
             sec = parse_duration(tok)
             if sec is not None:
                 ttl = timedelta(seconds=sec)
+                dur_tok = tok
             break
-        await set_flag(rt.db, msg.chat.id, target, "shutup", ttl=ttl)
-        suffix = f" for {parts[-1]}" if ttl else " indefinitely"
+        await set_flag(rt.db, msg.chat.id, target_id, "shutup", ttl=ttl)
+        suffix = f" for {dur_tok}" if ttl else " indefinitely"
         await msg.reply(
-            f"🤐 Will ignore user {target}{suffix}.",
+            f"🤐 Will ignore {label}{suffix}.",
             disable_notification=True,
         )
 
@@ -98,7 +103,7 @@ def build_router(rt: Runtime) -> Router:
                 "Usage: /unshutup @user", disable_notification=True,
             )
             return
-        ok = await clear_flag(rt.db, msg.chat.id, target, "shutup")
+        ok = await clear_flag(rt.db, msg.chat.id, target[0], "shutup")
         await msg.reply(
             "Listening again." if ok else "Wasn't shutup.",
             disable_notification=True,
@@ -115,9 +120,10 @@ def build_router(rt: Runtime) -> Router:
                 disable_notification=True,
             )
             return
-        await set_flag(rt.db, msg.chat.id, target, "snark")
+        target_id, label = target
+        await set_flag(rt.db, msg.chat.id, target_id, "snark")
         await msg.reply(
-            f"😏 Snark dialed up for user {target}.",
+            f"😏 Snark dialed up for {label}.",
             disable_notification=True,
         )
 
@@ -131,7 +137,7 @@ def build_router(rt: Runtime) -> Router:
                 "Usage: /unsnark @user", disable_notification=True,
             )
             return
-        ok = await clear_flag(rt.db, msg.chat.id, target, "snark")
+        ok = await clear_flag(rt.db, msg.chat.id, target[0], "snark")
         await msg.reply(
             "Snark back to baseline." if ok else "Not on the snark list.",
             disable_notification=True,
@@ -146,7 +152,7 @@ def build_router(rt: Runtime) -> Router:
         if target is None:
             await msg.reply("Usage: /ungrudge @user", disable_notification=True)
             return
-        ok = await clear_flag(rt.db, msg.chat.id, target, "grudge")
+        ok = await clear_flag(rt.db, msg.chat.id, target[0], "grudge")
         await msg.reply(
             "Grudge dropped." if ok else "No grudge against them.",
             disable_notification=True,

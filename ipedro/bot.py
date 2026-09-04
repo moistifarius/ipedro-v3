@@ -8,7 +8,6 @@ import signal
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
 
 from ipedro.config import Settings, get_settings
 from ipedro.db.migrations import apply_schema, has_pgvector
@@ -22,20 +21,22 @@ from ipedro.handlers import admin as admin_h
 from ipedro.handlers import ai as ai_h
 from ipedro.handlers import basics as basics_h
 from ipedro.handlers import chat as chat_h
+from ipedro.handlers import dale as dale_h
 from ipedro.handlers import debug as debug_h
 from ipedro.handlers import duckhunt as duck_h
+from ipedro.handlers import ether as ether_h
 from ipedro.handlers import karma as karma_h
 from ipedro.handlers import mod as mod_h
+from ipedro.handlers import quiz as quiz_h
 from ipedro.handlers import utility as utility_h
 from ipedro.logging_setup import configure_logging
 from ipedro.celebrations import run_celebrations_loop
 from ipedro.comic import run_comic_loop
-from ipedro.ether import run_ether_loop
 from ipedro.kv import kv_get
 from ipedro.personas import set_master_prompt_override
 from ipedro.memory.store import MemoryStore
 from ipedro.openai_client import OpenAIClient
-from ipedro.persona_state import PersonaStateService
+from ipedro.monthly_recap import run_monthly_recap_loop
 from ipedro.reminders import run_reminders_loop
 from ipedro.runtime import Runtime
 from ipedro.sharephoto import run_share_photo_loop
@@ -71,10 +72,15 @@ async def build_runtime(settings: Settings) -> Runtime:
         text_provider=text_provider,
         text_model=saved_openai_model or settings.openai_text_model,
         claude_model=saved_claude_model or settings.claude_text_model,
+        cheap_claude_model=settings.claude_cheap_model,
+        cheap_openai_model=settings.openai_cheap_model,
+        cache_ttl=settings.cache_ttl,
         image_model=settings.openai_image_model,
         transcription_model=settings.openai_transcription_model,
         embedding_model=settings.openai_embedding_model,
         embedding_dim=settings.openai_embedding_dim,
+        tts_model=settings.openai_tts_model,
+        tts_voice=settings.openai_tts_voice,
     )
     openai.attach_usage_db(db)
     log.info(
@@ -109,13 +115,23 @@ async def build_runtime(settings: Settings) -> Runtime:
         chats=ChatRepo(db),
         users=UserRepo(db),
         command_log=CommandLogRepo(db),
-        persona_state=PersonaStateService(db),
         pgvector_available=pgvector_available,
     )
 
 
 def build_dispatcher(rt: Runtime) -> Dispatcher:
     dp = Dispatcher()
+
+    # Last-resort error handler: an unhandled handler exception otherwise
+    # means the user's message silently gets no reply and no trace of why.
+    @dp.errors()
+    async def on_handler_error(event) -> bool:
+        log.exception(
+            "Unhandled handler error: %s", event.exception,
+            exc_info=event.exception,
+        )
+        return True
+
     # Order matters: command/admin routers first, then duckhunt action triggers,
     # then the catch-all chat handler.
     dp.include_router(basics_h.build_router(rt))
@@ -125,7 +141,10 @@ def build_dispatcher(rt: Runtime) -> Dispatcher:
     dp.include_router(utility_h.build_router(rt))
     dp.include_router(karma_h.build_router(rt))
     dp.include_router(ai_h.build_router(rt))
+    dp.include_router(quiz_h.build_router(rt))
     dp.include_router(duck_h.build_router(rt))
+    dp.include_router(ether_h.build_router(rt))
+    dp.include_router(dale_h.build_router(rt))
     dp.include_router(chat_h.build_router(rt))
     return dp
 
@@ -158,7 +177,7 @@ async def run() -> None:
         name="reminders",
     )
     celebrations_task = asyncio.create_task(
-        run_celebrations_loop(rt.bot, rt.db, stop),
+        run_celebrations_loop(rt.bot, rt.db, settings, stop),
         name="celebrations",
     )
     comic_task = asyncio.create_task(
@@ -166,14 +185,33 @@ async def run() -> None:
         name="comic",
     )
     ambient_task = asyncio.create_task(
-        run_ambient_loops(rt.bot, rt.db, rt.openai, stop),
+        run_ambient_loops(rt.bot, rt.db, rt.openai, settings, stop),
         name="ambient-loops",
     )
-    ether_task = asyncio.create_task(
-        run_ether_loop(rt.bot, rt.db, stop),
-        name="ether",
+    monthly_recap_task = asyncio.create_task(
+        run_monthly_recap_loop(rt.bot, rt.db, rt.openai, settings, stop),
+        name="monthly-recap",
     )
 
+    background_tasks = (
+        spawner_task, share_photo_task, reminders_task,
+        celebrations_task, comic_task, ambient_task,
+        monthly_recap_task,
+    )
+
+    # A background loop dying is a silently-missing feature until restart —
+    # make sure it at least screams in the log.
+    def _report_loop_death(t: asyncio.Task) -> None:
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            log.error("Background loop %r died: %r", t.get_name(), exc)
+
+    for task in background_tasks:
+        task.add_done_callback(_report_loop_death)
+
+    stop_waiter: asyncio.Task | None = None
     try:
         polling = asyncio.create_task(
             dp.start_polling(
@@ -183,26 +221,32 @@ async def run() -> None:
             name="aiogram-polling",
         )
         # Wait until either polling exits or stop is signaled.
+        stop_waiter = asyncio.create_task(stop.wait(), name="stop-waiter")
         done, _ = await asyncio.wait(
-            {polling, asyncio.create_task(stop.wait(), name="stop-waiter")},
+            {polling, stop_waiter},
             return_when=asyncio.FIRST_COMPLETED,
         )
         stop.set()
         await dp.stop_polling()
         for t in done:
-            if t.exception():
-                log.exception("Task exited with error: %s", t.exception())
+            if not t.cancelled() and t.exception() is not None:
+                log.error(
+                    "Task %r exited with error: %r", t.get_name(), t.exception(),
+                )
     finally:
         stop.set()
-        for task in (
-            spawner_task, share_photo_task, reminders_task,
-            celebrations_task, comic_task, ambient_task, ether_task,
-        ):
+        if stop_waiter is not None:
+            stop_waiter.cancel()
+        for task in background_tasks:
             task.cancel()
             try:
                 await task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
+            except Exception:
+                log.warning(
+                    "Task %r cleanup failed", task.get_name(), exc_info=True,
+                )
         try:
             await rt.bot.session.close()
         except Exception:

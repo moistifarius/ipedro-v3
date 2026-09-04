@@ -6,8 +6,8 @@ Wraps the repositories so handlers have a single object to talk to.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
-from typing import Iterable
 
 from ipedro.db.pool import Database
 from ipedro.db.repositories import (
@@ -95,3 +95,151 @@ class MemoryStore:
 
     async def delete_fact(self, fact_id: int) -> None:
         await self.facts.delete(fact_id)
+
+    async def wipe_conversation(
+        self, chat_id: int, *, include_facts: bool = False,
+    ) -> dict[str, int]:
+        """Erase a chat's stored conversation so a new persona isn't
+        fighting old precedent.
+
+        Deletes, for ``chat_id``:
+          * every stored message (both roles — the bot's old-voice
+            assistant replies are what the model mimics, and orphaned
+            user turns aren't worth keeping),
+          * the running summaries (written in/about the old persona),
+          * the embeddings (so semantic retrieval can't resurface old
+            voice), and
+          * optionally the durable facts (off by default — facts are
+            usually about *people*, not the bot's voice).
+
+        Returns a dict of {table: rows_deleted}. Idempotent; safe to run
+        on a chat with no memory.
+        """
+        def _count(status: str) -> int:
+            # asyncpg returns e.g. "DELETE 42"
+            try:
+                return int(status.split()[-1])
+            except (AttributeError, ValueError, IndexError):
+                return 0
+
+        results: dict[str, int] = {}
+        # One transaction: a failure partway must not leave e.g. embeddings
+        # wiped while the messages they point at survive.
+        async with self.db.pool.acquire() as conn:
+            async with conn.transaction():
+                results["embeddings"] = _count(await conn.execute(
+                    "DELETE FROM embeddings WHERE chat_id = $1", chat_id,
+                ))
+                results["summaries"] = _count(await conn.execute(
+                    "DELETE FROM summaries WHERE chat_id = $1", chat_id,
+                ))
+                results["messages"] = _count(await conn.execute(
+                    "DELETE FROM messages WHERE chat_id = $1", chat_id,
+                ))
+                if include_facts:
+                    results["facts"] = _count(await conn.execute(
+                        "DELETE FROM facts WHERE chat_id = $1", chat_id,
+                    ))
+        return results
+
+    async def correct_name(
+        self, chat_id: int, wrong: str, right: str,
+    ) -> dict[str, int]:
+        """Recursively fix a mis-attributed name across a chat's DERIVED
+        memory layers — the running summaries, durable facts, and the
+        bot's own assistant messages — and re-embed whatever changed so
+        semantic retrieval reflects the fix.
+
+        Raw *user* messages are deliberately left untouched: their author
+        is the ground-truth ``user_id`` from Telegram, and their body is
+        what the person literally typed (which may legitimately mention
+        the 'wrong' name). The mis-attribution the bot makes lives only in
+        the text it generates — that's what we rewrite.
+
+        Whole-word, case-insensitive replace; ``right`` is written exactly
+        as given. Returns {layer: rows_changed}.
+        """
+        results = {"summaries": 0, "facts": 0, "messages": 0}
+        if not wrong.strip() or not right.strip():
+            return results
+
+        # All text rewrites happen in ONE transaction — a failure halfway must
+        # not leave summaries renamed but facts/messages not. Re-embedding
+        # happens after commit: embeddings are recoverable, the text isn't,
+        # and an OpenAI call doesn't belong inside a DB transaction.
+        reembed_jobs: list[tuple[str, int, str]] = []   # (ref_kind, id, text)
+
+        async with self.db.pool.acquire() as conn:
+            async with conn.transaction():
+
+                async def _fix(table: str, col: str, ref_kind: str) -> int:
+                    rows = await conn.fetch(
+                        f"SELECT id, {col} AS body FROM {table} "
+                        f"WHERE chat_id = $1",
+                        chat_id,
+                    )
+                    changed = 0
+                    for r in rows:
+                        body = r["body"] or ""
+                        new = _replace_whole_word(body, wrong, right)
+                        if new == body:
+                            continue
+                        await conn.execute(
+                            f"UPDATE {table} SET {col} = $1 WHERE id = $2",
+                            new, r["id"],
+                        )
+                        reembed_jobs.append((ref_kind, r["id"], new))
+                        changed += 1
+                    return changed
+
+                results["summaries"] = await _fix("summaries", "summary", "summary")
+                results["facts"] = await _fix("facts", "fact", "fact")
+
+                # Assistant messages only; user turns are sacred.
+                rows = await conn.fetch(
+                    "SELECT id, content FROM messages "
+                    " WHERE chat_id = $1 AND role = 'assistant'",
+                    chat_id,
+                )
+                for r in rows:
+                    body = r["content"] or ""
+                    new = _replace_whole_word(body, wrong, right)
+                    if new == body:
+                        continue
+                    await conn.execute(
+                        "UPDATE messages SET content = $1 WHERE id = $2",
+                        new, r["id"],
+                    )
+                    reembed_jobs.append(("message", r["id"], new))
+                    results["messages"] += 1
+
+        for ref_kind, ref_id, new_text in reembed_jobs:
+            await self._reembed(chat_id, ref_kind, ref_id, new_text)
+        return results
+
+    async def _reembed(
+        self, chat_id: int, ref_kind: str, ref_id: int, content: str,
+    ) -> None:
+        """Recompute and upsert the embedding for a corrected row, so
+        semantic search returns the fixed text. No-op when embeddings are
+        unavailable."""
+        if not (self.openai and self.pgvector_available and content.strip()):
+            return
+        embedding = await self.openai.embed(content)
+        if embedding:
+            await self.embeddings.upsert(
+                chat_id, ref_kind, ref_id, content[:2000], embedding,
+            )
+
+
+def _replace_whole_word(text: str, wrong: str, right: str) -> str:
+    """Case-insensitive whole-word replace of ``wrong`` with ``right``.
+
+    Word boundaries keep 'Matt' from matching inside 'Mattress'. Multi-word
+    names ('Big Joe') are supported because re.escape handles the space and
+    \\b sits at the outer edges. ``right`` is inserted verbatim.
+    """
+    if not wrong:
+        return text
+    pattern = re.compile(rf"\b{re.escape(wrong)}\b", re.IGNORECASE)
+    return pattern.sub(lambda _m: right, text)
