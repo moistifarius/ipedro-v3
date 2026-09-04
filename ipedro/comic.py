@@ -50,7 +50,7 @@ async def _build_and_post(
         log.info("Comic skipped for %s: only %d msgs in 24h.", chat_id, len(rows))
         return False
     joined = "\n".join(f"{r['role']}: {r['content']}" for r in rows)[:12000]
-    scenes_text = await openai.short_completion(
+    scenes_text = await openai.cheap_completion(
         COMIC_SCENES_PROMPT.format(messages=joined),
         max_tokens=300, chat_id=chat_id,
     )

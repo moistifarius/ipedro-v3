@@ -1936,6 +1936,7 @@ def build_router(rt: Runtime) -> Router:
                 "SELECT kind, COUNT(*) AS calls, "
                 "       COALESCE(SUM(total_tokens), 0) AS tokens, "
                 "       COALESCE(SUM(cost_usd), 0) AS cost, "
+                "       COALESCE(SUM(prompt_tokens), 0) AS prompt, "
                 "       COALESCE(SUM(cache_read_tokens), 0) AS cached, "
                 "       COALESCE(SUM(cache_write_tokens), 0) AS written "
                 "  FROM openai_usage "
@@ -1949,6 +1950,7 @@ def build_router(rt: Runtime) -> Router:
                 "SELECT kind, COUNT(*) AS calls, "
                 "       COALESCE(SUM(total_tokens), 0) AS tokens, "
                 "       COALESCE(SUM(cost_usd), 0) AS cost, "
+                "       COALESCE(SUM(prompt_tokens), 0) AS prompt, "
                 "       COALESCE(SUM(cache_read_tokens), 0) AS cached, "
                 "       COALESCE(SUM(cache_write_tokens), 0) AS written "
                 "  FROM openai_usage "
@@ -1961,12 +1963,13 @@ def build_router(rt: Runtime) -> Router:
             return
         lines = [header]
         total = 0.0
-        cached_total = prompt_total = 0
+        cached_total = written_total = prompt_total = 0
         for r in rows:
             c = float(r["cost"] or 0)
             total += c
             cached_total += int(r["cached"] or 0)
-            prompt_total += int(r["tokens"] or 0)
+            written_total += int(r["written"] or 0)
+            prompt_total += int(r["prompt"] or 0)
             lines.append(
                 f"  {r['kind']:<10}  {r['calls']:>5} calls  "
                 f"{int(r['tokens']):>8} tokens  ${c:.4f}"
@@ -1979,7 +1982,7 @@ def build_router(rt: Runtime) -> Router:
             pct = cached_total / prompt_total * 100
             lines.append(
                 f"  cache: {cached_total} of {prompt_total} prompt tokens "
-                f"served from cache ({pct:.0f}%)"
+                f"read from cache ({pct:.0f}%), {written_total} written"
             )
         await msg.reply("\n".join(lines), disable_notification=True)
 

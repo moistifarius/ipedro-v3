@@ -284,9 +284,9 @@ def build_router(rt: Runtime) -> Router:
         joined = "\n".join(f"- {r['content']}" for r in reversed(rows)) or "(none)"
 
         await rt.bot.send_chat_action(msg.chat.id, "typing")
-        out = await rt.openai.short_completion(
+        out = await rt.openai.cheap_completion(
             _WHATDID_PROMPT.format(name=target_name, messages=joined),
-            max_tokens=200,
+            max_tokens=200, chat_id=msg.chat.id,
         )
         await msg.reply(
             out or f"No idea what {target_name} has been doing.",
@@ -474,8 +474,9 @@ def build_router(rt: Runtime) -> Router:
             return
         joined = "\n".join(f"{r['role']}: {r['content']}" for r in rows)
         await rt.bot.send_chat_action(msg.chat.id, "typing")
-        out = await rt.openai.short_completion(
+        out = await rt.openai.cheap_completion(
             TLDR_PROMPT.format(messages=joined[:12000]), max_tokens=400,
+            chat_id=msg.chat.id,
         )
         await msg.reply(out or "(empty)", disable_notification=True)
 

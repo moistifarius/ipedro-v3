@@ -131,8 +131,21 @@ async def test_the_clock_is_not_in_the_cached_prefix():
     """A timestamp in the prefix is the textbook silent invalidator: it
     changes every minute and re-bills everything behind it."""
     stable, _ = _split(await _ctx())
-    assert "Right now it is" not in stable[0]["text"]
-    assert "Right now it is" in stable[1]["text"]
+    # The STAMP is volatile; the sentence explaining how to read it is
+    # stable and rides in the prefix (it quotes the phrase, which is fine).
+    assert "September 2026" not in stable[0]["text"]
+    assert "Right now it is Friday, 4 September 2026" in stable[1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_the_clock_explainer_is_cached_and_the_stamp_is_not():
+    """~75 tokens of 'how to read the time and the gap markers' never
+    change; only the stamp does. Splitting them moves the explainer to a
+    tenth of the price on every reply."""
+    stable, _ = _split(await _ctx())
+    cached, volatile = stable[0]["text"], stable[1]["text"]
+    assert "Inline markers like" in cached and "Inline markers like" not in volatile
+    assert volatile.count("Right now it is") == 1
 
 
 @pytest.mark.asyncio
@@ -401,3 +414,59 @@ async def test_older_models_are_left_exactly_as_before():
         await client.chat([{"role": "user", "content": "hi"}])
         assert "thinking" not in captured, model
         assert captured["temperature"] == 1.0, model
+
+
+# ── slow-moving caller context rides in the prefix ───────────────────────────
+
+@pytest.mark.asyncio
+async def test_stable_extra_is_cached_and_extra_system_is_not():
+    """Mood and word-of-the-day hold still for hours; the snark flag is
+    per message. Same mechanism, opposite sides of the breakpoint."""
+    ctx = await _ctx(
+        stable_extra="You are in a SMUG mood right now.",
+        extra_system="The user you're replying to is on your shit list.",
+    )
+    cached, volatile = (b["text"] for b in _split(ctx)[0])
+    assert "SMUG" in cached and "SMUG" not in volatile
+    assert "shit list" in volatile and "shit list" not in cached
+
+
+# ── retrieval never pays for what is already in the request ──────────────────
+
+class _EchoStore(_Store):
+    """Retrieval that returns the message being answered, a fact already in
+    the prefix, and one genuinely new recollection."""
+
+    async def semantic_search(self, chat_id, query, k=6):
+        return [
+            {"ref_kind": "message", "ref_id": 99, "similarity": 1.0,
+             "content": query, "author_name": "Matt"},
+            {"ref_kind": "fact", "ref_id": 3, "similarity": 0.6,
+             "content": "Matt likes thing number 3", "author_name": None},
+            {"ref_kind": "message", "ref_id": 7, "similarity": 0.5,
+             "content": "the propane incident of 2019", "author_name": "Luke"},
+        ]
+
+
+@pytest.mark.asyncio
+async def test_retrieval_drops_hits_already_in_the_request():
+    """The top hit is reliably the message just sent (it was embedded a
+    moment ago, similarity 1.0), and the latest facts are embedded too and
+    already printed in full. Each is ~60 tokens of pure duplicate."""
+    ctx = await _ctx("what about propane", store=_EchoStore())
+    volatile = _split(ctx)[0][1]["text"]
+    assert "the propane incident of 2019" in volatile          # new: kept
+    assert "Matt likes thing number 3" not in volatile          # in prefix: dropped
+    retrieved = volatile.split("Potentially relevant", 1)[1]
+    assert "what about propane" not in retrieved                # itself: dropped
+
+
+@pytest.mark.asyncio
+async def test_retrieval_block_is_omitted_when_every_hit_was_a_duplicate():
+    class _OnlyEcho(_Store):
+        async def semantic_search(self, chat_id, query, k=6):
+            return [{"ref_kind": "message", "ref_id": 1, "similarity": 1.0,
+                     "content": query, "author_name": "Matt"}]
+
+    ctx = await _ctx("what about propane", store=_OnlyEcho())
+    assert "Potentially relevant" not in _split(ctx)[0][1]["text"]

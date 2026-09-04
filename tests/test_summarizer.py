@@ -18,13 +18,19 @@ from ipedro.memory.summarizer import force_summarize, maybe_summarize
 
 
 class FakeAI:
-    """Returns queued responses; records every short_completion call."""
+    """Returns queued responses; records every cheap_completion call.
+
+    Only the cheap tier is faked on purpose: summarization and fact
+    extraction are compression, not reasoning, and routing them back to
+    the main model would silently multiply the per-pass cost. A call to
+    short_completion here is an AttributeError — that is the pin.
+    """
 
     def __init__(self, responses):
         self._responses = list(responses)
         self.calls: list[dict] = []
 
-    async def short_completion(self, prompt, *, max_tokens=200, chat_id=None):
+    async def cheap_completion(self, prompt, *, max_tokens=200, chat_id=None):
         self.calls.append({"prompt": prompt, "chat_id": chat_id})
         return self._responses.pop(0) if self._responses else None
 

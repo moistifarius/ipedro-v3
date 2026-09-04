@@ -38,7 +38,9 @@ def build_router(rt: Runtime) -> Router:
             )
             return
         await msg.bot.send_chat_action(msg.chat.id, "typing")
-        answer = await rt.openai.short_completion(question, max_tokens=400)
+        answer = await rt.openai.short_completion(
+            question, max_tokens=400, chat_id=msg.chat.id,
+        )
         await msg.reply(answer or "(no response)", disable_notification=True)
 
     @r.message(Command("aigen", "generate"))

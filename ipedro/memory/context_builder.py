@@ -197,17 +197,25 @@ def _gap_marker(
     return f"[⏳ {stamp}, {span}]"
 
 
+# The explanation of how to read the clock and the gap markers never
+# changes, so it lives in the cached prefix. Only the stamp itself is
+# volatile — one short line, after the breakpoint.
+_CLOCK_SYSTEM = (
+    "A 'Right now it is …' line gives the current local time. Use it to "
+    "judge the time of day, the date, and how long ago earlier messages "
+    "were sent. Inline markers like '[⏳ Sun 14 Jun 2026, 9:12 AM PDT, "
+    "about 3 days later]' show silences between messages with the exact "
+    "wall-clock time of the next one. Only mention the time or date when "
+    "it's actually relevant."
+)
+
+
 def _format_now(now: datetime, tz) -> str:
-    """The 'right now it is …' system line, localized to the bot's tz."""
+    """The 'right now it is …' stamp, localized to the bot's tz. Kept to
+    the bare stamp: every byte here is re-billed at full price per reply."""
     # e.g. "Saturday, 21 June 2026, 2:47 PM PDT"
     stamp = now.astimezone(tz).strftime("%A, %-d %B %Y, %-I:%M %p %Z").strip()
-    return (
-        f"Right now it is {stamp}. Use this to judge the time of day, the "
-        f"date, and how long ago earlier messages were sent. Inline markers "
-        f"like '[⏳ Sun 14 Jun 2026, 9:12 AM PDT, about 3 days later]' show "
-        f"silences between messages with the exact wall-clock time of the "
-        f"next one. Only mention the time or date when it's actually relevant."
-    )
+    return f"Right now it is {stamp}."
 
 
 async def build_context(
@@ -220,6 +228,7 @@ async def build_context(
     latest_user_text: str,
     latest_user_name: str | None = None,
     extra_system: str | None = None,
+    stable_extra: str | None = None,
     memory_enabled: bool = True,
     now: datetime | None = None,
     persona_override: str | None = None,
@@ -267,6 +276,12 @@ async def build_context(
         stable.append(capabilities)
     if not persona_override:
         stable.append(_STYLE_SYSTEM)
+    stable.append(_CLOCK_SYSTEM)
+    # Slow-moving caller context — the chat's mood, word of the day, a
+    # stuck word. Byte-stable for hours at a time, so it belongs here, not
+    # in the per-request tail with the snark flag.
+    if stable_extra:
+        stable.append(stable_extra)
 
     # Summary and facts change only when the summarizer runs (every ~80
     # messages), so they belong inside the cached prefix rather than after
@@ -309,6 +324,17 @@ async def build_context(
     _add({"role": "system", "content": _format_now(now, settings.tzinfo)})
     if extra_system:
         _add({"role": "system", "content": extra_system})
+    # Retrieval is embedded against the message being answered, so its top
+    # hit is reliably that very message (similarity 1.0) — and the latest
+    # summary and the top facts are embedded too, and already printed in
+    # full above. A hit that is already in the request is 60-odd tokens
+    # of pure duplicate; drop it rather than pay for it twice.
+    already = "\n".join(stable) + "\n" + latest_user_text
+    hits = [
+        h for h in hits
+        if (h.get("content") or "").strip()
+        and (h.get("content") or "")[:300].strip() not in already
+    ]
     if hits:
         _add({"role": "system", "content": (
             "Potentially relevant things said earlier (the name is who "

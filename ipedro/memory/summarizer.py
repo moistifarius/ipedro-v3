@@ -66,7 +66,7 @@ async def maybe_summarize(
         return
 
     msg_block = _format_messages_block(batch)
-    summary_text = await openai.short_completion(
+    summary_text = await openai.cheap_completion(
         SUMMARIZE_PROMPT.format(
             prior=(last.summary if last else "(none)"),
             messages=msg_block,
@@ -88,8 +88,8 @@ async def maybe_summarize(
     log.info("Stored new summary for chat %s covering up to msg %s.", chat_id, batch[-1].id)
 
     # Extract durable facts in the same pass.
-    facts_text = await openai.short_completion(
-        FACT_EXTRACT_PROMPT.format(messages=msg_block), max_tokens=200,
+    facts_text = await openai.cheap_completion(
+        FACT_EXTRACT_PROMPT.format(messages=msg_block), max_tokens=320,
         chat_id=chat_id,
     )
     log.info("Fact extraction for chat %s returned: %r", chat_id, facts_text)
@@ -137,7 +137,7 @@ async def force_summarize(
             return {"ok": False, "reason": "no messages returned for range."}
 
         msg_block = _format_messages_block(batch)
-        summary_text = await openai.short_completion(
+        summary_text = await openai.cheap_completion(
             SUMMARIZE_PROMPT.format(
                 prior=(last.summary if last else "(none)"),
                 messages=msg_block,
@@ -153,8 +153,8 @@ async def force_summarize(
             log.info("Forced summary for chat %s up to msg %s.", chat_id, batch[-1].id)
 
         facts_added: list[str] = []
-        facts_text = await openai.short_completion(
-            FACT_EXTRACT_PROMPT.format(messages=msg_block), max_tokens=200,
+        facts_text = await openai.cheap_completion(
+            FACT_EXTRACT_PROMPT.format(messages=msg_block), max_tokens=320,
             chat_id=chat_id,
         )
         log.info("Fact extraction for chat %s returned: %r", chat_id, facts_text)
