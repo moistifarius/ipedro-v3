@@ -79,9 +79,13 @@ _OPENAI_TEXT_PRICE_PER_1K = {
     "gpt-4.1": (0.002, 0.008),
 }
 _CLAUDE_TEXT_PRICE_PER_1K = {
+    "claude-fable-5":    (0.010, 0.050),
+    "claude-opus-5":     (0.005, 0.025),
+    "claude-opus-4-8":   (0.005, 0.025),
     "claude-opus-4-7":   (0.005, 0.025),
     "claude-opus-4-6":   (0.005, 0.025),
     "claude-opus-4-5":   (0.005, 0.025),
+    "claude-sonnet-5":   (0.002, 0.010),
     "claude-sonnet-4-6": (0.003, 0.015),
     "claude-sonnet-4-5": (0.003, 0.015),
     "claude-haiku-4-5":  (0.001, 0.005),
@@ -131,6 +135,26 @@ _CACHE_MIN_DEFAULT = 4096   # unknown model: assume the strictest we know of
 # silently under-reports the moment caching is switched on.
 _CACHE_WRITE_MULTIPLIER = 1.25
 _CACHE_READ_MULTIPLIER = 0.1
+
+
+# Models that removed temperature/top_p/top_k: passing one is a 400, not a
+# warning. Everything older still accepts them, so this is a deny-list.
+_NO_SAMPLING_PREFIXES: tuple[str, ...] = (
+    "claude-fable-5", "claude-mythos-5",
+    "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7",
+    "claude-sonnet-5",
+)
+
+# Newer models that also price cheaper than what this bot runs today. Not
+# switched automatically: a model change moves the persona's voice, and
+# that is the operator's call, not a cost optimization to apply silently.
+CHEAPER_ALTERNATIVES = {
+    "claude-sonnet-4-6": "claude-sonnet-5",   # $3/$15 -> $2/$10 per MTok
+}
+
+
+def _rejects_sampling(model: str) -> bool:
+    return model.startswith(_NO_SAMPLING_PREFIXES)
 
 
 def _cache_minimum(model: str) -> int:
@@ -534,8 +558,11 @@ class AIClient:
         }
         if system:
             kwargs["system"] = system
-        # Opus 4.7 rejects sampling parameters; skip them on that model.
-        if not m.startswith("claude-opus-4-7"):
+        # Sampling parameters were removed across the newer generation, not
+        # just on Opus 4.7 — sending temperature to any of them is a 400 on
+        # every request. This gate is what keeps /ai_model able to point at
+        # a current model at all.
+        if not _rejects_sampling(m):
             kwargs["temperature"] = max(0.0, min(1.0, temperature))
         try:
             resp = await self._anthropic.messages.create(**kwargs)

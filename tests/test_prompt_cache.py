@@ -301,3 +301,42 @@ async def test_the_clock_survives_at_the_production_budget():
     system = "\n".join(m["content"] for m in ctx.messages if m["role"] == "system")
     assert "Right now it is" in system
     assert ctx.tokens <= 6000
+
+
+# ── the sampling gate: what makes a model switch possible at all ─────────────
+
+def test_the_newer_generation_rejects_sampling_parameters():
+    """Sending temperature to any of these is a 400 on every request. The
+    gate used to name Opus 4.7 alone, so pointing /ai_model at any other
+    current model would have bricked the bot."""
+    from ipedro.openai_client import _rejects_sampling
+
+    for model in ("claude-sonnet-5", "claude-opus-5", "claude-opus-4-8",
+                  "claude-opus-4-7", "claude-fable-5-1"):
+        assert _rejects_sampling(model), model
+    # The models this bot runs today still take temperature.
+    for model in ("claude-sonnet-4-6", "claude-haiku-4-5"):
+        assert not _rejects_sampling(model), model
+
+
+def test_every_model_we_can_be_pointed_at_has_a_price():
+    """A missing row falls back to Sonnet's rate, which would quietly
+    misreport the bill for a model in a different tier."""
+    from ipedro.openai_client import (
+        _CLAUDE_TEXT_PRICE_PER_1K, CHEAPER_ALTERNATIVES,
+    )
+
+    priced = tuple(_CLAUDE_TEXT_PRICE_PER_1K)
+    for model in (*CHEAPER_ALTERNATIVES, *CHEAPER_ALTERNATIVES.values()):
+        assert model.startswith(priced), f"{model} has no price row"
+
+
+def test_the_named_alternative_is_actually_cheaper():
+    """The whole point of the mapping — if a row stops being cheaper it
+    should not be advertised as a saving."""
+    from ipedro.openai_client import CHEAPER_ALTERNATIVES
+
+    for current, better in CHEAPER_ALTERNATIVES.items():
+        now = _claude_text_price(current, 2000, 100)
+        then = _claude_text_price(better, 2000, 100)
+        assert then < now, f"{better} is not cheaper than {current}"
