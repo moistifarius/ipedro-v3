@@ -61,10 +61,11 @@ async def test_wipe_clears_messages_summaries_embeddings_not_facts_by_default():
     counts = await store.wipe_conversation(chat_id=99)
 
     tables = {t for t, _ in db.deleted}
-    assert tables == {"messages", "summaries", "embeddings"}
+    assert tables == {"messages", "summaries", "embeddings", "media_library"}
     assert "facts" not in tables                      # kept by default
     assert all(cid == 99 for _, cid in db.deleted)    # scoped to the chat
-    assert counts == {"messages": 42, "summaries": 3, "embeddings": 40}
+    assert counts == {"messages": 42, "summaries": 3, "embeddings": 40,
+                      "media_library": 0}
 
 
 @pytest.mark.asyncio
@@ -85,7 +86,8 @@ async def test_wipe_on_empty_chat_returns_zeros():
 
     counts = await store.wipe_conversation(chat_id=7)
 
-    assert counts == {"messages": 0, "summaries": 0, "embeddings": 0}
+    assert counts == {"messages": 0, "summaries": 0, "embeddings": 0,
+                      "media_library": 0}
 
 
 @pytest.mark.asyncio
@@ -100,4 +102,5 @@ async def test_wipe_tolerates_unparseable_status():
     store = MemoryStore(db=_WeirdDB())  # type: ignore[arg-type]
     counts = await store.wipe_conversation(chat_id=1)
     # Falls back to 0 rather than raising.
-    assert counts == {"messages": 0, "summaries": 0, "embeddings": 0}
+    assert counts == {"messages": 0, "summaries": 0, "embeddings": 0,
+                      "media_library": 0}

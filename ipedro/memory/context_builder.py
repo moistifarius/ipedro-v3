@@ -358,7 +358,8 @@ async def build_context(
     already = "\n".join(stable) + "\n" + latest_user_text
     hits = [
         h for h in hits
-        if (h.get("content") or "").strip()
+        if h.get("ref_kind") != "media"          # the [photo: …] row is already a hit
+        and (h.get("content") or "").strip()
         and (h.get("content") or "")[:300].strip() not in already
     ]
     if hits:

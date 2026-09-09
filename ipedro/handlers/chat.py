@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from aiogram import F, Router
 from aiogram.types import BufferedInputFile, Message, ReactionTypeEmoji
 
-from ipedro import addressed, vision
+from ipedro import addressed, media_library, vision
 from ipedro.bot_messages import track
 from ipedro.capabilities import capability_brief
 from ipedro.chat_policy import IncomingMessage, should_respond
@@ -632,10 +632,11 @@ def build_router(rt: Runtime) -> Router:
         # recallable months later. Placed after the shut-up gate so a muted
         # user's images never cost a vision call.
         text = typed
+        seen = None
         if cfg.vision_enabled and cfg.response_policy != "commands":
-            seen = await vision.describe(rt, msg)
+            seen = await vision.look(rt, msg)
             if seen:
-                text = f"{seen}\n{typed}" if typed else seen
+                text = f"{seen.note}\n{typed}" if typed else seen.note
 
         if not text:
             return  # media we couldn't see and nothing typed
@@ -656,6 +657,21 @@ def build_router(rt: Runtime) -> Router:
                 message_id=msg.message_id,
                 user_id=from_user_id,
             )
+            # …and file the picture itself, so he can hand it back later
+            # ("dale send that pic of the grill"). The description is
+            # already in the transcript; this keeps the file id with it.
+            if seen is not None and seen.description:
+                try:
+                    await media_library.remember(
+                        rt, chat_id=msg.chat.id, message_id=msg.message_id,
+                        media=seen.media, description=seen.description,
+                        caption=typed or None, posted_by=from_user_id,
+                        posted_by_name=(
+                            display_name(msg.from_user) if msg.from_user else None
+                        ),
+                    )
+                except Exception as exc:
+                    log.warning("media library failed in %s: %s", msg.chat.id, exc)
 
         # "thanks pedro" → passive-aggressive line. Intercepts before the
         # normal flow so we don't also run an AI reply.
@@ -847,6 +863,15 @@ def build_router(rt: Runtime) -> Router:
                 await maybe_summarize(rt.memory, rt.openai, rt.settings, msg.chat.id)
             return
 
+        # "dale send that pic of the grill" → hand back a picture from this
+        # chat's library. A miss sends nothing and falls through: the reply
+        # below says so in his own voice rather than a canned line.
+        recall_miss = False
+        if cfg.memory_enabled and media_library.detect_recall(typed):
+            if await media_library.recall(rt, msg, cfg, typed):
+                return
+            recall_miss = True
+
         # "hey pedro give me a meme about this" → fetch a relevant meme
         # (topic explicit, or distilled from the current conversation) and
         # post it with its top comment instead of a text reply. Fast regex
@@ -878,6 +903,13 @@ def build_router(rt: Runtime) -> Router:
         await rt.bot.send_chat_action(msg.chat.id, "typing")
 
         extra_bits = []
+        if recall_miss:
+            extra_bits.append(
+                "They asked you to send back a picture and you went through "
+                "every picture saved from this chat: nothing matches. Say so, "
+                "your way. Don't invent one and don't describe one you don't "
+                "have."
+            )
         # "dale what is this" on someone else's photo: the picture is on the
         # replied-to message, not this one. Described for this turn only —
         # it already has its own history row from when it arrived, and the

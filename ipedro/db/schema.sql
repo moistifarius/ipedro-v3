@@ -561,3 +561,26 @@ ALTER TABLE chat_state DROP COLUMN IF EXISTS word_of_day;
 ALTER TABLE chat_state DROP COLUMN IF EXISTS word_of_day_at;
 ALTER TABLE chat_state DROP COLUMN IF EXISTS stuck_word;
 ALTER TABLE chat_state DROP COLUMN IF EXISTS stuck_word_expires_at;
+
+-- The pictures a chat has posted, kept so the bot can hand one back ---------
+-- Per chat (it follows the chat through a supergroup migration) and one row
+-- per posted message, so the same file posted twice is two memories. The
+-- description is the global media_descriptions text; the who/when/caption is
+-- this chat's. Searchable by meaning through the embeddings table under
+-- ref_kind 'media'. Wiped with the rest of the conversation.
+CREATE TABLE IF NOT EXISTS media_library (
+    id             BIGSERIAL PRIMARY KEY,
+    chat_id        BIGINT NOT NULL REFERENCES chats(chat_id) ON DELETE CASCADE,
+    message_id     BIGINT,
+    file_unique_id TEXT NOT NULL,
+    file_id        TEXT NOT NULL,
+    kind           TEXT NOT NULL,
+    description    TEXT NOT NULL,
+    caption        TEXT,
+    posted_by      BIGINT,
+    posted_by_name TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (chat_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS media_library_chat_idx
+    ON media_library (chat_id, created_at DESC);

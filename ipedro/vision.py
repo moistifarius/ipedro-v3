@@ -224,8 +224,42 @@ async def _download(bot, file_id: str) -> bytes | None:
     return buf.getvalue()
 
 
-async def describe(rt, msg: Message) -> str | None:
-    """The transcript line for whatever media is on ``msg``, or None.
+@dataclass(frozen=True)
+class Seen:
+    """What the bot made of one message's media."""
+
+    media: Media
+    description: str | None     # None when we could only label it
+    note: str                   # the transcript line
+
+
+async def _describe_media(rt, msg: Message, media: Media) -> str | None:
+    cached = await _cached(rt.db, media.file_unique_id)
+    if cached:
+        return cached
+    try:
+        data = await _download(rt.bot, media.file_id)
+        if not data:
+            return None
+        media_type = sniff_image_type(data)
+        if media_type is None:
+            log.info("Media %s isn't a still image; labeling only.", media.kind)
+            return None
+        description = await rt.openai.describe_image(
+            data, media_type=media_type, prompt=DESCRIBE_PROMPT,
+            chat_id=msg.chat.id if msg.chat else None,
+        )
+    except Exception as exc:
+        log.warning("Vision failed on %s: %s", media.kind, exc)
+        return None
+    if description:
+        await _remember(rt.db, media, description)
+    return description or None
+
+
+async def look(rt, msg: Message) -> Seen | None:
+    """Everything the bot can say about the media on ``msg``, or None if
+    there is none.
 
     Never raises: a blind spot is a missing sentence, not a dropped
     message. Every failure path falls back to the plain label so the bot
@@ -234,30 +268,11 @@ async def describe(rt, msg: Message) -> str | None:
     media = extract_media(msg)
     if media is None:
         return None
-    if not media.viewable:
-        return note(media, None)
+    description = await _describe_media(rt, msg, media) if media.viewable else None
+    return Seen(media=media, description=description, note=note(media, description))
 
-    cached = await _cached(rt.db, media.file_unique_id)
-    if cached:
-        return note(media, cached)
 
-    try:
-        data = await _download(rt.bot, media.file_id)
-        if not data:
-            return note(media, None)
-        media_type = sniff_image_type(data)
-        if media_type is None:
-            log.info("Media %s isn't a still image; labeling only.", media.kind)
-            return note(media, None)
-        description = await rt.openai.describe_image(
-            data, media_type=media_type, prompt=DESCRIBE_PROMPT,
-            chat_id=msg.chat.id if msg.chat else None,
-        )
-    except Exception as exc:
-        log.warning("Vision failed on %s: %s", media.kind, exc)
-        return note(media, None)
-
-    if not description:
-        return note(media, None)
-    await _remember(rt.db, media, description)
-    return note(media, description)
+async def describe(rt, msg: Message) -> str | None:
+    """The transcript line for whatever media is on ``msg``, or None."""
+    seen = await look(rt, msg)
+    return seen.note if seen else None

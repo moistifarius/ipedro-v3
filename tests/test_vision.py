@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from ipedro import vision
+from ipedro import media_library, vision
 from ipedro.handlers import chat
 from tests.test_captcha_intercept import _msg, _rt_with
 
@@ -279,7 +279,16 @@ def _seeing_rt(monkeypatch, *, seen="[photo: a cat in a hat]", policy="always"):
         setattr(cfg, field, False)
     rt.memory = SimpleNamespace(record_message=AsyncMock())
     rt.openai = SimpleNamespace(chat=AsyncMock(return_value="sh-sha"))
-    monkeypatch.setattr(vision, "describe", AsyncMock(return_value=seen))
+    # chat.py looks through vision.look; describe() is its thin wrapper, so
+    # patching look covers both the message's own media and the replied-to
+    # path. remember() is the library write — out of scope here.
+    description = seen.split(": ", 1)[1].rstrip("]") if ": " in seen else None
+    monkeypatch.setattr(vision, "look", AsyncMock(return_value=vision.Seen(
+        media=vision.Media(kind="photo", file_unique_id="u1", label="a photo",
+                           file_id="big"),
+        description=description, note=seen,
+    )))
+    monkeypatch.setattr(media_library, "remember", AsyncMock(return_value=1))
     monkeypatch.setattr(chat, "_REACT_PROBABILITY", 0.0)
     monkeypatch.setattr(chat, "_DALE_GIF_PROBABILITY", 0.0)
     monkeypatch.setattr(chat, "maybe_summarize", AsyncMock())
@@ -369,7 +378,7 @@ async def test_the_switch_turns_looking_off(monkeypatch):
 
     await _handler(rt)(msg)
 
-    vision.describe.assert_not_awaited()
+    vision.look.assert_not_awaited()
     rt.openai.chat.assert_not_awaited()      # nothing to say about it
 
 
@@ -382,7 +391,7 @@ async def test_a_commands_only_chat_never_pays_for_vision(monkeypatch):
 
     await _handler(rt)(msg)
 
-    vision.describe.assert_not_awaited()
+    vision.look.assert_not_awaited()
 
 
 @pytest.mark.asyncio

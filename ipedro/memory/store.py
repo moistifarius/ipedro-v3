@@ -136,6 +136,9 @@ class MemoryStore:
                 results["messages"] = _count(await conn.execute(
                     "DELETE FROM messages WHERE chat_id = $1", chat_id,
                 ))
+                results["media_library"] = _count(await conn.execute(
+                    "DELETE FROM media_library WHERE chat_id = $1", chat_id,
+                ))
                 if include_facts:
                     results["facts"] = _count(await conn.execute(
                         "DELETE FROM facts WHERE chat_id = $1", chat_id,

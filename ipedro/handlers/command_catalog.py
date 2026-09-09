@@ -238,6 +238,13 @@ COMMANDS: tuple[Command, ...] = (
     Command("onthisday",    "quotes", "/onthisday",
             "/onthisday",
             "Resurface what people said on this calendar day in the past."),
+    Command("pic",          "quotes", "/pic",
+            "/pic <what it showed / who posted it / when>",
+            "Send back a picture posted in this chat, found by what's in it. "
+            "Or just say 'dale send that pic of the grill'."),
+    Command("pics",         "quotes", "/pics",
+            "/pics",
+            "The last few pictures posted here, as the bot remembers them."),
 
     # ── Reminders & dates ────────────────────────────────────────────────
     Command("remind",       "reminders", "/remind",
