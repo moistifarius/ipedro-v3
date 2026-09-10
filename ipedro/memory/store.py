@@ -220,6 +220,127 @@ class MemoryStore:
             await self._reembed(chat_id, ref_kind, ref_id, new_text)
         return results
 
+    async def unlearn(self, chat_id: int, belief: str) -> dict[str, int]:
+        """Scrub a belief the chat planted, across every derived layer.
+
+        The shape of the problem: people tell the bot something false
+        ("every photo is Michael"), the fact extractor files it as
+        durable, the summarizer folds it into the running summary — which
+        every later summary is built on, so it never ages out — and the
+        bot's own replies agreeing with it sit in history and retrieval.
+
+        Same rule as correct_name: user messages are never touched. What
+        gets scrubbed is what the bot derived — facts that state or lean
+        on the belief, the summary (rewritten with the belief removed),
+        and the bot's own messages that assert it — judged by the cheap
+        model rather than keyword-matched, so "Michael drinks IPA" stays
+        while "every photo is Michael" goes. A correction fact is then
+        added so the residue in raw history can't re-seed it.
+
+        Returns {facts, summary, messages, correction} row counts.
+        """
+        results = {"facts": 0, "summary": 0, "messages": 0, "correction": 0}
+        belief = " ".join(belief.split())
+        if not belief or not self.openai:
+            return results
+
+        async def _judge(kind: str, items: list[tuple[int, str]]) -> list[int]:
+            """Which numbered items state, imply or depend on the belief."""
+            if not items:
+                return []
+            listing = "\n".join(f"{i + 1}. {text[:300]}" for i, (_, text) in enumerate(items))
+            answer = await self.openai.cheap_completion(
+                f"A chat bot was tricked into believing something false:\n"
+                f"  \"{belief}\"\n\n"
+                f"Below are {kind}. Which of them state that belief, imply it, "
+                f"or only make sense if it were true? Ordinary facts that merely "
+                f"mention the same people are NOT included.\n\n{listing}\n\n"
+                f"Reply with the numbers, comma-separated, or NONE.",
+                max_tokens=60, temperature=0.0, chat_id=chat_id,
+            )
+            picked = {int(n) for n in re.findall(r"\d+", answer or "")}
+            return [items[n - 1][0] for n in sorted(picked) if 1 <= n <= len(items)]
+
+        # Read + judge first: the model calls stay out of the transaction.
+        fact_rows = await self.db.fetch(
+            "SELECT id, fact FROM facts WHERE chat_id = $1 ORDER BY id", chat_id,
+        )
+        doomed_facts = await _judge(
+            "durable facts the bot has stored",
+            [(r["id"], r["fact"] or "") for r in fact_rows],
+        )
+
+        latest = await self.latest_summary(chat_id)
+        new_summary = None
+        if latest and latest.summary.strip():
+            rewritten = await self.openai.cheap_completion(
+                f"Rewrite the summary below with every trace of this false belief "
+                f"removed — the belief itself and anything that relies on it:\n"
+                f"  \"{belief}\"\n"
+                f"Keep everything else exactly as it is, same format. Output only "
+                f"the rewritten summary.\n\n{latest.summary}",
+                max_tokens=600, temperature=0.0, chat_id=chat_id,
+            )
+            if rewritten and rewritten.strip() and rewritten.strip() != latest.summary.strip():
+                new_summary = rewritten.strip()
+
+        words = [w for w in re.findall(r"[a-z0-9']+", belief.lower()) if len(w) >= 4]
+        message_rows = []
+        if words:
+            pattern = "%(" + "|".join(re.escape(w) for w in words) + ")%"
+            message_rows = await self.db.fetch(
+                "SELECT id, content FROM messages "
+                " WHERE chat_id = $1 AND role = 'assistant' AND content ILIKE $2 "
+                " ORDER BY id DESC LIMIT 40",
+                chat_id, pattern,
+            )
+        doomed_messages = await _judge(
+            "the bot's own past messages",
+            [(r["id"], r["content"] or "") for r in message_rows],
+        )
+
+        async with self.db.pool.acquire() as conn:
+            async with conn.transaction():
+                if doomed_facts:
+                    await conn.execute(
+                        "DELETE FROM embeddings WHERE chat_id = $1 "
+                        "  AND ref_kind = 'fact' AND ref_id = ANY($2)",
+                        chat_id, doomed_facts,
+                    )
+                    await conn.execute(
+                        "DELETE FROM facts WHERE id = ANY($1)", doomed_facts,
+                    )
+                    results["facts"] = len(doomed_facts)
+                if new_summary is not None and latest is not None:
+                    await conn.execute(
+                        "UPDATE summaries SET summary = $1 WHERE id = $2",
+                        new_summary, latest.id,
+                    )
+                    results["summary"] = 1
+                if doomed_messages:
+                    await conn.execute(
+                        "DELETE FROM embeddings WHERE chat_id = $1 "
+                        "  AND ref_kind = 'message' AND ref_id = ANY($2)",
+                        chat_id, doomed_messages,
+                    )
+                    await conn.execute(
+                        "DELETE FROM messages WHERE id = ANY($1)", doomed_messages,
+                    )
+                    results["messages"] = len(doomed_messages)
+
+        if new_summary is not None and latest is not None:
+            await self._reembed(chat_id, "summary", latest.id, new_summary)
+        # The inoculation: raw user lines asserting the belief still exist
+        # (they're what people typed), so leave a standing correction where
+        # every reply will see it.
+        await self.add_fact(
+            chat_id,
+            f"NOT TRUE, do not repeat: \"{belief}\". The chat was winding you "
+            f"up. Go by what you actually see and know.",
+        )
+        results["correction"] = 1
+        return results
+
     async def _reembed(
         self, chat_id: int, ref_kind: str, ref_id: int, content: str,
     ) -> None:

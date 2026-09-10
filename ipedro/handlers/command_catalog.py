@@ -119,6 +119,11 @@ COMMANDS: tuple[Command, ...] = (
     Command("echo_cmd",     "ai", "/echo",
             "/echo @user [topic]",
             "Mimic that user's style."),
+    Command("unlearn",      "ai", "/unlearn",
+            "/unlearn <the false belief>  (admin)",
+            "Scrub something the chat tricked the bot into believing — across "
+            "facts, the summary and the bot's own messages — and leave a "
+            "correction so it sticks. Never touches what people typed."),
     Command("fixname",      "ai", "/fixname",
             "/fixname <wrong> -> <right>",
             "Fix a name the bot keeps getting wrong — recursively across "

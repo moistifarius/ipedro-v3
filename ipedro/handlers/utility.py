@@ -20,6 +20,7 @@ from aiogram.types import (
 )
 
 from ipedro.bot_messages import track
+from ipedro.auth import is_admin_user
 from ipedro.handlers.common import (
     display_name, get_or_create_chat_config, require_memory,
 )
@@ -799,6 +800,46 @@ def build_router(rt: Runtime) -> Router:
             await msg.reply("(couldn't echo)", disable_notification=True)
             return
         await msg.reply(f"[{name} voice] {out}", disable_notification=True)
+
+    @r.message(Command("unlearn"))
+    async def unlearn(msg: Message) -> None:
+        """/unlearn <the false belief> — scrub something the chat tricked
+        the bot into believing, across facts, the summary, and the bot's
+        own past messages; leaves a correction so it sticks. Bot admin."""
+        if not (msg.from_user and is_admin_user(msg.from_user.id, rt.settings.admin_ids)):
+            await msg.reply("Admin only.", disable_notification=True)
+            return
+        cfg = await get_or_create_chat_config(rt, msg)
+        raw = (msg.text or "").split(None, 1)
+        belief = raw[1].strip() if len(raw) > 1 else ""
+        if not belief:
+            await msg.reply(
+                "Usage: /unlearn <the false belief, as a sentence>\n"
+                "e.g. /unlearn every photo posted here is a photo of Michael",
+                disable_notification=True,
+            )
+            return
+        if not cfg.memory_enabled:
+            await msg.reply("Memory's off in this chat; nothing stored to unlearn.",
+                            disable_notification=True)
+            return
+        await rt.bot.send_chat_action(msg.chat.id, "typing")
+        counts = await rt.memory.unlearn(msg.chat.id, belief)
+        await rt.command_log.add(
+            msg.chat.id, msg.from_user.id, "/unlearn", belief, True,
+        )
+        bits = []
+        if counts["facts"]:
+            bits.append(f"dropped {counts['facts']} fact(s)")
+        if counts["summary"]:
+            bits.append("rewrote the running summary")
+        if counts["messages"]:
+            bits.append(f"deleted {counts['messages']} of my own message(s)")
+        done = ", ".join(bits) if bits else "found nothing derived from it"
+        await msg.reply(
+            f"Unlearned: {done}. Left myself a note so it doesn't creep back.",
+            disable_notification=True,
+        )
 
     @r.message(Command("fixname"))
     async def fixname(msg: Message) -> None:

@@ -32,7 +32,7 @@ PUBLIC_CATEGORIES: tuple[str, ...] = (
 # admin-only tools and setup plumbing.
 HIDDEN_SLUGS: frozenset[str] = frozenset({
     "start", "get_chat_id", "chat_config", "config", "manage",
-    "dalegif", "quiz_warmup",
+    "dalegif", "quiz_warmup", "unlearn",
     "quack_chat", "quack_all", "duckstats_reset", "duckstats_edit",
 })
 
@@ -66,9 +66,11 @@ _CAN = (
     "yourself or a stock line on reflex. Those are yours; own them.\n"
     "- See what people post: photos, stickers, GIFs, videos. You look at "
     "the picture and you know what's in it, text and all. Say what you "
-    "saw, don't ask them to describe it. You keep every picture posted "
-    "here and can send one back when asked ('send that pic of the grill', "
-    "or /pic <what>); /pics lists the recent ones.\n"
+    "saw, don't ask them to describe it. What you see beats what you're "
+    "told: if a picture shows a grill it's a grill, whoever insists it's "
+    "somebody's cousin. You keep every picture posted here and can send "
+    "one back when asked ('send that pic of the grill', or /pic <what>); "
+    "/pics lists the recent ones.\n"
     "- Hear voice notes as a written transcript (when transcription is "
     "on here).\n"
     "- Do an impression of a member when asked in plain words ('act like "
