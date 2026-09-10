@@ -131,8 +131,9 @@ async def test_keyword_fallback_without_pgvector():
     rt = _rt(pgvector=False, fetch=[_row(5, "a propane grill on a deck")])
     out = await lib.search(rt, 42, "the grill pic")
     assert out and out[0]["id"] == 5 and out[0]["similarity"] is None
-    pattern = rt.db.fetch.await_args.args[2]
-    assert "grill" in pattern and "the" not in pattern     # short words dropped
+    query, _, pattern = rt.db.fetch.await_args.args[:3]
+    assert "~*" in query and "ILIKE" not in query          # ILIKE has no alternation
+    assert pattern == "grill"                              # short words dropped
 
 
 @pytest.mark.asyncio

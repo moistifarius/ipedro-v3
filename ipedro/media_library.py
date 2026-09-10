@@ -133,14 +133,15 @@ async def search(rt, chat_id: int, query: str, *, k: int = 3) -> list[dict]:
             if out:
                 return out
     # Keyword fallback: any distinctive word in the description or caption.
+    # POSIX regex (~*) because ILIKE has no alternation.
     words = [w for w in re.findall(r"[a-z0-9']+", query.lower()) if len(w) >= 4]
     if not words:
         return []
-    pattern = "%(" + "|".join(re.escape(w) for w in words) + ")%"
+    pattern = "|".join(re.escape(w) for w in words)
     rows = await rt.db.fetch(
         "SELECT id, file_id, kind, description, caption, posted_by_name, created_at "
         "  FROM media_library "
-        " WHERE chat_id = $1 AND (description ILIKE $2 OR caption ILIKE $2) "
+        " WHERE chat_id = $1 AND (description ~* $2 OR caption ~* $2) "
         " ORDER BY created_at DESC LIMIT $3",
         chat_id, pattern, k,
     )

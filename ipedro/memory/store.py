@@ -253,8 +253,9 @@ class MemoryStore:
                 f"A chat bot was tricked into believing something false:\n"
                 f"  \"{belief}\"\n\n"
                 f"Below are {kind}. Which of them state that belief, imply it, "
-                f"or only make sense if it were true? Ordinary facts that merely "
-                f"mention the same people are NOT included.\n\n{listing}\n\n"
+                f"repeat a variant of it about the same subject, or only make "
+                f"sense if it were true? Ordinary facts that merely mention the "
+                f"same people are NOT included.\n\n{listing}\n\n"
                 f"Reply with the numbers, comma-separated, or NONE.",
                 max_tokens=60, temperature=0.0, chat_id=chat_id,
             )
@@ -284,16 +285,39 @@ class MemoryStore:
             if rewritten and rewritten.strip() and rewritten.strip() != latest.summary.strip():
                 new_summary = rewritten.strip()
 
-        words = [w for w in re.findall(r"[a-z0-9']+", belief.lower()) if len(w) >= 4]
-        message_rows = []
+        # Candidates among the bot's own messages: the most recent ones no
+        # matter what they say — the damage is almost always in the last
+        # few turns, phrased any old way ("that's him again") — plus older
+        # ones that mention the belief's words. POSIX regex (~*), not
+        # ILIKE: ILIKE has no alternation, and "%(a|b)%" is a literal.
+        recent_rows = await self.db.fetch(
+            "SELECT id, content FROM messages "
+            " WHERE chat_id = $1 AND role = 'assistant' "
+            " ORDER BY id DESC LIMIT 30",
+            chat_id,
+        )
+        words = [
+            w.replace("'", "") for w in re.findall(r"[a-z0-9']+", belief.lower())
+            if len(w.replace("'", "")) >= 4
+        ]
+        hit_rows = []
         if words:
-            pattern = "%(" + "|".join(re.escape(w) for w in words) + ")%"
-            message_rows = await self.db.fetch(
+            # "michaels" should also catch "Michael's".
+            pattern = "|".join(
+                re.sub(r"s$", "'?s", re.escape(w)) for w in words
+            )
+            hit_rows = await self.db.fetch(
                 "SELECT id, content FROM messages "
-                " WHERE chat_id = $1 AND role = 'assistant' AND content ILIKE $2 "
+                " WHERE chat_id = $1 AND role = 'assistant' AND content ~* $2 "
                 " ORDER BY id DESC LIMIT 40",
                 chat_id, pattern,
             )
+        seen: set[int] = set()
+        message_rows = []
+        for r in list(recent_rows) + list(hit_rows):
+            if r["id"] not in seen:
+                seen.add(r["id"])
+                message_rows.append(r)
         doomed_messages = await _judge(
             "the bot's own past messages",
             [(r["id"], r["content"] or "") for r in message_rows],
@@ -336,7 +360,7 @@ class MemoryStore:
         await self.add_fact(
             chat_id,
             f"NOT TRUE, do not repeat: \"{belief}\". The chat was winding you "
-            f"up. Go by what you actually see and know.",
+            f"up. When someone shows you a picture, say what is actually in it.",
         )
         results["correction"] = 1
         return results

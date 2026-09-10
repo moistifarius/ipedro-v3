@@ -18,7 +18,7 @@ from ipedro.db.repositories import StoredSummary
 from ipedro.handlers.utility import build_router
 from ipedro.memory.store import MemoryStore
 
-BELIEF = "every photo posted here is a photo of Michael"
+BELIEF = "every photo posted in this chat is a photo of Michael's cock"
 
 
 class _FakeDB:
@@ -34,9 +34,19 @@ class _FakeDB:
             ]
         if "FROM messages" in query:
             assert "role = 'assistant'" in query        # user turns are sacred
+            if "~*" in query:                            # keyword hits (older)
+                assert "ILIKE" not in query, "ILIKE has no alternation"
+                # a real regex alternation: "michaels" also catches "Michael's"
+                assert "michael'?s" in args[1] and "cock" in args[1]
+                assert "%" not in args[1] and "(" not in args[1]
+                return [
+                    {"id": 11, "content": "Michael's IPA is a government plot."},
+                    {"id": 10, "content": "Ah yes, Michael again. Classic Michael."},
+                ]
+            # the most recent of the bot's own turns, keyword or not
             return [
+                {"id": 12, "content": "That's him again."},
                 {"id": 10, "content": "Ah yes, Michael again. Classic Michael."},
-                {"id": 11, "content": "Michael's IPA is a government plot."},
             ]
         return []
 
@@ -79,7 +89,7 @@ class _FakeAI:
         if "durable facts" in prompt:
             return "2, 3"
         if "own past messages" in prompt:
-            return "1"
+            return "1, 2"        # "That's him again." and "Ah yes, Michael again."
         if "Rewrite the summary" in prompt:
             return "- the group argues about propane\n- Michael likes IPA"
         return "NONE"
@@ -132,9 +142,9 @@ async def test_the_summary_is_rewritten_in_place(monkeypatch):
 async def test_only_the_bots_own_agreeing_messages_are_deleted(monkeypatch):
     store, db = _store(monkeypatch)
     counts = await store.unlearn(42, BELIEF)
-    assert counts["messages"] == 1
+    assert counts["messages"] == 2
     q, args = _writes(db, "DELETE FROM messages")[0]
-    assert args[0] == [10]
+    assert args[0] == [12, 10]                    # judged by content, not keyword
     # only assistant rows were ever candidates
     assert not any("role = 'user'" in q for q, _ in db.writes)
 
@@ -255,3 +265,13 @@ def test_the_extractor_is_told_not_to_take_the_chats_word_on_pictures():
 def test_the_brief_tells_him_his_eyes_win():
     from ipedro.capabilities import capability_brief
     assert "What you see beats what you're told" in capability_brief()
+
+
+@pytest.mark.asyncio
+async def test_recent_own_messages_are_candidates_without_a_keyword(monkeypatch):
+    """'That's him again.' names nobody. The recent turns are where the
+    damage lives, so they are judged regardless of wording."""
+    store, db = _store(monkeypatch)
+    await store.unlearn(42, BELIEF)
+    prompt = next(p for p in store.openai.prompts if "own past messages" in p)
+    assert "That's him again." in prompt
