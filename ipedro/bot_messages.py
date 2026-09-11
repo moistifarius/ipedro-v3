@@ -11,6 +11,8 @@ this module only cares about tracking what the bot sent.
 
 from __future__ import annotations
 
+from ipedro import addressed
+
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -37,6 +39,12 @@ def track(chat_id: int, message_id: int | None, text: str | None) -> None:
     failed) or if `text` is None (e.g. it was a photo with no caption).
     The deque is created lazily on first use.
     """
+    # Every path that speaks lands here — it is the one honest definition
+    # of "the bot said something in this chat" — so this is where the
+    # follow-up window opens. Doing it at the AI reply only meant an
+    # automod bit, a cat fact or a sent-back picture left no opening, and
+    # the "why?" after one of those went unanswered.
+    addressed.note_bot_reply(chat_id)
     if message_id is None:
         return
     snippet = (text or "")[:60].replace("\n", " ")

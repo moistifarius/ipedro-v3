@@ -53,13 +53,19 @@ log = logging.getLogger(__name__)
 _BEF_CHALLENGE_TTL_SECONDS = 3600  # 1h
 
 # Name-mention triggers — when someone calls the bot by name, it tends
-# to engage. The current persona is Dale (idale); legacy Boomhauer / Dude
-# / Pedro aliases still match so people who knew the bot under earlier
-# personas keep getting a response. Bare "dale" is allowed even though
-# it's a common name — the bot can handle the occasional false hit.
+# to engage. The current persona is Dale (idale), who goes by Rusty
+# Shackleford when he thinks he's being watched — and that IS the display
+# name in the chat, so people call him "rusty" far more often than
+# "rusty shackleford". Requiring the full alias meant half the times he
+# was addressed by name didn't register. Legacy Boomhauer / Dude / Pedro
+# aliases still match so people who knew earlier personas keep getting a
+# response. Bare first names are allowed even though they're common names
+# — the bot can handle the occasional false hit.
 _DUDE_NAME_RE = re.compile(
     r"\bdale\s+gribble\b"
     r"|\brusty\s+shackleford\b"
+    r"|\bshackleford\b"
+    r"|\brusty\b"
     r"|\bidale\b"
     r"|\bdale\b"
     r"|\bboomhauer\b"
@@ -970,7 +976,6 @@ def build_router(rt: Runtime) -> Router:
 
         sent = await msg.answer(reply, disable_notification=True)
         track(msg.chat.id, sent.message_id, reply)
-        addressed.note_bot_reply(msg.chat.id)
 
         # Post-send: never let a DB hiccup crash the handler after the user
         # already saw the reply — log it and move on (else stored history

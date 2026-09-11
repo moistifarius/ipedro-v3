@@ -232,3 +232,86 @@ async def test_reply_policy_stays_strict(monkeypatch):
     msg.answer = AsyncMock()
     await _handler(rt)(msg)
     rt.openai.chat.assert_not_awaited()
+
+
+# ── regressions: he wasn't answering indirect mentions ───────────────────────
+
+@pytest.mark.parametrize("text", [
+    "rusty what do you think",      # the display name people actually type
+    "ask rusty",
+    "shackleford?",
+    "rusty's gone quiet",
+])
+def test_the_personas_live_name_counts_as_a_mention(text):
+    """He goes by Rusty Shackleford in the chat, so that is what people
+    type. Requiring the full alias meant half the times he was addressed
+    by name never registered at all."""
+    from ipedro.handlers.chat import _mentions_pedro
+    assert _mentions_pedro(text)
+
+
+@pytest.mark.parametrize("text", ["trusty old thing", "crusty bread", "rustic"])
+def test_the_name_still_needs_a_word_boundary(text):
+    from ipedro.handlers.chat import _mentions_pedro
+    assert not _mentions_pedro(text)
+
+
+@pytest.mark.parametrize("text", [
+    "he's lying", "ask him", "his whole theory is nonsense",
+    "the bot is broken", "that bot has lost it",
+])
+def test_third_person_about_him_reaches_the_classifier_in_the_window(text):
+    """People talk ABOUT him as much as to him. These used to be a flat
+    no, so a whole conversation could go by with him ignored."""
+    assert addressed.quick_verdict(text, in_conversation=True) is None
+
+
+@pytest.mark.parametrize("text", [
+    "bullshit", "that's not what happened", "thoughts", "liar", "not true",
+])
+def test_blunt_disagreement_is_aimed_at_whoever_just_spoke(text):
+    assert addressed.quick_verdict(text, in_conversation=True) is True
+
+
+def test_an_explicit_bot_reference_earns_a_look_even_when_quiet():
+    assert addressed.quick_verdict(
+        "what does the bot think", in_conversation=False,
+    ) is None
+    # …but a bare "he" while he's been quiet is somebody else entirely.
+    assert addressed.quick_verdict("ask him", in_conversation=False) is False
+
+
+def test_plain_chatter_in_the_window_still_costs_nothing():
+    for text in ("lol", "nice weather", "brb"):
+        assert addressed.quick_verdict(text, in_conversation=True) is False
+
+
+# ── the window opens on every way he speaks, not just the AI reply ───────────
+
+def test_tracking_any_bot_message_opens_the_window():
+    """track() is the one honest definition of 'the bot said something
+    here'. An automod bit, a cat fact or a sent-back picture all go
+    through it, and each should leave an opening for the follow-up."""
+    from ipedro.bot_messages import track
+
+    assert not addressed.in_conversation(CHAT)
+    track(CHAT, 5, "POCKET SAND!")
+    assert addressed.in_conversation(CHAT)
+
+
+@pytest.mark.asyncio
+async def test_a_follow_up_after_an_automod_bit_gets_answered(monkeypatch):
+    """The exact gap: he fires a canned line, someone says 'why?', and
+    before this he said nothing back."""
+    rt = _mention_rt(monkeypatch)
+    handler = _handler(rt)
+
+    automod = _msg(text="nl")                       # an automod trigger
+    automod.reply = AsyncMock(return_value=SimpleNamespace(message_id=5))
+    await handler(automod)
+    automod.reply.assert_awaited_once()             # he said something…
+
+    follow_up = _msg(text="why?")
+    follow_up.answer = AsyncMock(return_value=SimpleNamespace(message_id=9))
+    await handler(follow_up)
+    rt.openai.chat.assert_awaited_once()            # …and answers the follow-up

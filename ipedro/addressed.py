@@ -92,7 +92,12 @@ _FOLLOW_UP_RE = re.compile(
     r"really|for real|fr|no way|nah|nope|wrong|false|cap|"
     r"explain|elaborate|go on|and|so|"
     r"is that true|are you sure|you sure|u sure|"
-    r"lol what|lmao what"
+    r"lol what|lmao what|"
+    # blunt disagreement and prompting — only ever aimed at whoever just
+    # spoke, which inside the window is him
+    r"bullshit|bs|liar|lies|nonsense|rubbish|garbage|"
+    r"that'?s not (?:true|right|what happened)|not true|"
+    r"thoughts|opinions|agreed|exactly|go ahead|continue|meaning"
     r")[\s?!.]*$"
     r"|^\W*\?+\W*$",
     re.IGNORECASE,
@@ -104,6 +109,18 @@ _SECOND_PERSON_RE = re.compile(
 )
 _PLURAL_YOU_RE = re.compile(
     r"\b(?:you guys|you all|y'?all|you two|you lot|you people)\b", re.IGNORECASE,
+)
+
+# Third person pointed at the bot. "the bot" is explicit enough to earn a
+# look even when he's been quiet; a bare "he" only means him while he's in
+# the conversation, and even then the classifier decides — it can see who
+# was talking.
+_BOT_NOUN_RE = re.compile(
+    r"\b(?:the|that|this|your|ur)\s+(?:bot|robot)\b|\bthe\s+ai\b",
+    re.IGNORECASE,
+)
+_THIRD_PERSON_RE = re.compile(
+    r"\b(?:he|him|his|he'?s|hes)\b", re.IGNORECASE,
 )
 
 # A question thrown to the room. Dale is a member of the room.
@@ -143,10 +160,17 @@ def quick_verdict(text: str, *, in_conversation: bool) -> bool | None:
             return True
         if _PLURAL_YOU_RE.search(text):
             return None
-        if _SECOND_PERSON_RE.search(text) or "?" in text:
+        if (
+            _SECOND_PERSON_RE.search(text)
+            or _THIRD_PERSON_RE.search(text)     # "he's lying", "ask him"
+            or _BOT_NOUN_RE.search(text)
+            or "?" in text
+        ):
             return None
         return False
-    if _ROOM_QUESTION_RE.search(text):
+    # Quiet: only an explicit reference to him, or a question plainly put
+    # to the room, is worth the price of a look.
+    if _BOT_NOUN_RE.search(text) or _ROOM_QUESTION_RE.search(text):
         return None
     return False
 
