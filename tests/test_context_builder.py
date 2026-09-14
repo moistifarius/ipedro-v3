@@ -448,6 +448,52 @@ async def test_long_silence_is_marked_inline_on_the_next_message():
 
 
 @pytest.mark.asyncio
+async def test_gap_marker_survives_a_fresh_anchor_boundary():
+    """The window's first rendered row is always the anchor row for as
+    long as that anchor holds, so prev_ts used to start at None every
+    time — silently swallowing whatever silence preceded a freshly
+    (re-)anchored window. The anchor now remembers the row just before
+    it, so the very first rendered message can still carry an accurate
+    marker."""
+    from datetime import timedelta
+
+    from ipedro.memory import context_builder as cb
+
+    now = datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc)
+
+    def at(idx, mins_before_now, content):
+        return StoredMessage(
+            id=idx, chat_id=1, message_id=idx, user_id=42, role="user",
+            content=content, tokens=None,
+            created_at=now - timedelta(minutes=mins_before_now),
+            author_name="Matt",
+        )
+
+    # 15 stored rows, oldest first. n=10 (from _settings()), so the window
+    # anchors at position 5 (idx=15-10) — its first rendered row is
+    # message 5, and message 4, right before it, sits 3 days earlier.
+    rows = [at(i, 10_000 - i, f"early chatter {i}") for i in range(5)]
+    rows.append(at(5, 60, "after the silence"))          # the new anchor
+    rows += [at(i, 60 - i, f"chatter {i}") for i in range(6, 15)]
+    store = FakeStore(recent=rows)
+
+    built = await build_context(
+        store=store, settings=_settings(), chat_id=1,
+        persona="dude", persona_custom=None,
+        latest_user_text="chatter 14", latest_user_name="Matt", now=now,
+    )
+    first_rendered = next(
+        m["content"] for m in built.messages
+        if m["role"] == "user" and "after the silence" in m["content"]
+    )
+    assert "⏳" in first_rendered, (
+        "the silence before a freshly anchored window's first message "
+        "was silently dropped"
+    )
+    cb.reset_windows()
+
+
+@pytest.mark.asyncio
 async def test_no_marker_for_rapid_back_and_forth():
     """Messages seconds apart don't get cluttered with time markers."""
     from datetime import datetime, timedelta, timezone

@@ -191,6 +191,17 @@ class MemoryStore:
                             f"UPDATE {table} SET {col} = $1 WHERE id = $2",
                             new, r["id"],
                         )
+                        # Delete the now-stale embedding IN the same
+                        # transaction, rather than leaving the old
+                        # (wrong-name) text searchable until the async
+                        # re-embed loop below gets to it. A row briefly
+                        # absent from search is fine; one briefly
+                        # returning the wrong text is the bug.
+                        await conn.execute(
+                            "DELETE FROM embeddings WHERE chat_id = $1 "
+                            "  AND ref_kind = $2 AND ref_id = $3",
+                            chat_id, ref_kind, r["id"],
+                        )
                         reembed_jobs.append((ref_kind, r["id"], new))
                         changed += 1
                     return changed
@@ -212,6 +223,11 @@ class MemoryStore:
                     await conn.execute(
                         "UPDATE messages SET content = $1 WHERE id = $2",
                         new, r["id"],
+                    )
+                    await conn.execute(
+                        "DELETE FROM embeddings WHERE chat_id = $1 "
+                        "  AND ref_kind = 'message' AND ref_id = $2",
+                        chat_id, r["id"],
                     )
                     reembed_jobs.append(("message", r["id"], new))
                     results["messages"] += 1

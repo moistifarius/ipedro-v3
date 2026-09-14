@@ -17,6 +17,13 @@ RUN apt-get update \
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Bake the tiktoken encoding into the image. Without this it's fetched on
+# first use; if that first fetch ever fails at runtime (no network, a
+# registry hiccup), count_tokens() silently falls back to a char/4
+# estimate — which then quietly weakens the prompt-cache minimum-prefix
+# gate in openai_client.py. Baking it removes the runtime fetch entirely.
+RUN python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
+
 COPY ipedro ./ipedro
 COPY scripts ./scripts
 

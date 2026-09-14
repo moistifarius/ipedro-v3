@@ -434,7 +434,7 @@ class AIClient:
         try:
             if self._text_provider == "claude" and self._anthropic is not None:
                 return await self._chat_claude(
-                    messages, max_tokens=max_tokens,
+                    messages, model=model, max_tokens=max_tokens,
                     temperature=temperature, chat_id=chat_id,
                 )
             return await self._chat_openai(

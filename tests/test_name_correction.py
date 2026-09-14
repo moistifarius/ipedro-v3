@@ -125,6 +125,36 @@ async def test_correct_name_rewrites_derived_layers_only():
 
 
 @pytest.mark.asyncio
+async def test_correct_name_deletes_the_stale_embedding_in_the_same_transaction():
+    """A changed row's OLD embedding must not be searchable even for the
+    brief window before the async re-embed loop repopulates it — a row
+    briefly absent from search is fine, one briefly returning the wrong
+    (pre-correction) text is the bug this closes."""
+    db = _FakeDB()
+    store = MemoryStore(db=db, openai=None, pgvector_available=False)
+    await store.correct_name(1, "Matt", "Sarah")
+    # summaries/facts pass ref_kind as a placeholder ($chat, $ref_kind, $id);
+    # the messages loop hardcodes the literal 'message' in the SQL text
+    # instead, so its DELETE only carries ($chat, $id) — normalize both
+    # shapes to (ref_kind, ref_id) pairs.
+    deletes = set()
+    for q, args in db.updates:
+        if not q.startswith("DELETE FROM embeddings"):
+            continue
+        if "ref_kind = 'message'" in q:
+            deletes.add(("message", args[1]))
+        else:
+            deletes.add((args[1], args[2]))
+    assert ("summary", 1) in deletes
+    assert ("fact", 1) in deletes
+    assert ("message", 2) in deletes
+    # The unrelated fact and the sacred user message were never touched,
+    # so nothing should be deleted for them.
+    assert ("fact", 2) not in deletes
+    assert ("message", 1) not in deletes
+
+
+@pytest.mark.asyncio
 async def test_correct_name_no_op_when_name_absent():
     db = _FakeDB()
     store = MemoryStore(db=db, openai=None, pgvector_available=False)

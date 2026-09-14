@@ -332,6 +332,33 @@ def _claude_client(messages):
 
 
 @pytest.mark.asyncio
+async def test_chats_model_override_reaches_the_claude_branch():
+    """chat(model=...) was silently dropped when routed to Claude — the
+    Claude branch never forwarded it, unlike the OpenAI branch right
+    below it. A caller asking for a specific model got the default
+    claude_model instead, with no error."""
+    msgs = _FakeAnthropicMessages(text="ok")
+    client = _claude_client(msgs)
+    await client.chat(
+        [{"role": "user", "content": "hi"}],
+        model="claude-opus-5", max_tokens=10,
+    )
+    assert msgs.calls[0]["model"] == "claude-opus-5"
+
+
+@pytest.mark.asyncio
+async def test_chats_model_override_still_reaches_the_openai_branch():
+    """Sanity companion: this branch already forwarded model= correctly —
+    confirm the fix didn't disturb it."""
+    client = OpenAIClient(api_key="x", text_provider="openai")
+    client._client.chat = _FakeChatNamespace("ok")
+    out = await client.chat(
+        [{"role": "user", "content": "hi"}], model="gpt-4.1", max_tokens=10,
+    )
+    assert out == "ok"
+
+
+@pytest.mark.asyncio
 async def test_describe_image_sends_a_base64_image_block():
     msgs = _FakeAnthropicMessages(text="  a dog on a skateboard  ")
     client = _claude_client(msgs)

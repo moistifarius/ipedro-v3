@@ -853,7 +853,10 @@ def build_router(rt: Runtime) -> Router:
         if len(raw) < 2 or not raw[1].strip():
             await msg.reply(
                 "Usage: /fixname <wrong> -> <right>\n"
-                "e.g. /fixname Matt -> Sarah   (or: /fixname Matt Sarah)",
+                "e.g. /fixname Matt -> Sarah   (or: /fixname Matt Sarah)\n"
+                "Careful with names that are also common words (Will, "
+                "Grace, Rose, ...) — this does a whole-word replace across "
+                "every summary, fact, and my own past messages.",
                 disable_notification=True,
             )
             return

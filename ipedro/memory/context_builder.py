@@ -1,9 +1,12 @@
 """Build the AI chat-completion `messages` array for a given chat.
 
 Combines, in priority order:
-  1. The persona system prompt, then the current time, the speaker-label
-     convention, the capability brief (what the bot can and can't do),
-     and the standing prose-rhythm nudge.
+  1. The persona system prompt, the speaker-label convention, the
+     capability brief (what the bot can and can't do), and the standing
+     prose-rhythm nudge — all stable/cached. Then, in the VOLATILE tail
+     that follows the cache breakpoint: the current time value itself
+     (the explainer of how to read it is cached; only the stamp isn't),
+     any extra per-turn system text, and retrieved semantic hits.
   2. A condensed running summary (if any).
   3. Durable per-chat facts (if any).
   4. Semantically retrieved older snippets relevant to the latest user query.
@@ -103,11 +106,22 @@ _STYLE_SYSTEM = (
 # sliding window was all of them, every time. In-process state: a restart
 # is one cache miss, not a bug.
 _window_anchor: dict[int, int] = {}
+# The timestamp of the row immediately before a freshly established
+# anchor. The window's first rendered row is always the anchor row for
+# the whole time that anchor holds (it only grows by adding NEWER rows
+# at the end), so the row before it is a fixed question, answered once,
+# right here, at the moment the anchor is set. Without this, the first
+# message of every freshly (re-)anchored window renders with no gap
+# marker even when a real silence preceded it — _gap_marker(None, ...)
+# always returns None — silently hiding exactly the silence a re-anchor
+# is most likely to land next to.
+_anchor_prev_created_at: dict[int, datetime] = {}
 
 
 def reset_windows() -> None:
     """Forget every anchor (tests)."""
     _window_anchor.clear()
+    _anchor_prev_created_at.clear()
 
 
 def _anchored_window(recent: list[StoredMessage], chat_id: int, n: int) -> list[StoredMessage]:
@@ -118,8 +132,13 @@ def _anchored_window(recent: list[StoredMessage], chat_id: int, n: int) -> list[
     ids = [m.id for m in recent]
     anchor = _window_anchor.get(chat_id)
     if anchor is None or anchor not in ids:
-        anchor = ids[-n] if len(ids) >= n else ids[0]
+        idx = len(ids) - n if len(ids) >= n else 0
+        anchor = ids[idx]
         _window_anchor[chat_id] = anchor
+        if idx > 0:
+            _anchor_prev_created_at[chat_id] = recent[idx - 1].created_at
+        else:
+            _anchor_prev_created_at.pop(chat_id, None)
     # Positional, not `id >= anchor`: the rows are already in the order the
     # model should see them, and ids need not be monotonic in that order.
     return recent[ids.index(anchor):]
@@ -386,7 +405,7 @@ async def build_context(
             await store.recent_messages(chat_id, 2 * n), chat_id, n,
         )
         rendered: list[dict[str, Any]] = []
-        prev_ts: datetime | None = None
+        prev_ts: datetime | None = _anchor_prev_created_at.get(chat_id)
         for m in recent:
             role = _role_for(m)
             content = (
