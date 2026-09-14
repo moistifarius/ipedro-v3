@@ -1918,20 +1918,12 @@ def build_router(rt: Runtime) -> Router:
             disable_notification=True,
         )
 
-    @r.message(Command("cost"))
-    async def cost(msg: Message) -> None:
-        """Show OpenAI spend (last 7 days). /cost or /cost <chat_id>."""
-        if not await require_admin(msg, admin_ids):
-            return
-        parts = (msg.text or "").split()
-        chat_filter = None
-        if len(parts) >= 2:
-            try:
-                chat_filter = int(parts[1])
-            except ValueError:
-                await msg.reply("Bad chat id.", disable_notification=True)
-                return
-        if chat_filter is not None:
+    async def _cost_report_lines(chat_id: int | None) -> list[str]:
+        """Shared last-7-days cost aggregation for /cost and the
+        /manage -> Debug -> Cost panel, so the two admin surfaces can't
+        quietly drift apart on what they show (they already had: one
+        carried the cache-hit-rate line, the other didn't)."""
+        if chat_id is not None:
             rows = await rt.db.fetch(
                 "SELECT kind, COUNT(*) AS calls, "
                 "       COALESCE(SUM(total_tokens), 0) AS tokens, "
@@ -1942,9 +1934,9 @@ def build_router(rt: Runtime) -> Router:
                 "  FROM openai_usage "
                 " WHERE chat_id = $1 AND created_at >= NOW() - INTERVAL '7 days' "
                 " GROUP BY kind ORDER BY cost DESC",
-                chat_filter,
+                chat_id,
             )
-            header = f"Last 7d for chat {chat_filter}:"
+            header = f"Last 7d for chat {chat_id}:"
         else:
             rows = await rt.db.fetch(
                 "SELECT kind, COUNT(*) AS calls, "
@@ -1959,8 +1951,7 @@ def build_router(rt: Runtime) -> Router:
             )
             header = "Last 7d (all chats):"
         if not rows:
-            await msg.reply("No usage recorded in that window.", disable_notification=True)
-            return
+            return []
         lines = [header]
         total = 0.0
         cached_total = written_total = prompt_total = 0
@@ -1984,6 +1975,25 @@ def build_router(rt: Runtime) -> Router:
                 f"  cache: {cached_total} of {prompt_total} prompt tokens "
                 f"read from cache ({pct:.0f}%), {written_total} written"
             )
+        return lines
+
+    @r.message(Command("cost"))
+    async def cost(msg: Message) -> None:
+        """Show OpenAI spend (last 7 days). /cost or /cost <chat_id>."""
+        if not await require_admin(msg, admin_ids):
+            return
+        parts = (msg.text or "").split()
+        chat_filter = None
+        if len(parts) >= 2:
+            try:
+                chat_filter = int(parts[1])
+            except ValueError:
+                await msg.reply("Bad chat id.", disable_notification=True)
+                return
+        lines = await _cost_report_lines(chat_filter)
+        if not lines:
+            await msg.reply("No usage recorded in that window.", disable_notification=True)
+            return
         await msg.reply("\n".join(lines), disable_notification=True)
 
     async def _send_facts_for(target: int, reply_to: Message | None,
@@ -2846,6 +2856,11 @@ def build_router(rt: Runtime) -> Router:
                 await cb.message.edit_text(body)
             except TelegramBadRequest:
                 pass
+        await rt.command_log.add(
+            cb.message.chat.id if cb.message else None,
+            cb.from_user.id if cb.from_user else None,
+            "/duckstats_reset", f"user={user_id} chat={chat_id} rows={n}", True,
+        )
         await cb.answer("Stats reset.")
 
     @r.callback_query(F.data.startswith("dsra:"))
@@ -2898,6 +2913,11 @@ def build_router(rt: Runtime) -> Router:
                 )
             except TelegramBadRequest:
                 pass
+        await rt.command_log.add(
+            cb.message.chat.id if cb.message else None,
+            cb.from_user.id if cb.from_user else None,
+            "/duckstats_reset", f"chat={target} all rows={n}", True,
+        )
         await cb.answer("Chat wiped.")
 
     # ----------------------------------------------------- /duckstats_edit
@@ -3390,28 +3410,8 @@ def build_router(rt: Runtime) -> Router:
             pass
 
     async def _mgm_render_cost(edit_in: Message) -> None:
-        rows = await rt.db.fetch(
-            "SELECT kind, COUNT(*) AS calls, "
-            "       COALESCE(SUM(total_tokens), 0) AS tokens, "
-            "       COALESCE(SUM(cost_usd), 0) AS cost "
-            "  FROM openai_usage "
-            " WHERE created_at >= NOW() - INTERVAL '7 days' "
-            " GROUP BY kind ORDER BY cost DESC"
-        )
-        if not rows:
-            body = "No usage recorded in the last 7 days."
-        else:
-            lines = ["Last 7d (all chats):"]
-            total = 0.0
-            for r in rows:
-                c = float(r["cost"] or 0)
-                total += c
-                lines.append(
-                    f"  {r['kind']:<10}  {r['calls']:>5} calls  "
-                    f"{int(r['tokens']):>8} tokens  ${c:.4f}"
-                )
-            lines.append(f"  TOTAL: ${total:.4f}")
-            body = "\n".join(lines)
+        lines = await _cost_report_lines(None)
+        body = "\n".join(lines) if lines else "No usage recorded in the last 7 days."
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="← back", callback_data="mgm:debug"),
             _home_button(),
@@ -3977,6 +3977,11 @@ def build_router(rt: Runtime) -> Router:
                     )
                 except TelegramBadRequest:
                     pass
+            await rt.command_log.add(
+                cb.message.chat.id if cb.message else None,
+                cb.from_user.id if cb.from_user else None,
+                "/ai_provider", f"switch {arg}", True,
+            )
             await cb.answer(f"Switched to {arg}.")
             return
         if verb == "list":
@@ -4031,6 +4036,11 @@ def build_router(rt: Runtime) -> Router:
                     )
                 except TelegramBadRequest:
                     pass
+            await rt.command_log.add(
+                cb.message.chat.id if cb.message else None,
+                cb.from_user.id if cb.from_user else None,
+                "/ai_model", f"{arg} {new_model}", True,
+            )
             await cb.answer(f"{arg} model set.")
             return
         await cb.answer(_expired("ai_provider"), show_alert=True)
@@ -4074,6 +4084,10 @@ def build_router(rt: Runtime) -> Router:
         val = parts[2].lower()
         on = val in ("on", "1", "true", "yes")
         await set_debug_toggle(rt.db, msg.from_user.id, name, on)
+        await rt.command_log.add(
+            msg.chat.id if msg.chat else None, msg.from_user.id,
+            "/debug_toggle", f"{name} {'on' if on else 'off'}", True,
+        )
         await msg.reply(
             f"{name}: {'ON' if on else 'off'}",
             disable_notification=True,
@@ -4143,6 +4157,11 @@ def build_router(rt: Runtime) -> Router:
         body = (
             f"Force-cleared active duck for chat {target} "
             f"({cleared} row(s) updated)."
+        )
+        await rt.command_log.add(
+            cb.message.chat.id if cb.message else None,
+            cb.from_user.id if cb.from_user else None,
+            "/debug_clear_duck", f"chat={target} cleared={cleared}", True,
         )
         if cb.message:
             try:
