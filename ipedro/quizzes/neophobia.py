@@ -57,7 +57,6 @@ def _score(answers: list[int]) -> QuizResult:
     band = _band(neo)
     return QuizResult(
         headline=neo,
-        headline_max=float(_SCALE_MAX),
         summary=band,
         meters=[
             ("🙅 Pickiness     ", neo / _SCALE_MAX, f"{neo}/7"),

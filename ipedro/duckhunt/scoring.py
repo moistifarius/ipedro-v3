@@ -164,10 +164,10 @@ BEF_BASE_CHANCE: dict[str, float] = {
 def bef_dice_passes(rarity: str, rng: random.Random | None = None) -> bool:
     """Step 1 of the bef flow.
 
-    Returns False with probability ``BEF_REFUSE_RATE`` — the duck refuses
-    outright before the AI verdict is even consulted. This is the harder
-    setting: roughly one bef in three is a flat-out "no" regardless of
-    AI mood.
+    Returns False with probability ``BEF_REFUSE_RATE`` (0.55) — the duck
+    refuses outright before the AI verdict is even consulted. This is the
+    harder setting: roughly one bef in two is a flat-out "no" regardless
+    of AI mood.
     """
     r = rng if rng is not None else random
     return r.random() >= BEF_REFUSE_RATE

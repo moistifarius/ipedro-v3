@@ -78,6 +78,41 @@ async def test_remind_registers_a_brand_new_chat():
 
 
 @pytest.mark.asyncio
+async def test_whatdid_unknown_username_gives_the_specific_error():
+    """Used to fall through to the generic Usage message for an unmatched
+    @user, losing the more specific 'I don't know them yet' every sibling
+    command (/catchphrases, /lexicon, /echo) already gives."""
+    rt, _ = _rt(user_lookup=None)
+    handler = _handler(rt, "whatdid")
+    msg = _msg("/whatdid @stranger")
+    await handler(msg)
+    out = msg.reply.await_args.args[0]
+    assert "don't know @stranger" in out
+    assert "Usage" not in out
+
+
+@pytest.mark.asyncio
+async def test_whatdid_with_nothing_given_shows_usage():
+    rt, _ = _rt()
+    handler = _handler(rt, "whatdid")
+    msg = _msg("/whatdid")
+    await handler(msg)
+    assert "Usage" in msg.reply.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_whatdid_summarizes_a_known_user():
+    rt, _ = _rt(user_lookup={
+        "user_id": 7, "first_name": "Matt", "last_name": None, "username": "mattd",
+    })
+    handler = _handler(rt, "whatdid")
+    msg = _msg("/whatdid @mattd")
+    await handler(msg)
+    rt.openai.cheap_completion.assert_awaited_once()
+    msg.reply.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_memory_off_history_command_says_so():
     rt, _ = _rt(memory_enabled=False)
     handler = _handler(rt, "tldr")

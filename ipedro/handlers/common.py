@@ -81,7 +81,9 @@ async def require_admin(message: Message, admin_ids: Iterable[int]) -> bool:
                 ctx.chat_type,
             )
             return False
-        await message.reply("This command is admin-only.")
+        await message.reply(
+            "This command is admin-only.", disable_notification=True,
+        )
         return False
     return True
 

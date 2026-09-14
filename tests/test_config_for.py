@@ -117,6 +117,18 @@ def test_config_wizard_header_no_custom_says_none():
     assert "(none)" in head
 
 
+def test_config_wizard_header_escapes_persona_custom_before_html_mode():
+    """The header is sent in Telegram's HTML parse mode. persona_custom is
+    free text an admin can set to anything — including '<' / '&' — so it
+    must be escaped or the wizard message either mangles or fails to
+    render (Telegram's HTML parser errors on unbalanced/unknown tags)."""
+    cfg = _FakeCfg(persona_custom="a butler & <script>keeper</script>")
+    head = _config_wizard_header(cfg, target_chat_id=42, is_dm_scoped=False)
+    assert "&amp;" in head
+    assert "&lt;script&gt;" in head
+    assert "<script>" not in head
+
+
 def test_callback_routes_to_target_chat_id_not_message_chat_id():
     """Parsing a cfg: callback yields the target chat id directly, never
     falls back to wherever the message lives."""

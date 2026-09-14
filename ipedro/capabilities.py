@@ -53,7 +53,8 @@ _POLICY_LINE: dict[str, str] = {
     "always": "every message here",
     "mention": "messages that say your name, reply to you, or are "
                "plainly talking to you (a follow-up right after you spoke, "
-               "a question to the room)",
+               "a question to the room, or mentioning you by description "
+               "or in the third person while you're in the conversation)",
     "reply": "only replies to your own messages",
     "ambient": "messages that say your name or reply to you, plus the "
                "occasional random one",

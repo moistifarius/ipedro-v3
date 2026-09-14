@@ -59,7 +59,6 @@ def _score(answers: list[int]) -> QuizResult:
 
     return QuizResult(
         headline=overall,
-        headline_max=float(_SCALE_MAX),
         summary=f"{level} · {_TRAIT_LABEL[dominant]}",
         meters=[
             ("🎭 Machiavellian", mach / _SCALE_MAX, f"{mach}/7"),

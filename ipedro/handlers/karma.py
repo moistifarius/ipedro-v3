@@ -46,6 +46,12 @@ def build_router(rt: Runtime) -> Router:
     async def on_reaction(event: MessageReactionUpdated) -> None:
         if not event.chat or not event.message_id:
             return
+        if event.user is None:
+            # Anonymous (actor_chat) reaction — Telegram doesn't expose
+            # which individual performed it, so there's no way to verify
+            # it isn't the message's own author reacting to themselves
+            # through their anonymous-admin identity. Not eligible.
+            return
         delta = _score_set(event.new_reaction) - _score_set(event.old_reaction)
         if delta == 0:
             return

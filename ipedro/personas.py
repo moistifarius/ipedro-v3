@@ -37,9 +37,7 @@ def set_master_prompt_override(text: str | None) -> None:
     _master_prompt_override = text.strip() if text else None
 
 
-# Legacy aliases so callers from earlier batches still work.
-
-
+# Non-master personas, selected by chat_config.persona.
 PERSONAS: dict[str, str] = {
     "neutral": NEUTRAL_PROMPT,
 }

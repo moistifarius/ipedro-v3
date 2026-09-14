@@ -731,7 +731,8 @@ def build_router(rt: Runtime) -> Router:
         # outcome.message reply entirely. (Successes still echo so the
         # AI accept line lands.)
         if outcome.success:
-            await msg.reply(outcome.message, disable_notification=True)
+            sent = await msg.reply(outcome.message, disable_notification=True)
+            track(msg.chat.id, sent.message_id, outcome.message)
 
         # On success: follow up with a celebration. The user can then
         # reply to the follow-up with a name (reply-to-name handler) or
@@ -748,7 +749,7 @@ def build_router(rt: Runtime) -> Router:
                     msg.from_user.id, duck_after.id,
                 )
             except Exception as exc:
-                log.debug("bef follow-up send failed: %s", exc)
+                log.warning("bef follow-up send failed: %s", exc)
 
         # On refusal: post a challenge the user must solve before
         # retrying. The challenge's own intro carries the refusal flavor

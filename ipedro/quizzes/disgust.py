@@ -53,7 +53,6 @@ def _score(answers: list[int]) -> QuizResult:
     band_emoji = dt.BAND_EMOJI.get(r.overall_band, "")
     return QuizResult(
         headline=r.overall_score,
-        headline_max=6.0,
         summary=f"{r.overall_band} {band_emoji}".strip(),
         meters=[
             ("🍽 Food   ", r.food_score / 6, f"{r.food_score}/6 · {r.food_band}"),

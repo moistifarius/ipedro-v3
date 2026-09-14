@@ -1,8 +1,9 @@
 """Admin-gated /debug_* commands to force-trigger the new behaviors.
 
 These exist purely so the admin can verify each path end-to-end without
-waiting on Poisson clocks or random outcomes. They are NOT registered if
-the caller isn't an admin (require_admin handles that silently in groups).
+waiting on Poisson clocks or random outcomes. Every handler is always
+registered; each calls require_admin() first and returns early for
+anyone else (silently in groups, per require_admin's own docstring).
 """
 
 from __future__ import annotations

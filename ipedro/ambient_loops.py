@@ -77,43 +77,55 @@ async def _maybe_yearly_retro(
     )
     for c in chats:
         chat_id = c["chat_id"]
-        # Pull this year's running summaries + recent messages as context.
-        rows = await db.fetch(
-            "SELECT summary FROM summaries "
-            "WHERE chat_id = $1 AND EXTRACT(YEAR FROM created_at)::int = $2 "
-            "ORDER BY id ASC LIMIT 40",
-            chat_id, year,
-        )
-        if not rows:
-            continue
-        joined = "\n\n".join(r["summary"] for r in rows)[:14000]
-        retro = await openai.short_completion(
-            YEAR_RETRO_PROMPT.format(messages=joined),
-            max_tokens=600, chat_id=chat_id,
-        )
-        if not retro:
-            continue
-        text = f"🎆 {year} — A Year in Review 🎆\n\n{retro}"
         try:
-            sent = await bot.send_message(
-                chat_id, text,
-                disable_notification=is_silenced(chat_id),
+            await _maybe_yearly_retro_for_chat(bot, db, openai, chat_id, year)
+        except Exception as exc:
+            log.warning(
+                "Yearly retro failed for chat %s (will retry): %s",
+                chat_id, exc,
             )
-            track(chat_id, sent.message_id, text)
-        except (TelegramForbiddenError, TelegramBadRequest) as exc:
-            # Permanent (kicked/blocked/bad chat): stamp anyway so we stop
-            # burning a 600-token AI call on this chat every hour.
-            log.warning("Retro undeliverable for %s (stamping): %s", chat_id, exc)
-        except Exception as exc:  # pragma: no cover
-            log.warning("Retro send failed for %s (will retry): %s", chat_id, exc)
-            continue
-        await db.execute(
-            "INSERT INTO chat_state (chat_id, last_retrospective_year) "
-            "VALUES ($1, $2) "
-            "ON CONFLICT (chat_id) DO UPDATE "
-            "SET last_retrospective_year = EXCLUDED.last_retrospective_year",
-            chat_id, year,
+
+
+async def _maybe_yearly_retro_for_chat(
+    bot: Bot, db: Database, openai: OpenAIClient, chat_id: int, year: int,
+) -> None:
+    # Pull this year's running summaries + recent messages as context.
+    rows = await db.fetch(
+        "SELECT summary FROM summaries "
+        "WHERE chat_id = $1 AND EXTRACT(YEAR FROM created_at)::int = $2 "
+        "ORDER BY id ASC LIMIT 40",
+        chat_id, year,
+    )
+    if not rows:
+        return
+    joined = "\n\n".join(r["summary"] for r in rows)[:14000]
+    retro = await openai.short_completion(
+        YEAR_RETRO_PROMPT.format(messages=joined),
+        max_tokens=600, chat_id=chat_id,
+    )
+    if not retro:
+        return
+    text = f"🎆 {year} — A Year in Review 🎆\n\n{retro}"
+    try:
+        sent = await bot.send_message(
+            chat_id, text,
+            disable_notification=is_silenced(chat_id),
         )
+        track(chat_id, sent.message_id, text)
+    except (TelegramForbiddenError, TelegramBadRequest) as exc:
+        # Permanent (kicked/blocked/bad chat): stamp anyway so we stop
+        # burning a 600-token AI call on this chat every hour.
+        log.warning("Retro undeliverable for %s (stamping): %s", chat_id, exc)
+    except Exception as exc:  # pragma: no cover
+        log.warning("Retro send failed for %s (will retry): %s", chat_id, exc)
+        return
+    await db.execute(
+        "INSERT INTO chat_state (chat_id, last_retrospective_year) "
+        "VALUES ($1, $2) "
+        "ON CONFLICT (chat_id) DO UPDATE "
+        "SET last_retrospective_year = EXCLUDED.last_retrospective_year",
+        chat_id, year,
+    )
 
 
 async def _maybe_daily_fortune(
@@ -131,32 +143,44 @@ async def _maybe_daily_fortune(
     )
     for c in chats:
         chat_id = c["chat_id"]
-        fortune = await openai.cheap_completion(
-            FORTUNE_PROMPT, max_tokens=60, chat_id=chat_id,
-        )
-        if not fortune:
-            continue
-        text = f"🥠 {fortune}"
         try:
-            sent = await bot.send_message(
-                chat_id, text,
-                disable_notification=is_silenced(chat_id),
+            await _maybe_daily_fortune_for_chat(bot, db, openai, chat_id, today)
+        except Exception as exc:
+            log.warning(
+                "Daily fortune failed for chat %s (will retry): %s",
+                chat_id, exc,
             )
-            track(chat_id, sent.message_id, text)
-        except (TelegramForbiddenError, TelegramBadRequest) as exc:
-            # Permanent failure: stamp anyway so a chat the bot was kicked
-            # from stops costing an AI call every hour, forever.
-            log.warning("Fortune undeliverable for %s (stamping): %s", chat_id, exc)
-        except Exception as exc:  # pragma: no cover
-            log.warning("Fortune send failed for %s (will retry): %s", chat_id, exc)
-            continue
-        await db.execute(
-            "INSERT INTO chat_state (chat_id, last_fortune_date) "
-            "VALUES ($1, $2) "
-            "ON CONFLICT (chat_id) DO UPDATE "
-            "SET last_fortune_date = EXCLUDED.last_fortune_date",
-            chat_id, today,
+
+
+async def _maybe_daily_fortune_for_chat(
+    bot: Bot, db: Database, openai: OpenAIClient, chat_id: int, today,
+) -> None:
+    fortune = await openai.cheap_completion(
+        FORTUNE_PROMPT, max_tokens=60, chat_id=chat_id,
+    )
+    if not fortune:
+        return
+    text = f"🥠 {fortune}"
+    try:
+        sent = await bot.send_message(
+            chat_id, text,
+            disable_notification=is_silenced(chat_id),
         )
+        track(chat_id, sent.message_id, text)
+    except (TelegramForbiddenError, TelegramBadRequest) as exc:
+        # Permanent failure: stamp anyway so a chat the bot was kicked
+        # from stops costing an AI call every hour, forever.
+        log.warning("Fortune undeliverable for %s (stamping): %s", chat_id, exc)
+    except Exception as exc:  # pragma: no cover
+        log.warning("Fortune send failed for %s (will retry): %s", chat_id, exc)
+        return
+    await db.execute(
+        "INSERT INTO chat_state (chat_id, last_fortune_date) "
+        "VALUES ($1, $2) "
+        "ON CONFLICT (chat_id) DO UPDATE "
+        "SET last_fortune_date = EXCLUDED.last_fortune_date",
+        chat_id, today,
+    )
 
 
 async def run_ambient_loops(

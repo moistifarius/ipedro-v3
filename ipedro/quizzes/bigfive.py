@@ -58,7 +58,6 @@ def _score(answers: list[int]) -> QuizResult:
     dominant = max(traits.items(), key=lambda t: t[1])[0]
     return QuizResult(
         headline=traits["E"],   # stored, but this quiz is unranked
-        headline_max=float(_SCALE_MAX),
         summary=_LABEL[dominant][1],
         meters=[
             (_LABEL[t][0], traits[t] / _SCALE_MAX, f"{traits[t]}/7")

@@ -3,7 +3,12 @@
 Bing image search is the primary source (most-relevant result for a keyword),
 with LoremFlickr as a keyless fallback so there's always something. Best
 effort: any failure returns None and the quiz falls back to its emoji text
-flow. Results are cached per item, so each keyword is fetched once and reused.
+flow.
+
+This module does no caching of its own — every call re-fetches. The DB
+cache keyed per item lives in the caller (engine.py / quiz_warmup), which
+covers item images; the result illustration is not currently cached at
+all.
 
 Only JPEG/PNG are returned, since those are what Telegram's sendPhoto accepts
 reliably (webp/gif candidates are skipped).

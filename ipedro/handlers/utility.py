@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import re
 from collections import Counter
@@ -249,32 +250,19 @@ def build_router(rt: Runtime) -> Router:
         if not await require_memory(rt, msg):
             return
         await get_or_create_chat_config(rt, msg)
-        target_user_id: int | None = None
-        target_name = "they"
-        # Reply-to wins; else parse @username from the arg.
-        if msg.reply_to_message and msg.reply_to_message.from_user:
-            u = msg.reply_to_message.from_user
-            target_user_id = u.id
-            target_name = display_name(u)
-        else:
-            parts = (msg.text or "").split(None, 1)
-            if len(parts) >= 2:
-                arg = parts[1].strip().lstrip("@")
-                row = await rt.db.fetchrow(
-                    "SELECT user_id, first_name, last_name, username "
-                    "  FROM users WHERE LOWER(username) = LOWER($1) LIMIT 1",
-                    arg,
-                )
-                if row:
-                    target_user_id = row["user_id"]
-                    target_name = (
-                        f"{row['first_name'] or ''} {row['last_name'] or ''}"
-                    ).strip() or row["username"] or arg
+        target_user_id, target_name = await _resolve_target_user(rt, msg)
         if target_user_id is None:
-            await msg.reply(
-                "Usage: /whatdid @username  (or reply to someone with /whatdid).",
-                disable_notification=True,
-            )
+            if target_name:
+                await msg.reply(
+                    f"I don't know @{target_name} yet — they need to have "
+                    "spoken here first.",
+                    disable_notification=True,
+                )
+            else:
+                await msg.reply(
+                    "Usage: /whatdid @username  (or reply to someone with /whatdid).",
+                    disable_notification=True,
+                )
             return
 
         rows = await rt.db.fetch(
@@ -1183,7 +1171,7 @@ def _config_wizard_header(cfg, target_chat_id: int, *, is_dm_scoped: bool) -> st
 
     custom = (cfg.persona_custom or "").strip()
     custom_line = (
-        f"   custom override: <i>{_truncate(custom, 80)}</i>"
+        f"   custom override: <i>{html.escape(_truncate(custom, 80))}</i>"
         if custom else "   custom override: <i>(none)</i>"
     )
 

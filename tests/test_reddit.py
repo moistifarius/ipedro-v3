@@ -644,3 +644,39 @@ def test_is_meme_generation_request_true(text, topic):
 def test_is_meme_generation_request_false(text):
     from ipedro.reddit import is_meme_generation_request
     assert is_meme_generation_request(text) is False
+
+
+# ── download_media's total-duration ceiling ──────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_download_media_gives_up_after_the_total_budget(monkeypatch):
+    """A per-chunk read timeout doesn't bound the whole download: a slow
+    trickle just under that rate could stream indefinitely with no single
+    read ever timing out. download_media must still give up eventually."""
+    import asyncio
+
+    import ipedro.reddit as reddit_module
+
+    async def hangs_forever(media, *, timeout, user_agent):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(reddit_module, "_download_media", hangs_forever)
+    media = Media(kind="video", url="https://v.redd.it/x/DASH_1080.mp4")
+
+    result = await asyncio.wait_for(
+        reddit_module.download_media(media, timeout=0.01),
+        timeout=5,     # the test's own safety net, not the thing under test
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_download_media_returns_the_real_result_within_budget(monkeypatch):
+    import ipedro.reddit as reddit_module
+
+    async def fast(media, *, timeout, user_agent):
+        return b"the bytes"
+
+    monkeypatch.setattr(reddit_module, "_download_media", fast)
+    media = Media(kind="photo", url="https://i.redd.it/x.jpg")
+    assert await reddit_module.download_media(media) == b"the bytes"

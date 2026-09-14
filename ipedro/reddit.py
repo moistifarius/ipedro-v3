@@ -937,7 +937,32 @@ async def download_media(
     media: Media, *, timeout: float = 20.0, user_agent: str | None = None,
 ) -> bytes | None:
     """Download the media bytes, muxing audio into Reddit video when
-    possible. Returns None on failure."""
+    possible. Returns None on failure.
+
+    ``timeout`` is httpx's per-operation (connect/read/write) timeout —
+    each individual chunk read gets a fresh clock, so a slow trickle just
+    under that rate can stream indefinitely without any single read ever
+    timing out. A video download can also mean up to three sequential
+    round trips (video, then audio, then mux). Bound the whole call with
+    a hard wall-clock ceiling on top, generous enough for that worst case.
+    """
+    total_budget = timeout * 6
+    try:
+        return await asyncio.wait_for(
+            _download_media(media, timeout=timeout, user_agent=user_agent),
+            timeout=total_budget,
+        )
+    except asyncio.TimeoutError:
+        log.info(
+            "reddit media download exceeded %.0fs total budget: %s",
+            total_budget, media.url,
+        )
+        return None
+
+
+async def _download_media(
+    media: Media, *, timeout: float, user_agent: str | None,
+) -> bytes | None:
     async with httpx.AsyncClient(
         headers={"User-Agent": user_agent or _USER_AGENT},
         timeout=timeout,

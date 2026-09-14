@@ -194,6 +194,38 @@ async def test_ignore_is_blocked_by_pending_challenge():
 
 
 @pytest.mark.asyncio
+async def test_bef_success_echo_is_tracked_like_its_celebration_neighbor(monkeypatch):
+    """The AI-accept echo sent right before the celebration follow-up
+    used to be the one un-tracked reply in this whole flow — 'bad dale'
+    couldn't delete it, unlike every other message this handler sends."""
+    from ipedro.duckhunt.scoring import ActionOutcome
+
+    duck_after = SimpleNamespace(id=9)
+    outcome = ActionOutcome(
+        success=True, points_delta=1, streak_delta=1,
+        message="The duck approaches cautiously...", resolves_duck=True,
+    )
+    rt = _rt(duck=SimpleNamespace(id=9, is_boss=False))
+    rt.duckhunt.handle_bef = AsyncMock(return_value=(outcome, duck_after))
+    rt.duckhunt.get_bef_challenge = AsyncMock(return_value=None)
+
+    tracked = []
+    monkeypatch.setattr(
+        "ipedro.handlers.duckhunt.track",
+        lambda chat_id, message_id, text: tracked.append((chat_id, message_id, text)),
+    )
+
+    handler = _handler(rt, "bef_action")
+    msg = _msg("bef")
+    msg.reply = AsyncMock(return_value=SimpleNamespace(message_id=201))
+    msg.answer = AsyncMock(return_value=SimpleNamespace(message_id=202))
+    await handler(msg)
+
+    assert (42, 201, outcome.message) in tracked   # the echo itself
+    assert any(t[1] == 202 for t in tracked)        # the celebration follow-up
+
+
+@pytest.mark.asyncio
 async def test_bef_with_no_duck_on_cooldown_gets_no_captcha():
     rt = _rt(duck=None, cooldown_ok=False)
     handler = _handler(rt, "bef_action")

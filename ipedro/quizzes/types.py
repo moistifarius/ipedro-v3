@@ -27,7 +27,6 @@ class QuizItem:
 @dataclass(frozen=True)
 class QuizResult:
     headline: float                          # ranking axis, in scale units
-    headline_max: float
     summary: str                             # short type/band label
     meters: list[tuple[str, float, str]]     # (label, fraction 0..1, value text)
     extras: list[str]                        # extra one-liner result lines

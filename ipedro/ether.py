@@ -359,8 +359,8 @@ async def broadcast_now(bot: Bot, db: Database) -> tuple[int, int] | None:
 
     Returns ``(source_chat_id, dest_chat_id)`` on success or ``None`` if
     there's no eligible source message, no idle destination, or fewer
-    than two opted-in chats. Used by ``_maybe_broadcast`` after rolling
-    dice, and by ``/debug_ether`` to verify the path end-to-end.
+    than two opted-in chats. Used by ``/debug_ether`` to verify the path
+    end-to-end.
     """
     opted_in = await _opted_in_chats(db)
     if len(opted_in) < 2:
