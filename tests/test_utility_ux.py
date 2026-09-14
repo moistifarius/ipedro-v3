@@ -66,6 +66,18 @@ def _msg(text):
 
 
 @pytest.mark.asyncio
+async def test_remind_registers_a_brand_new_chat():
+    """Every sibling handler calls get_or_create_chat_config before
+    touching the DB; /remind didn't, so a brand-new chat's first message
+    being a /remind would FK-violate on add_reminder's chat_id reference
+    before the chats row that upsert_chat creates ever existed."""
+    rt, _ = _rt()
+    handler = _handler(rt, "remind")
+    await handler(_msg("/remind 5m water the plants"))
+    rt.chats.upsert_chat.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_memory_off_history_command_says_so():
     rt, _ = _rt(memory_enabled=False)
     handler = _handler(rt, "tldr")

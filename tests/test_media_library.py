@@ -112,16 +112,21 @@ def _row(i, desc, kind="photo", who="Matt", ago_min=60):
 
 
 @pytest.mark.asyncio
-async def test_vector_search_keeps_only_media_hits_in_order():
+async def test_vector_search_asks_the_db_to_filter_by_ref_kind():
+    """Filtered IN the query, not post-hoc — a chat-wide top-k would let
+    unrelated message/fact/summary hits starve out a real picture match
+    that didn't make that unfiltered cut."""
     rt = _rt(fetch=[_row(3, "a propane grill"), _row(9, "a dog")])
     rt.memory.embeddings.search = AsyncMock(return_value=[
-        {"ref_kind": "message", "ref_id": 1, "similarity": 0.9},   # not a picture
         {"ref_kind": "media", "ref_id": 3, "similarity": 0.8},
         {"ref_kind": "media", "ref_id": 9, "similarity": 0.4},
     ])
     out = await lib.search(rt, 42, "the grill")
     assert [r["id"] for r in out] == [3, 9]
     assert out[0]["similarity"] == 0.8
+    call = rt.memory.embeddings.search.await_args
+    assert call.kwargs["ref_kind"] == "media"
+    assert call.kwargs["k"] == 3               # default k, not k*4
     # the row fetch asked for exactly the media ids, in hit order
     assert rt.db.fetch.await_args.args[2] == [3, 9]
 
@@ -165,7 +170,9 @@ async def test_a_confident_match_is_sent_with_a_caption_and_remembered(monkeypat
     ]))
     msg = _tg_msg()
     assert await lib.recall(rt, msg, _cfg(), "send that pic of the grill") is True
-    msg.reply_photo.assert_awaited_once_with("file3", caption="Filed under evidence.")
+    msg.reply_photo.assert_awaited_once_with(
+        "file3", caption="Filed under evidence.", disable_notification=True,
+    )
     recorded = rt.memory.record_message.await_args.kwargs
     assert recorded["role"] == "assistant" and "sent back a saved photo" in recorded["content"]
     assert recorded["message_id"] == 55

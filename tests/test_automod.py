@@ -83,19 +83,29 @@ def test_kys_gets_a_deflection_and_wins_priority():
     assert _automod_response("that joke killed me lol") not in _KYS_LINES
 
 
+def test_kys_regex_has_word_boundaries_on_both_ends():
+    """Without a trailing \b, '...yourself' matched inside a longer word —
+    'fix that bottleneck yourself' has 'neck' immediately followed by
+    'yourself' with only a space between, which the old pattern's missing
+    right-hand boundary let slip through as a false positive."""
+    for t in ("fix that bottleneck yourself", "necking yourself into a corner",
+              "yourselfish behavior"):
+        assert _automod_response(t) is None, t
+
+
 # ── the no-echo invariant ────────────────────────────────────────────────────
 # For every trigger row: a canonical input a user would actually type, chosen
 # so it reaches that row (first match wins). The response must never be just
 # that phrase again. Adding a row without a sample fails the meta-test.
 
 _SAMPLES: dict[str, str] = {
-    r"\bkys\b|(kill|neck)\s*(your|my|ur|yr)\s*self": "kys",
+    r"\bkys\b|\b(kill|neck)\s*(your|my|ur|yr)\s*self\b": "kys",
     r"\bpocket\s*sand\b": "pocket sand",
     r"\bpropane\b": "propane",
     r"\bthat boy ain'?t right\b": "that boy ain't right",
     r"\bsh+-?sha+\b": "sh-sha",
     r"\bdeep state\b|\bfalse flag\b|\bchemtrails?\b|\bblack helicopters?\b|\btin\s*foil hat\b|\bnew world order\b|\bmen in black\b|\bgrassy knoll\b|\blizard people\b|\bsheeple\b|\barea 51\b|\bmoon landing\b": "deep state",
-    r"\bthey'?re watching\b|\bwake up sheeple\b": "they're watching",
+    r"\bthey'?re watching\b": "they're watching",
     r"\bsquirrel tactic\b": "squirrel tactic",
     r"\bgays?\b": "gay",
     r"\bamong\s*us\b|\bamogus\b|\bsussy\b": "among us",

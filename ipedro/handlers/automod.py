@@ -330,7 +330,7 @@ _AUTOMOD_TRIGGERS: tuple[
           "str | tuple[str, ...] | MediaResponse | DaleGif"], ...
 ] = (
     # --- kys stays first: it must win over any joke trigger in the message ---
-    (re.compile(r"\bkys\b|(kill|neck)\s*(your|my|ur|yr)\s*self", re.IGNORECASE),
+    (re.compile(r"\bkys\b|\b(kill|neck)\s*(your|my|ur|yr)\s*self\b", re.IGNORECASE),
      _KYS_LINES),
 
     # --- Dale Gribble GIFs (the bot's own persona) ---
@@ -354,7 +354,11 @@ _AUTOMOD_TRIGGERS: tuple[
         r"|\bsheeple\b|\barea 51\b|\bmoon landing\b",
         re.IGNORECASE),
      DaleGif("conspiracy", fallback="My suspicions have been confirmed.")),
-    (re.compile(r"\bthey'?re watching\b|\bwake up sheeple\b", re.IGNORECASE),
+    # 'wake up sheeple' isn't its own alternative here: bare 'sheeple' in
+    # the conspiracy row above already matches it first (this table is
+    # first-match-wins), so a second alt for the fuller phrase could never
+    # fire — dead code, not a second trigger.
+    (re.compile(r"\bthey'?re watching\b", re.IGNORECASE),
      DaleGif("paranoia", fallback="Sh-sha. Eyes peeled.")),
     (re.compile(r"\bsquirrel tactic\b", re.IGNORECASE),
      DaleGif("flee", fallback="*scatters into the neighbour's yard* 🐿️")),

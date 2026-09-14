@@ -95,10 +95,12 @@ _REACT_PROBABILITY = 0.04
 # Ambient Dale: how often an un-addressed TEXT message just gets a GIF
 # back — one in fifty. A module constant on purpose, like
 # _REACT_PROBABILITY above it; the per-chat off switch is /chat_config
-# automod off, which covers the whole canned-reaction surface rather than
-# adding a second overlapping toggle. Was 3%, and felt like constant once
-# media messages started flowing through this handler too (see the guard
-# at the roll).
+# automod off. That toggle covers this roll and the automod trigger
+# table, but NOT the cat-fact intercept, the reaction roll, or the
+# thanks/credit lines below — those are separate ambient features with
+# their own always-on behavior, not a second overlapping toggle.
+# Was 3%, and felt like constant once media messages started flowing
+# through this handler too (see the guard at the roll).
 _DALE_GIF_PROBABILITY = 0.02
 
 _POSITIVITY_RE = re.compile(
@@ -686,10 +688,19 @@ def build_router(rt: Runtime) -> Router:
             sent = await msg.reply(line, disable_notification=True)
             track(msg.chat.id, sent.message_id, line)
             if cfg.memory_enabled:
-                await rt.memory.record_message(
-                    chat_id=msg.chat.id, role="assistant", content=line,
-                    message_id=sent.message_id, user_id=None,
-                )
+                try:
+                    await rt.memory.record_message(
+                        chat_id=msg.chat.id, role="assistant", content=line,
+                        message_id=sent.message_id, user_id=None,
+                    )
+                    await maybe_summarize(
+                        rt.memory, rt.openai, rt.settings, msg.chat.id,
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "thanks-dale memory record failed for %s: %s",
+                        msg.chat.id, exc,
+                    )
             return
 
         # AutoModerator-style canned responses (e.g. 'gay' → the copypasta,
@@ -839,10 +850,21 @@ def build_router(rt: Runtime) -> Router:
             and not incoming.is_reply_to_bot
             and random.random() < _DALE_GIF_PROBABILITY
         ):
+            gif_sent = False
             try:
-                await dale.send_random(rt.db, msg, "")
+                gif_sent = await dale.send_random(rt.db, msg, "")
             except Exception as exc:
                 log.debug("ambient dale gif failed in %s: %s", msg.chat.id, exc)
+            if gif_sent:
+                # A random GIF landing on the same message as a full AI
+                # reply would be a double reply — stop here, but still
+                # take the scheduled-summarization opportunity, same as
+                # the should_respond=False branch just below.
+                if cfg.memory_enabled:
+                    await maybe_summarize(
+                        rt.memory, rt.openai, rt.settings, msg.chat.id,
+                    )
+                return
 
         if not should_respond(
             cfg.response_policy, incoming,
@@ -860,10 +882,16 @@ def build_router(rt: Runtime) -> Router:
                 sent = await msg.answer(line, disable_notification=True)
                 track(msg.chat.id, sent.message_id, line)
                 if cfg.memory_enabled:
-                    await rt.memory.record_message(
-                        chat_id=msg.chat.id, role="assistant", content=line,
-                        message_id=sent.message_id, user_id=None,
-                    )
+                    try:
+                        await rt.memory.record_message(
+                            chat_id=msg.chat.id, role="assistant", content=line,
+                            message_id=sent.message_id, user_id=None,
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "credit-line memory record failed for %s: %s",
+                            msg.chat.id, exc,
+                        )
             # Trigger background summarization opportunistically even when we don't reply.
             if cfg.memory_enabled:
                 await maybe_summarize(rt.memory, rt.openai, rt.settings, msg.chat.id)

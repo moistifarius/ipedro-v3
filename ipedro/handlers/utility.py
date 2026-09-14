@@ -212,6 +212,7 @@ def build_router(rt: Runtime) -> Router:
     @r.message(Command("remind"))
     async def remind(msg: Message) -> None:
         """/remind <duration> <text> — e.g. /remind 1h30m feed the cats."""
+        await get_or_create_chat_config(rt, msg)
         raw = msg.text or ""
         parts = raw.split(None, 2)
         if len(parts) < 3:

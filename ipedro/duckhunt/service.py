@@ -153,13 +153,23 @@ class DuckhuntService:
     # ------------------------------------------------------------ resolution helpers
     async def _resolve(
         self, event_id: int, user_id: int, action: str, points: int,
-    ) -> None:
-        await self.db.execute(
+    ) -> bool:
+        """Claim this duck for resolution. Returns True iff THIS call
+        flipped it — the WHERE resolved = FALSE guard means a second,
+        near-simultaneous caller affects zero rows. Callers must gate
+        stat credit on this return value, not on outcome.resolves_duck
+        alone, or two racing bang/bef replies on the same duck can both
+        be scored."""
+        status = await self.db.execute(
             "UPDATE duck_events SET resolved = TRUE, resolved_by = $1, "
             "resolved_action = $2, resolved_at = NOW(), points_awarded = $3 "
             "WHERE id = $4 AND resolved = FALSE",
             user_id, action, points, event_id,
         )
+        try:
+            return int(status.split()[-1]) > 0
+        except (AttributeError, ValueError, IndexError):
+            return False
 
     async def _bump_stats(
         self,
@@ -258,9 +268,19 @@ class DuckhuntService:
             )
         else:
             outcome = bang_outcome(duck.rarity, int(stats), rng)
-        await self._bump_stats(chat_id, user_id, display_name, "bang", outcome)
+        # Only the caller who actually claims the duck (the row-level
+        # WHERE resolved = FALSE guard in _resolve) gets credited. A miss
+        # or partial outcome never contends for the duck, so it's credited
+        # unconditionally same as before; a resolving hit is credited only
+        # if it wins the race.
         if outcome.resolves_duck:
-            await self._resolve(duck.id, user_id, "bang", outcome.points_delta)
+            claimed = await self._resolve(
+                duck.id, user_id, "bang", outcome.points_delta,
+            )
+            if claimed:
+                await self._bump_stats(chat_id, user_id, display_name, "bang", outcome)
+        else:
+            await self._bump_stats(chat_id, user_id, display_name, "bang", outcome)
         return outcome, duck
 
     async def _handle_bang_boss(
@@ -288,7 +308,12 @@ class DuckhuntService:
         )
         required = duck.boss_required_hits or 1
         small_pts = max(1, base_points(duck.rarity) // 4)
-        if new_hits >= required:
+        # == , not >=: boss_current_hits increments by exactly 1 per call
+        # and RETURNING is atomic per row, so exactly one call ever sees
+        # new_hits == required. >= let every LATER hit (after the boss was
+        # already dead) re-enter this branch too, awarding a second
+        # killing-blow bonus and a second kill credit.
+        if new_hits == required:
             # Killing blow.
             big_pts = base_points(duck.rarity) * 2
             outcome = ActionOutcome(
@@ -358,9 +383,14 @@ class DuckhuntService:
         if not duck:
             return None, None
         outcome = ignore_outcome(duck.rarity, rng)
-        await self._bump_stats(chat_id, user_id, display_name, "ignore", outcome)
         if outcome.resolves_duck:
-            await self._resolve(duck.id, user_id, "ignore", outcome.points_delta)
+            claimed = await self._resolve(
+                duck.id, user_id, "ignore", outcome.points_delta,
+            )
+            if claimed:
+                await self._bump_stats(chat_id, user_id, display_name, "ignore", outcome)
+        else:
+            await self._bump_stats(chat_id, user_id, display_name, "ignore", outcome)
         return outcome, duck
 
     async def handle_bef(
@@ -416,8 +446,11 @@ class DuckhuntService:
             outcome = bef_refusal_outcome(ai_line)
 
         if outcome.success:
-            await self._bump_stats(chat_id, user_id, display_name, "bef", outcome)
-            await self._resolve(duck.id, user_id, "bef", outcome.points_delta)
+            claimed = await self._resolve(
+                duck.id, user_id, "bef", outcome.points_delta,
+            )
+            if claimed:
+                await self._bump_stats(chat_id, user_id, display_name, "bef", outcome)
         # Refusal => no stat bump, duck stays.
 
         return outcome, duck

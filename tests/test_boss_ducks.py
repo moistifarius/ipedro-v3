@@ -72,6 +72,24 @@ _KILLED = 3
 
 
 @pytest.mark.asyncio
+async def test_a_hit_after_the_boss_is_already_dead_does_not_re_kill_it():
+    """boss_current_hits increments by 1 per call and RETURNING is atomic
+    per row, so new_hits climbs through every integer — a >= check meant
+    ANY hit landing after the boss died (new_hits > required, e.g. a late
+    concurrent hit, or an admin debug always_hit) re-entered the
+    killing-blow branch and handed out a second bonus + a second kill."""
+    db = _BossFakeDB(_boss(required=3), next_hits=4)   # already past required
+    svc = DuckhuntService(db)  # type: ignore[arg-type]
+    outcome, _ = await svc.handle_bang(
+        chat_id=42, user_id=1, display_name="Matt",
+    )
+    assert not outcome.resolves_duck                    # not treated as a kill
+    assert "killing blow" not in outcome.message.lower()
+    assert len(db.bumps) == 1
+    assert db.bumps[0][_KILLED] == 0
+
+
+@pytest.mark.asyncio
 async def test_non_killing_boss_hit_is_not_a_kill():
     db = _BossFakeDB(_boss(required=3), next_hits=1)
     svc = DuckhuntService(db)  # type: ignore[arg-type]

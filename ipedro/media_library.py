@@ -37,7 +37,8 @@ _MIN_SIMILARITY = 0.32
 
 _SEND_RE = re.compile(
     r"\b(?:send|show|post|find|pull up|dig up|repost|resend|re-send|share|"
-    r"drop|gimme|give me|get me|bring back|link|where(?:'s| is| was))\b",
+    r"drop|gimme|give me|get me|bring back|link|where(?:'s| is| was)|"
+    r"see|let(?:'s| us) see|lemme see)\b",
     re.IGNORECASE,
 )
 _MEDIA_RE = re.compile(
@@ -122,8 +123,12 @@ async def search(rt, chat_id: int, query: str, *, k: int = 3) -> list[dict]:
     if store.openai and store.pgvector_available and query.strip():
         embedding = await store.openai.embed(query)
         if embedding:
-            hits = await store.embeddings.search(chat_id, embedding, k=k * 4)
-            media_hits = [h for h in hits if h.get("ref_kind") == "media"][:k]
+            # ref_kind filtered IN the query, not post-hoc: a chat-wide
+            # top-k would let unrelated message/fact/summary hits starve
+            # out a real picture match that didn't make that unfiltered cut.
+            media_hits = await store.embeddings.search(
+                chat_id, embedding, k=k, ref_kind="media",
+            )
             rows = await _rows_by_id(rt.db, chat_id, [int(h["ref_id"]) for h in media_hits])
             out = []
             for h in media_hits:
@@ -197,16 +202,24 @@ async def send(rt, msg: Message, row: dict, caption: str | None) -> Message | No
     kind, file_id = row.get("kind"), row["file_id"]
     try:
         if kind == "photo":
-            return await msg.reply_photo(file_id, caption=caption)
+            return await msg.reply_photo(
+                file_id, caption=caption, disable_notification=True,
+            )
         if kind == "gif":
-            return await msg.reply_animation(file_id, caption=caption)
+            return await msg.reply_animation(
+                file_id, caption=caption, disable_notification=True,
+            )
         if kind == "video":
-            return await msg.reply_video(file_id, caption=caption)
+            return await msg.reply_video(
+                file_id, caption=caption, disable_notification=True,
+            )
         if kind == "video note":
-            return await msg.reply_video_note(file_id)
+            return await msg.reply_video_note(file_id, disable_notification=True)
         if kind == "sticker":
-            return await msg.reply_sticker(file_id)
-        return await msg.reply_document(file_id, caption=caption)
+            return await msg.reply_sticker(file_id, disable_notification=True)
+        return await msg.reply_document(
+            file_id, caption=caption, disable_notification=True,
+        )
     except Exception as exc:
         log.warning("re-sending stored %s failed: %s", kind, exc)
         return None

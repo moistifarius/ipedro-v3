@@ -360,11 +360,17 @@ class EmbeddingRepo:
             log.warning("Embedding upsert failed (ref=%s/%s): %s", ref_kind, ref_id, exc)
 
     async def search(
-        self, chat_id: int, embedding: Sequence[float], k: int = 6
+        self, chat_id: int, embedding: Sequence[float], k: int = 6,
+        *, ref_kind: str | None = None,
     ) -> list[dict[str, Any]]:
+        """Nearest ``k`` embeddings in this chat. ``ref_kind`` restricts the
+        search to one kind (e.g. 'media') at the database level — filtering
+        the ref_kind AFTER fetching a chat-wide top-k would let unrelated
+        message/fact/summary hits starve out a real match that didn't make
+        the unfiltered top-k cut."""
         try:
             rows = await self.db.fetch(
-                """
+                f"""
                 SELECT e.ref_kind, e.ref_id, e.content,
                        1 - (e.embedding <=> $2) AS similarity,
                        COALESCE(
@@ -376,10 +382,12 @@ class EmbeddingRepo:
                          ON e.ref_kind = 'message' AND m.id = e.ref_id
                   LEFT JOIN users u ON u.user_id = m.user_id
                  WHERE e.chat_id = $1 AND e.embedding IS NOT NULL
+                 {"AND e.ref_kind = $4" if ref_kind is not None else ""}
                  ORDER BY e.embedding <=> $2
                  LIMIT $3
                 """,
-                chat_id, list(embedding), k,
+                *((chat_id, list(embedding), k, ref_kind)
+                  if ref_kind is not None else (chat_id, list(embedding), k)),
             )
             return [dict(r) for r in rows]
         except Exception as exc:

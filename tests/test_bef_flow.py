@@ -82,6 +82,49 @@ class AlwaysHighRng:
 
 
 @pytest.mark.asyncio
+async def test_a_lost_resolve_race_is_not_credited():
+    """Two near-simultaneous bef replies on the same duck: the DB's
+    WHERE resolved = FALSE guard lets only one UPDATE actually flip the
+    row (asyncpg reports 'UPDATE 0' for the loser). The loser must not
+    also get bumped stats, or both users are credited for one duck."""
+    db = FakeDB(_duck("common"))
+
+    calls = {"n": 0}
+    real_execute = db.execute
+
+    async def losing_execute(query, *args):
+        if "UPDATE duck_events SET resolved = TRUE" in query:
+            calls["n"] += 1
+            return "UPDATE 0"          # someone else claimed it first
+        return await real_execute(query, *args)
+
+    db.execute = losing_execute
+    svc = DuckhuntService(db)  # type: ignore[arg-type]
+
+    outcome, _ = await svc.handle_bef(
+        chat_id=42, user_id=1, display_name="alice",
+        ai_verdict=True, ai_line="the duck nods",
+        rng=AlwaysHighRng(),
+    )
+    assert outcome is not None and outcome.success is True   # message still friendly
+    assert calls["n"] == 1                # the resolve attempt did happen
+    assert db.calls.bumped == []          # but the loser earned nothing
+
+
+@pytest.mark.asyncio
+async def test_a_won_resolve_race_is_credited_exactly_once():
+    """Sanity companion: the ordinary (uncontested) path still credits."""
+    db = FakeDB(_duck("common"))
+    svc = DuckhuntService(db)  # type: ignore[arg-type]
+    await svc.handle_bef(
+        chat_id=42, user_id=1, display_name="alice",
+        ai_verdict=True, ai_line="the duck nods",
+        rng=AlwaysHighRng(),
+    )
+    assert len(db.calls.bumped) == 1
+
+
+@pytest.mark.asyncio
 async def test_ai_accept_resolves_regardless_of_rng():
     # Rarity is currently neutralized → the pre-AI dice gate always
     # passes, so an AI ACCEPT succeeds even with an rng that would have
