@@ -1,18 +1,42 @@
 # docker-compose for iPedro V2.
 # On Unraid, drop this file alongside `.env` (copy from .env.example) and run
-# `docker compose up -d` from the share. The "ipedro_pgdata" named volume keeps
-# Postgres data across container/image updates.
+# `docker compose up -d` from the share.
+#
+# Postgres data is stored in a HOST BIND-MOUNT under appdata
+# (PGDATA_HOST_PATH, default /mnt/user/appdata/ipedro/pgdata) rather than a
+# named Docker volume. Named volumes live in /var/lib/docker/volumes/, which
+# the Unraid "Appdata Backup" plugin does NOT scan — so a named volume would
+# be silently excluded from backups. A host path under appdata is picked up
+# automatically.
+#
+# Migrating from the old `ipedro_pgdata` named volume? Run
+#   scripts/migrate_pgdata_to_appdata.sh
+# BEFORE bringing the stack up with this file, or Postgres will initialize a
+# fresh empty database at the new path (your old data stays safe in the named
+# volume until you delete it).
+
+# Container logs are capped (json-file driver) so an unattended bot can't
+# fill the Unraid disk over months of uptime; the &logrotate anchor is
+# shared by both services.
+x-logging: &logrotate
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
 
 services:
   postgres:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
+    logging: *logrotate
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-ipedro}
       POSTGRES_USER: ${POSTGRES_USER:-ipedro}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ipedro}
     volumes:
-      - ipedro_pgdata:/var/lib/postgresql/data
+      # Host path → backup-friendly. Override PGDATA_HOST_PATH in .env for a
+      # non-Unraid host (e.g. ./pgdata for local dev).
+      - ${PGDATA_HOST_PATH:-/mnt/user/appdata/ipedro/pgdata}:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-ipedro}"]
       interval: 10s
@@ -28,6 +52,7 @@ services:
       dockerfile: docker/Dockerfile
     image: ipedro-v2:latest
     restart: unless-stopped
+    logging: *logrotate
     depends_on:
       postgres:
         condition: service_healthy
@@ -36,6 +61,3 @@ services:
     environment:
       # Override DATABASE_URL so it points at the compose service name.
       DATABASE_URL: postgresql://${POSTGRES_USER:-ipedro}:${POSTGRES_PASSWORD:-ipedro}@postgres:5432/${POSTGRES_DB:-ipedro}
-
-volumes:
-  ipedro_pgdata:

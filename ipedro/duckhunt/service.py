@@ -78,12 +78,12 @@ class DuckhuntService:
         self, chat_id: int, lifetime_seconds: int,
         rng: random.Random | None = None,
     ) -> ActiveDuck:
-        # Resolve any stale unexpired duck first (idempotency).
+        # Clear out any already-expired duck first (idempotency).
         await self.expire_old_ducks(chat_id)
         on_holiday = current_holiday() is not None
         rarity = roll_rarity(rng, on_holiday=on_holiday)
         is_boss = roll_is_boss(rng)
-        required_hits = boss_required_hits(rarity) if is_boss else None
+        required_hits = boss_required_hits() if is_boss else None
         expires = datetime.now(timezone.utc) + timedelta(seconds=lifetime_seconds)
         row = await self.db.fetchrow(
             "INSERT INTO duck_events (chat_id, rarity, expires_at, "
@@ -153,13 +153,23 @@ class DuckhuntService:
     # ------------------------------------------------------------ resolution helpers
     async def _resolve(
         self, event_id: int, user_id: int, action: str, points: int,
-    ) -> None:
-        await self.db.execute(
+    ) -> bool:
+        """Claim this duck for resolution. Returns True iff THIS call
+        flipped it — the WHERE resolved = FALSE guard means a second,
+        near-simultaneous caller affects zero rows. Callers must gate
+        stat credit on this return value, not on outcome.resolves_duck
+        alone, or two racing bang/bef replies on the same duck can both
+        be scored."""
+        status = await self.db.execute(
             "UPDATE duck_events SET resolved = TRUE, resolved_by = $1, "
             "resolved_action = $2, resolved_at = NOW(), points_awarded = $3 "
             "WHERE id = $4 AND resolved = FALSE",
             user_id, action, points, event_id,
         )
+        try:
+            return int(status.split()[-1]) > 0
+        except (AttributeError, ValueError, IndexError):
+            return False
 
     async def _bump_stats(
         self,
@@ -258,9 +268,19 @@ class DuckhuntService:
             )
         else:
             outcome = bang_outcome(duck.rarity, int(stats), rng)
-        await self._bump_stats(chat_id, user_id, display_name, "bang", outcome)
+        # Only the caller who actually claims the duck (the row-level
+        # WHERE resolved = FALSE guard in _resolve) gets credited. A miss
+        # or partial outcome never contends for the duck, so it's credited
+        # unconditionally same as before; a resolving hit is credited only
+        # if it wins the race.
         if outcome.resolves_duck:
-            await self._resolve(duck.id, user_id, "bang", outcome.points_delta)
+            claimed = await self._resolve(
+                duck.id, user_id, "bang", outcome.points_delta,
+            )
+            if claimed:
+                await self._bump_stats(chat_id, user_id, display_name, "bang", outcome)
+        else:
+            await self._bump_stats(chat_id, user_id, display_name, "bang", outcome)
         return outcome, duck
 
     async def _handle_bang_boss(
@@ -288,7 +308,12 @@ class DuckhuntService:
         )
         required = duck.boss_required_hits or 1
         small_pts = max(1, base_points(duck.rarity) // 4)
-        if new_hits >= required:
+        # == , not >=: boss_current_hits increments by exactly 1 per call
+        # and RETURNING is atomic per row, so exactly one call ever sees
+        # new_hits == required. >= let every LATER hit (after the boss was
+        # already dead) re-enter this branch too, awarding a second
+        # killing-blow bonus and a second kill credit.
+        if new_hits == required:
             # Killing blow.
             big_pts = base_points(duck.rarity) * 2
             outcome = ActionOutcome(
@@ -321,9 +346,11 @@ class DuckhuntService:
                     message="",
                     resolves_duck=False,
                 )
+                # "boss_hit", not "bang": participation credit must not
+                # count as a kill — one boss is one duck killed, total.
                 await self._bump_stats(
                     duck.chat_id, c["user_id"], c["display_name"],
-                    "bang", share_outcome,
+                    "boss_hit", share_outcome,
                 )
             await self._resolve(
                 duck.id, user_id, "bang", outcome.points_delta,
@@ -341,8 +368,10 @@ class DuckhuntService:
             ),
             resolves_duck=False,
         )
+        # "boss_hit": a non-killing hit earns points but is not a kill —
+        # otherwise a 3-hit boss inflated `killed` by 3+ across the chat.
         await self._bump_stats(
-            duck.chat_id, user_id, display_name, "bang", outcome,
+            duck.chat_id, user_id, display_name, "boss_hit", outcome,
         )
         return outcome, duck
 
@@ -354,9 +383,14 @@ class DuckhuntService:
         if not duck:
             return None, None
         outcome = ignore_outcome(duck.rarity, rng)
-        await self._bump_stats(chat_id, user_id, display_name, "ignore", outcome)
         if outcome.resolves_duck:
-            await self._resolve(duck.id, user_id, "ignore", outcome.points_delta)
+            claimed = await self._resolve(
+                duck.id, user_id, "ignore", outcome.points_delta,
+            )
+            if claimed:
+                await self._bump_stats(chat_id, user_id, display_name, "ignore", outcome)
+        else:
+            await self._bump_stats(chat_id, user_id, display_name, "ignore", outcome)
         return outcome, duck
 
     async def handle_bef(
@@ -387,7 +421,7 @@ class DuckhuntService:
                     success=False, points_delta=0, streak_delta=0,
                     message=(
                         "This duck is too big to befriend. You'd be eaten. "
-                        "Try `bang`."
+                        "Try bang."
                     ),
                     resolves_duck=False,
                 ),
@@ -412,8 +446,11 @@ class DuckhuntService:
             outcome = bef_refusal_outcome(ai_line)
 
         if outcome.success:
-            await self._bump_stats(chat_id, user_id, display_name, "bef", outcome)
-            await self._resolve(duck.id, user_id, "bef", outcome.points_delta)
+            claimed = await self._resolve(
+                duck.id, user_id, "bef", outcome.points_delta,
+            )
+            if claimed:
+                await self._bump_stats(chat_id, user_id, display_name, "bef", outcome)
         # Refusal => no stat bump, duck stays.
 
         return outcome, duck
@@ -432,6 +469,49 @@ class DuckhuntService:
             chat_id, limit,
         )
         return [dict(r) for r in rows]
+
+    async def list_named_ducks_global(
+        self, *, limit: int = 100, offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """All named, befriended ducks across every opted-in chat.
+
+        Skips ducks whose home chat has ``duck_names_public = FALSE`` —
+        chats can opt their roster out of this global view without
+        affecting their own ``/duckfriends`` or ``/duckstats``. Ordered
+        newest-named-first (descending duck_events.id is "good enough":
+        ``name`` is set well after the row was inserted, but no chat
+        renames frequently). Returns ``(rows, total_count)`` so the
+        handler can show "showing N of M" + paginate.
+        """
+        total = int(await self.db.fetchval(
+            """
+            SELECT COUNT(*)
+              FROM duck_events de
+              JOIN chat_config cfg ON cfg.chat_id = de.chat_id
+             WHERE de.resolved = TRUE
+               AND de.resolved_action = 'bef'
+               AND de.name IS NOT NULL
+               AND cfg.duck_names_public = TRUE
+            """
+        ) or 0)
+        rows = await self.db.fetch(
+            """
+            SELECT de.id, de.name, de.resolved_by,
+                   COALESCE(u.first_name, u.username,
+                            CAST(de.resolved_by AS TEXT)) AS owner
+              FROM duck_events de
+              JOIN chat_config cfg ON cfg.chat_id = de.chat_id
+              LEFT JOIN users u ON u.user_id = de.resolved_by
+             WHERE de.resolved = TRUE
+               AND de.resolved_action = 'bef'
+               AND de.name IS NOT NULL
+               AND cfg.duck_names_public = TRUE
+             ORDER BY de.id DESC
+             LIMIT $1 OFFSET $2
+            """,
+            limit, offset,
+        )
+        return [dict(r) for r in rows], total
 
     async def global_leaderboard(self, limit: int = 15) -> list[dict[str, Any]]:
         rows = await self.db.fetch(
@@ -536,6 +616,20 @@ class DuckhuntService:
             "DELETE FROM bef_challenges WHERE chat_id = $1 AND user_id = $2",
             chat_id, user_id,
         )
+
+    async def clear_all_bef_challenges(self, chat_id: int) -> int:
+        """Drop every pending bef challenge in a chat. Returns the count.
+
+        Admin escape hatch (``/debug_clear_challenge``) for when a stuck
+        challenge is gating a chat — most acutely a DM, where the
+        interceptor otherwise judges every message as a failed answer."""
+        res = await self.db.execute(
+            "DELETE FROM bef_challenges WHERE chat_id = $1", chat_id,
+        )
+        try:
+            return int(res.split()[-1])
+        except (AttributeError, ValueError, IndexError):
+            return 0
 
     async def find_bef_challenge_by_prompt(
         self, chat_id: int, prompt_message_id: int,

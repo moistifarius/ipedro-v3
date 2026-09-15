@@ -57,54 +57,57 @@ async def duckhunt_enabled_chats(db: Database) -> list[dict]:
 
 
 # Preserved for an easy revert. Rarity hints are currently disabled —
-# rarity_hint() returns "" so spawn messages don't leak tier flavor.
-_RARITY_HINTS: dict[str, tuple[str, ...]] = {
-    "common": (
-        "",
-        " (just a duck)",
-        " (perfectly average)",
-    ),
-    "uncommon": (
-        " (one feather looks oddly shiny)",
-        " (it carries itself with confidence)",
-        " ✨",
-    ),
-    "rare": (
-        " ✨ (something glints)",
-        " (the light bends a little around it)",
-        " (you swear it just winked)",
-    ),
-    "epic": (
-        " ✨✨ (it's GLOWING. that's not normal.)",
-        " (the colors on its feathers keep shifting)",
-        " 💫 (you feel briefly important)",
-    ),
-    "legendary": (
-        " 👑💎✨ (the air HUMS around it)",
-        " ✨💎 (you forget your name for a second)",
-        " 👑 (somehow it is wearing a crown)",
-        " (reality wobbles. there is a duck.)",
-    ),
-}
 
 
-def rarity_hint(rarity: str) -> str:
-    """Rarity is neutralized — return empty so spawn messages no longer
-    leak tier flavor. _RARITY_HINTS kept above for easy revert."""
-    return ""
+# Telltales that the model handed us a cow / dog / other-animal mistake.
+# We catch the common shapes and fall back to a hardcoded duck rather
+# than spawn a "🐮 QUACK!" embarrassment in chat.
+_NOT_A_DUCK_PATTERNS: tuple[str, ...] = (
+    "(oo)",     # cow eyes
+    "----w",    # cow muzzle/horn
+    "/\\/\\",   # cow horns
+    "moo",      # cow says moo
+    "woof",     # dog says woof
+    "meow",     # cat says meow
+    "hoot",     # owl
+)
+
+# Tiny pool of pre-vetted duck art, used as the fallback whenever the
+# AI output fails sanity-check, and rotated occasionally so it doesn't
+# always look the same.
+_FALLBACK_DUCKS: tuple[str, ...] = (
+    "  __\n<('< 🦆 quack!",
+    "  _\n>(.)__ quack!\n (___/",
+    " __\n<°)))< quack",
+    "🦆 quack!",
+)
+
+
+def _looks_like_a_duck(body: str) -> bool:
+    """True if the AI output plausibly shows a duck.
+
+    Requires the word 'quack' somewhere (case-insensitive) AND no obvious
+    other-animal tells. Cheap heuristic; rejecting a real duck is fine
+    (we just fall back to the hardcoded pool)."""
+    lower = body.lower()
+    if "quack" not in lower:
+        return False
+    return not any(pat in lower for pat in _NOT_A_DUCK_PATTERNS)
 
 
 async def build_quack_message(
-    openai: OpenAIClient, rarity: str, *,
+    openai: OpenAIClient, *,
     is_boss: bool = False, holiday: tuple[str, str] | None = None,
 ) -> str:
-    msg = await openai.short_completion(DUCK_QUACK_PROMPT, max_tokens=120)
-    body = (msg or "🦆 quack!").strip()
+    msg = await openai.cheap_completion(DUCK_QUACK_PROMPT, max_tokens=120)
+    body = (msg or "").strip()
+    if not _looks_like_a_duck(body):
+        body = random.choice(_FALLBACK_DUCKS)
     extra: list[str] = []
     if holiday:
         extra.append(f"\n[{holiday[0]} duck — {holiday[1]}]")
     if is_boss:
-        extra.append("\n👹 *this one is BIG. one person can't take it alone.*")
+        extra.append("\n👹 this one is BIG. one person can't take it alone.")
     return f"{body}{''.join(extra)}" if extra else body
 
 
@@ -112,7 +115,7 @@ async def build_quack_message_for(
     openai: OpenAIClient, duck: ActiveDuck,
 ) -> str:
     return await build_quack_message(
-        openai, duck.rarity,
+        openai,
         is_boss=duck.is_boss, holiday=current_holiday(),
     )
 
@@ -123,6 +126,13 @@ async def _recent_activity_factor(db: Database, chat_id: int) -> float:
     Quiet chats spawn at ~0.4x the base rate; busy chats at up to ~2x.
     Uses a soft log-curve so a single very active chat doesn't dominate.
     """
+    mem_on = await db.fetchval(
+        "SELECT memory_enabled FROM chat_config WHERE chat_id = $1", chat_id,
+    )
+    if not mem_on:
+        # Memory-off chats never write to `messages`, so the count is
+        # always 0 — don't permanently pin them to the quiet-chat rate.
+        return 1.0
     val = await db.fetchval(
         "SELECT COUNT(*) FROM messages "
         " WHERE chat_id = $1 AND created_at >= NOW() - INTERVAL '1 hour'",
@@ -130,7 +140,6 @@ async def _recent_activity_factor(db: Database, chat_id: int) -> float:
     )
     n = int(val or 0)
     # 0 msgs → 0.4, 10 msgs → 1.0, 40 msgs → ~1.5, 200 msgs → ~2.0
-    import math
     return 0.4 + min(1.6, math.log1p(n) / math.log1p(40))
 
 

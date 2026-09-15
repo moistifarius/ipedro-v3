@@ -18,7 +18,13 @@ command, and ships in a Docker container that runs comfortably on Unraid.
 - **Postgres + pgvector** memory: raw messages, rolling summaries, durable
   facts, embeddings — assembled on demand and token-budgeted.
 - **Per-chat config**: response policy, persona, ambient probability,
-  duckhunt toggle, voice transcription toggle, memory toggle.
+  duckhunt toggle, voice transcription toggle, memory toggle, comic /
+  fortune / share-photo opt-ins, and **ether** — opt in to cross-chat
+  transmissions, where a recent message from another opted-in chat may
+  show up in yours: either as pager-style garbled text (the ambient
+  loop) or, via `/ether`, as a far-away **HF radio voice** (TTS or a real
+  voice note, run through a long-haul DX ffmpeg effect — narrow SSB band,
+  wandering pitch, deep fading, overdrive, AGC hiss, heterodyne whistle).
 - **Duckhunt** with flat per-duck points (rarity tiers temporarily disabled — every duck behaves identically; column preserved for future revival),
   streaks, miss tracking, leaderboards, per-user cooldowns, AI-gated
   `bef` (the duck personality decides whether to be your friend), and a
@@ -42,6 +48,12 @@ python -m ipedro
 A running Postgres with the `vector` extension is required for full memory.
 Without it, the bot still works — semantic retrieval is disabled and a
 warning is logged.
+
+`ffmpeg` must be on `PATH` for the `/ether` radio-voice effect (the Docker
+image installs it; for local runs use your package manager, e.g.
+`apt install ffmpeg` or `brew install ffmpeg`). Without it, `/ether <text>`
+degrades to a garbled text broadcast and voice-note transmission is
+skipped.
 
 ## Docker / Unraid
 
@@ -67,7 +79,6 @@ a second message.
 | `/chat_config [field value]`, `/config` | Show / change this chat's settings (group admins / DM only); `/config` is an inline-keyboard wizard |
 | `/a`, `/askai`, `/ask <q>` | One-shot AI answer (no memory write) |
 | `/aigen`, `/generate <prompt>` | Generate an image |
-| `/aiedit`, `/aivar` | Preserved aliases; image edit/variation not wired to the current SDK |
 | `/aitranslate` | Translate a replied-to voice note (Whisper) |
 | `/catfact` | Dubious cat fact |
 | `/beneficiality` | Score whether the bot would butt in |
@@ -80,6 +91,7 @@ a second message.
 | `/roast @user`, `/compliment @user` | What it says on the tin |
 | `/lyric <line>` | Bot misheard it |
 | `/meme top \| bottom` | Generate a meme image |
+| `/ether <text>` (or on/replying to a voice note) | Transmit a message into another ether-enabled chat as a far-away **HF radio voice** — text is TTS'd, a real voice note is used as-is, then both get a long-haul DX ffmpeg treatment (narrow SSB band, wandering pitch, fading, crush/overdrive, AGC hiss, heterodyne whistle) |
 | `/duckhunt`, `/quackflag` | Spawn / check current duck |
 | `/duckstats`, `/duckfriends`, `/duckname <id> <name>`, `/global_leaderboard` | Duckhunt stats and management |
 | `/quote`, `/quotes`, `/unquote <id>` | Save / list / delete quotes |
@@ -107,6 +119,9 @@ a second message.
 |---|---|
 | `/list_chat_ids`, `/pick_chat` | Browse known chats (table / picker) |
 | `/send_message <chat_id> <text>` | Send a message to a chat as the bot |
+| `/delete_msg [chat_id]` | Picker → pick one of the bot's recent (≤ 20) messages in that chat to delete |
+| `/delete_last [chat_id] [N]` | Delete the bot's last N (≤ 20) messages in a chat; confirm prompt when N > 1 |
+| `/silent_chat <chat_id>`, `/unsilent_chat <chat_id>`, `/silenced_chats` | Admin-only override: silenced chats get `disable_notification=True` for celebration / fortune / retro / confession / ether sends. Not exposed in `/chat_config`. Reachable via `/manage → 💬 Chats → 🤫 Silenced chats`. |
 | `/logs [N] [filter]` | Tail the program log ring buffer |
 | `/cmdlog` | Command audit log from the DB |
 | `/cost [chat_id]` | AI spend last 7 days (works for either provider) |
@@ -124,7 +139,8 @@ a second message.
 | `/memory_search [chat_id] <query>` | Semantic-search the embedding store; shows top hits with similarity scores |
 | `/facts_chat` | Legacy alias for the `/memory_facts` picker |
 | `/debug_help` | Index of the debug-only commands |
-| `/debug_captcha`, `/debug_challenge`, `/debug_trivia`, `/debug_recipe`, `/debug_duck`, `/debug_sharephoto` | Force-trigger flows for testing |
+| `/debug_captcha`, `/debug_challenge`, `/debug_trivia`, `/debug_recipe`, `/debug_duck`, `/debug_sharephoto`, `/debug_ether` | Force-trigger flows for testing |
+| `/debug_clear_challenge [chat_id]` | Clear stuck bef challenge(s) in a chat (default: current). Unsticks a chat where every message gets judged "Not quite. Try again." Challenges also now auto-expire after 1h. |
 
 Plus the ambient triggers: `bang`, `bef`, `ignore` resolve an active duck
 (`bef` is AI-gated and may be refused — see below); `bad bot` / `bad

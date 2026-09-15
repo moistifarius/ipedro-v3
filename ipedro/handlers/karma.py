@@ -14,7 +14,7 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message, MessageReactionUpdated
 
-from ipedro.handlers.common import display_name, get_or_create_chat_config
+from ipedro.handlers.common import get_or_create_chat_config
 from ipedro.runtime import Runtime
 
 log = logging.getLogger(__name__)
@@ -45,6 +45,12 @@ def build_router(rt: Runtime) -> Router:
     @r.message_reaction()
     async def on_reaction(event: MessageReactionUpdated) -> None:
         if not event.chat or not event.message_id:
+            return
+        if event.user is None:
+            # Anonymous (actor_chat) reaction — Telegram doesn't expose
+            # which individual performed it, so there's no way to verify
+            # it isn't the message's own author reacting to themselves
+            # through their anonymous-admin identity. Not eligible.
             return
         delta = _score_set(event.new_reaction) - _score_set(event.old_reaction)
         if delta == 0:
@@ -106,7 +112,8 @@ def build_router(rt: Runtime) -> Router:
         )
         if not rows:
             await msg.reply(
-                "No karma yet. React to messages with 👍 / 👎 / etc.",
+                "No karma yet. React to messages with 👍 / 👎 / etc. "
+                "(the bot must be a group admin to see reactions)",
                 disable_notification=True,
             )
             return

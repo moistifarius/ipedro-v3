@@ -11,12 +11,12 @@ this module only cares about tracking what the bot sent.
 
 from __future__ import annotations
 
-import logging
+from ipedro import addressed
+
 import time
 from collections import deque
 from dataclasses import dataclass
 
-log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -39,6 +39,16 @@ def track(chat_id: int, message_id: int | None, text: str | None) -> None:
     failed) or if `text` is None (e.g. it was a photo with no caption).
     The deque is created lazily on first use.
     """
+    # Every AMBIENT reply that calls track() lands here — an automod bit,
+    # the cat-mention intercept, a sent-back picture — and that's the one
+    # honest definition of "the bot said something in this chat" this
+    # module has, so it's where the follow-up window opens. Note this
+    # isn't literally every reply: explicit slash-commands (e.g. the
+    # standalone /catfact, as opposed to the ambient cat-mention
+    # intercept) mostly don't call track() at all, so they don't open the
+    # window either. Doing it at the main AI reply alone used to mean an
+    # ambient bit's own "why?" follow-up went unanswered; that's fixed.
+    addressed.note_bot_reply(chat_id)
     if message_id is None:
         return
     snippet = (text or "")[:60].replace("\n", " ")

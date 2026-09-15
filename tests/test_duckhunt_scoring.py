@@ -5,8 +5,10 @@ from __future__ import annotations
 import random
 
 from ipedro.duckhunt.scoring import (
+    BANG_BASE_HIT, BANG_HIT_CAP, BANG_STREAK_BONUS, BANG_STREAK_CAP,
+    BEF_REFUSE_RATE, MISS_CHALLENGE_RATE,
     bang_outcome, bef_dice_passes, bef_refusal_outcome, bef_success_outcome,
-    ignore_outcome, roll_rarity, RARITY_TIERS,
+    ignore_outcome, roll_rarity, should_challenge_on_miss, RARITY_TIERS,
 )
 
 
@@ -19,16 +21,31 @@ def test_roll_rarity_is_neutralized_to_common():
 
 
 def test_bang_hit_streak_bonus_makes_hits_more_likely():
-    # Constant-RNG: roll = 0.85 misses on a 0.80 base for "common" but
-    # passes with a 5-streak bonus (0.80 + 5*0.02 = 0.90).
+    # Constant-RNG roll sitting between the no-streak and full-streak
+    # thresholds: misses at streak 0 (base 0.65), hits at streak 5
+    # (0.65 + 5 * 0.02 = 0.75).
+    fixed_roll = (BANG_BASE_HIT + BANG_HIT_CAP) / 2
+
     class FixedRng:
         def random(self_inner):
-            return 0.85
+            return fixed_roll
 
     streak_zero = bang_outcome("common", 0, FixedRng())
-    streak_five = bang_outcome("common", 5, FixedRng())
+    streak_five = bang_outcome("common", BANG_STREAK_CAP, FixedRng())
     assert streak_zero.success is False
     assert streak_five.success is True
+
+
+def test_bang_hit_cap_caps_streak_bonus():
+    """Past the streak cap the hit chance stops climbing."""
+    above_cap = BANG_HIT_CAP + 0.01
+
+    class FixedRng:
+        def random(self_inner):
+            return above_cap
+
+    huge_streak = bang_outcome("common", 999, FixedRng())
+    assert huge_streak.success is False
 
 
 def test_bang_miss_resets_streak_via_negative_delta():
@@ -58,15 +75,41 @@ def test_hit_awards_flat_points_regardless_of_rarity():
 
 
 # ----------------------------------------------------------------- bef
-def test_bef_dice_always_passes_while_rarity_neutralized():
-    # The pre-AI dice gate used to be rarity-biased. It now always passes,
-    # leaving the outcome to the AI verdict alone.
-    class HighRoll:
+def test_bef_dice_refuses_outright_below_the_threshold():
+    """The dice gate now flat-out refuses on a low roll, regardless of
+    rarity — that's the harder bef path. A roll just below the refuse
+    rate returns False; a roll just above returns True."""
+    class Low:
         def random(self_inner):
-            return 0.999
+            return BEF_REFUSE_RATE - 0.001
 
-    assert bef_dice_passes("common", HighRoll()) is True
-    assert bef_dice_passes("legendary", HighRoll()) is True
+    class High:
+        def random(self_inner):
+            return BEF_REFUSE_RATE + 0.001
+
+    assert bef_dice_passes("common", Low()) is False
+    assert bef_dice_passes("legendary", Low()) is False
+    assert bef_dice_passes("common", High()) is True
+
+
+def test_bef_dice_refusal_rate_hits_target_distribution():
+    """Across many seeds, the dice fails close to the configured rate."""
+    n = 5000
+    refusals = sum(
+        not bef_dice_passes("common", random.Random(seed)) for seed in range(n)
+    )
+    rate = refusals / n
+    assert abs(rate - BEF_REFUSE_RATE) < 0.03
+
+
+def test_should_challenge_on_miss_distribution():
+    """``should_challenge_on_miss`` returns True at the configured rate."""
+    n = 5000
+    hits = sum(
+        should_challenge_on_miss(random.Random(seed)) for seed in range(n)
+    )
+    rate = hits / n
+    assert abs(rate - MISS_CHALLENGE_RATE) < 0.03
 
 
 def test_bef_success_uses_ai_line_when_present():

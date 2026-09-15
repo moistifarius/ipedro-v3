@@ -80,8 +80,11 @@ def _find_handler(router, name):
 
 
 def _fake_cb(data: str, *, admin_id: int = 1):
-    """Build a fake CallbackQuery just rich enough for the cancel branches."""
+    """Build a fake CallbackQuery rich enough for the cancel AND confirm
+    branches — a real CallbackQuery.message always carries .chat, which
+    admin.py's confirm branches read for the command_log entry."""
     message = SimpleNamespace(
+        chat=SimpleNamespace(id=999),
         edit_text=AsyncMock(),
         edit_reply_markup=AsyncMock(),
     )
@@ -115,6 +118,59 @@ async def test_dsra_cancel_does_not_fire_DELETE():
 
 
 @pytest.mark.asyncio
+async def test_dsru_first_tap_prompts_confirmation_not_immediate_delete():
+    """Tapping a user in the /duckstats_reset picker must PROMPT, not wipe.
+    Regression: it used to DELETE the row on the first tap, and the picker
+    looks identical to the safe /duckstats_edit picker — one mis-tap wiped a
+    user's stats."""
+    db = _RecordingDB(fetchrow_results=[{"display_name": "alice", "points": 42}])
+    rt = SimpleNamespace(
+        settings=SimpleNamespace(admin_ids=frozenset({1})),
+        db=db,
+    )
+    r = build_router(rt)
+    on_dsru = _find_handler(r, "on_dsr_user_picked")
+    cb = _fake_cb("dsru:42:7")
+    await on_dsru(cb)
+    # Nothing deleted yet…
+    assert db.executes == []
+    # …and a confirm/cancel keyboard was offered for exactly this user.
+    kb = cb.message.edit_text.await_args.kwargs["reply_markup"]
+    assert kb.inline_keyboard[0][0].callback_data == "dsru:42:7:confirm"
+    assert kb.inline_keyboard[0][1].callback_data == "dsru:42:7:cancel"
+
+
+@pytest.mark.asyncio
+async def test_dsru_cancel_does_not_fire_DELETE():
+    db = _RecordingDB()
+    rt = SimpleNamespace(
+        settings=SimpleNamespace(admin_ids=frozenset({1})),
+        db=db,
+    )
+    r = build_router(rt)
+    on_dsru = _find_handler(r, "on_dsr_user_picked")
+    await on_dsru(_fake_cb("dsru:42:7:cancel"))
+    assert [q for (q, _a) in db.executes if "DELETE" in q.upper()] == []
+
+
+@pytest.mark.asyncio
+async def test_dsru_confirm_fires_the_scoped_delete():
+    db = _RecordingDB()
+    rt = SimpleNamespace(
+        settings=SimpleNamespace(admin_ids=frozenset({1})),
+        db=db,
+        command_log=SimpleNamespace(add=AsyncMock()),
+    )
+    r = build_router(rt)
+    on_dsru = _find_handler(r, "on_dsr_user_picked")
+    await on_dsru(_fake_cb("dsru:42:7:confirm"))
+    deletes = [(q, a) for (q, a) in db.executes if "DELETE FROM duck_stats" in q]
+    assert len(deletes) == 1
+    assert deletes[0][1] == (42, 7)      # scoped to (chat_id, user_id)
+    rt.command_log.add.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_dse_reset_cancel_does_not_fire_DELETE():
     """Tapping 'Cancel' on the per-user row-reset confirmation must NOT
     execute any DELETE. The cancel branch re-renders the editor view via
@@ -136,3 +192,74 @@ async def test_dse_reset_cancel_does_not_fire_DELETE():
     # No DELETE statement should have run.
     delete_calls = [q for (q, _a) in db.executes if "DELETE" in q.upper()]
     assert delete_calls == []
+
+
+# --- Regression tests: destructive/mutating admin actions log to command_log ---
+# The /manage -> Debug -> "Recent commands" panel is rendered from
+# rt.command_log.tail(), so every mutation an admin drives through /manage
+# should leave a trace there, matching what every sibling command already
+# does (basics.py's /start, utility.py's /unlearn and /fixname).
+
+@pytest.mark.asyncio
+async def test_debug_toggle_logs_the_flip():
+    db = _RecordingDB()
+    log = AsyncMock()
+    rt = SimpleNamespace(
+        settings=SimpleNamespace(admin_ids=frozenset({1})),
+        db=db,
+        command_log=SimpleNamespace(add=log),
+    )
+    router = build_router(rt)
+    handler = next(
+        h.callback for h in router.observers["message"].handlers
+        if h.callback.__name__ == "debug_toggle"
+    )
+    msg = SimpleNamespace(
+        chat=SimpleNamespace(id=999, type="private"),
+        from_user=SimpleNamespace(id=1),
+        text="/debug_toggle always_hit on",
+        reply=AsyncMock(),
+    )
+    await handler(msg)
+    log.assert_awaited_once()
+    args = log.await_args.args
+    assert args[0] == 999 and args[1] == 1 and args[2] == "/debug_toggle"
+    assert "always_hit on" in args[3]
+
+
+@pytest.mark.asyncio
+async def test_debug_clear_duck_confirm_logs_the_clear():
+    db = _RecordingDB()
+    log = AsyncMock()
+    rt = SimpleNamespace(
+        settings=SimpleNamespace(admin_ids=frozenset({1})),
+        db=db,
+        command_log=SimpleNamespace(add=log),
+    )
+    r = build_router(rt)
+    on_dcd = _find_handler(r, "on_debug_clear_duck")
+    await on_dcd(_fake_cb("dcd:999"))
+    log.assert_awaited_once()
+    args = log.await_args.args
+    assert args[2] == "/debug_clear_duck" and "chat=999" in args[3]
+
+
+@pytest.mark.asyncio
+async def test_ai_provider_switch_logs_the_change():
+    db = _RecordingDB()
+    log = AsyncMock()
+    rt = SimpleNamespace(
+        settings=SimpleNamespace(admin_ids=frozenset({1})),
+        db=db,
+        command_log=SimpleNamespace(add=log),
+        openai=SimpleNamespace(
+            set_text_provider=lambda p: None,
+            text_provider="openai", claude_model="c", text_model="o",
+        ),
+    )
+    r = build_router(rt)
+    on_aip = _find_handler(r, "on_aip")
+    await on_aip(_fake_cb("aip:switch:openai"))
+    log.assert_awaited_once()
+    args = log.await_args.args
+    assert args[2] == "/ai_provider" and "switch openai" in args[3]

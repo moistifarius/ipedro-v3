@@ -32,19 +32,37 @@ async def apply_schema(db: Database, embedding_dim: int = 1536) -> None:
     try:
         await db.execute(sql)
     except Exception as exc:
-        # Most common cause: pgvector extension is not installed. Retry without it.
+        # Only fall back when the failure actually looks like a missing
+        # pgvector extension. Anything else (SQL typo, lock timeout,
+        # permissions) must surface as itself — retrying a broken schema
+        # without vector would just fail again with a misleading message.
+        text = str(exc).lower()
+        if "vector" not in text and "extension" not in text:
+            raise
         log.warning("Full schema failed (%s); retrying without vector extension.", exc)
         without_vector = "\n".join(
             line for line in sql.splitlines()
             if "EXTENSION IF NOT EXISTS vector" not in line
         )
         without_vector = without_vector.replace(f"vector({embedding_dim})", "TEXT")
-        without_vector = without_vector.replace(
+        ivfflat_line = (
             "CREATE INDEX IF NOT EXISTS embeddings_vec_idx\n"
-            "    ON embeddings USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);",
-            "-- pgvector unavailable: semantic index disabled",
+            "    ON embeddings USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);"
         )
-        await db.execute(without_vector)
+        stripped = without_vector.replace(ivfflat_line, "-- pgvector unavailable: semantic index disabled")
+        # This is an exact-string match against schema.sql's current
+        # formatting. If schema.sql's whitespace ever drifts and the match
+        # silently misses, `without_vector` would still carry an ivfflat
+        # index over what's now a TEXT column (embedding was just
+        # rewritten above) — a confusing failure two steps removed from
+        # its real cause. Fail loudly, here, instead.
+        if stripped == without_vector:
+            raise RuntimeError(
+                "pgvector fallback: could not find the ivfflat index DDL "
+                "to strip from schema.sql (formatting drifted?) — refusing "
+                "to apply a schema that still references pgvector."
+            )
+        await db.execute(stripped)
         has_vector = False
 
     await db.execute(

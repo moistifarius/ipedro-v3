@@ -50,7 +50,7 @@ async def _build_and_post(
         log.info("Comic skipped for %s: only %d msgs in 24h.", chat_id, len(rows))
         return False
     joined = "\n".join(f"{r['role']}: {r['content']}" for r in rows)[:12000]
-    scenes_text = await openai.short_completion(
+    scenes_text = await openai.cheap_completion(
         COMIC_SCENES_PROMPT.format(messages=joined),
         max_tokens=300, chat_id=chat_id,
     )
@@ -89,12 +89,18 @@ async def run_comic_loop(
     while not stop.is_set():
         try:
             for chat_id in await _chats_due(db):
-                ok = await _build_and_post(chat_id, bot, db, openai)
-                if ok:
-                    await db.execute(
-                        "UPDATE chat_config SET last_comic_at = NOW() "
-                        "WHERE chat_id = $1",
-                        chat_id,
+                try:
+                    ok = await _build_and_post(chat_id, bot, db, openai)
+                    if ok:
+                        await db.execute(
+                            "UPDATE chat_config SET last_comic_at = NOW() "
+                            "WHERE chat_id = $1",
+                            chat_id,
+                        )
+                except Exception as exc:
+                    log.warning(
+                        "Comic build/post failed for chat %s: %s",
+                        chat_id, exc,
                     )
             wait = _TICK_SECONDS
         except Exception as exc:
