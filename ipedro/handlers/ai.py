@@ -10,6 +10,7 @@ from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, Message
 
 from ipedro.handlers.common import catify, fallback_cat_fact, get_or_create_chat_config
+from ipedro.memory.tokens import count_tokens
 from ipedro.prompts import (
     BENEFICIALITY_PROMPT, CAT_FACT_PROMPT,
 )
@@ -17,12 +18,96 @@ from ipedro.runtime import Runtime
 
 log = logging.getLogger(__name__)
 
+# Same cap as /master_prompt setfile (admin.py) — plenty for a persona
+# prompt, small enough to never worry about memory while decoding it.
+_PERSONA_FILE_MAX_BYTES = 64 * 1024
+
 
 def _strip_command(text: str | None) -> str:
     if not text:
         return ""
     parts = text.split(None, 1)
     return parts[1].strip() if len(parts) == 2 else ""
+
+
+async def _set_persona_from_file(rt: Runtime, msg: Message, name: str) -> None:
+    """Set THIS chat's persona_custom from an attached/replied-to .txt file.
+
+    Mirrors /master_prompt setfile (admin.py) — same size cap and UTF-8
+    validation — but scoped to msg.chat.id instead of the global override,
+    for persona prompts too long to fit in one Telegram message (4096
+    chars) as inline /chat_config text."""
+    doc = msg.document or (
+        msg.reply_to_message.document if msg.reply_to_message else None
+    )
+    if doc is None:
+        await msg.reply(
+            "Send the new persona as a .txt file and either caption it "
+            f"/chat_config persona {name} setfile or reply to the file "
+            f"with /chat_config persona {name} setfile.",
+            disable_notification=True,
+        )
+        return
+    if doc.file_size and doc.file_size > _PERSONA_FILE_MAX_BYTES:
+        await msg.reply(
+            f"That file is {doc.file_size} bytes; cap is "
+            f"{_PERSONA_FILE_MAX_BYTES}. Shorten the prompt.",
+            disable_notification=True,
+        )
+        return
+    try:
+        file = await msg.bot.get_file(doc.file_id)
+        buf = io.BytesIO()
+        await msg.bot.download_file(file.file_path, destination=buf)
+    except Exception as exc:
+        log.warning("chat_config persona setfile download failed: %s", exc)
+        await msg.reply(f"Couldn't download that file: {exc}",
+                        disable_notification=True)
+        return
+    data = buf.getvalue()
+    if len(data) > _PERSONA_FILE_MAX_BYTES:
+        await msg.reply(
+            f"File is {len(data)} bytes; cap is {_PERSONA_FILE_MAX_BYTES}.",
+            disable_notification=True,
+        )
+        return
+    try:
+        new_text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        await msg.reply(
+            "File isn't valid UTF-8. Save it as plain UTF-8 text and "
+            "try again.",
+            disable_notification=True,
+        )
+        return
+    new_text = new_text.strip()
+    if not new_text:
+        await msg.reply(
+            "File is empty — refusing to clobber the persona.",
+            disable_notification=True,
+        )
+        return
+    await rt.chats.update_config(
+        msg.chat.id, persona=name, persona_custom=new_text,
+    )
+    tokens = count_tokens(new_text)
+    budget = rt.settings.context_max_tokens
+    suffix = ""
+    if tokens >= budget:
+        suffix = (
+            f"\n\n⚠️ {tokens} tokens exceeds context_max_tokens ({budget}); "
+            "the persona will be dropped at runtime. Shorten the prompt."
+        )
+    elif tokens > budget * 0.75:
+        suffix = (
+            f"\n\n⚠️ {tokens} tokens uses >75% of the {budget}-token "
+            "context budget; little room left for memory/history."
+        )
+    await msg.reply(
+        f"Persona '{name}' updated for this chat ({len(new_text)} chars, "
+        f"~{tokens} tokens).{suffix}",
+        disable_notification=True,
+    )
 
 
 def build_router(rt: Runtime) -> Router:
@@ -101,7 +186,9 @@ def build_router(rt: Runtime) -> Router:
     async def chat_config_cmd(msg: Message) -> None:
         """Show or update this chat's config (group admins / DM only)."""
         cfg = await get_or_create_chat_config(rt, msg)
-        args = (msg.text or "").split()
+        # Command may arrive as msg.text or as msg.caption (when a persona
+        # .txt file is uploaded with the command as its caption).
+        args = (msg.text or msg.caption or "").split()
         if len(args) < 2:
             await msg.reply(
                 f"Response policy: {cfg.response_policy}\n"
@@ -120,7 +207,9 @@ def build_router(rt: Runtime) -> Router:
                 "Set a field: /chat_config <field> <value>\n"
                 "  policy     commands|mention|reply|ambient|always\n"
                 "  ambient    <0.0-1.0>\n"
-                "  persona    dude|pedro|neutral, or <name> <prompt text> for custom\n"
+                "  persona    dude|pedro|neutral, or <name> <prompt text> for "
+                "custom (or <name> setfile, replying to/captioning a .txt, "
+                "for prompts over 4096 chars)\n"
                 "  duckhunt   on|off\n"
                 "  sharephoto on|off\n"
                 "  comic      on|off\n"
@@ -162,11 +251,15 @@ def build_router(rt: Runtime) -> Router:
                 await msg.reply("Invalid ambient probability.", disable_notification=True)
                 return
         elif field == "persona":
-            # Custom personas via the remaining argument tail.
-            tail = (msg.text or "").split(None, 3)
+            # Custom personas via the remaining argument tail, or a .txt
+            # file (setfile) for prompts too long for one Telegram message.
+            tail = (msg.text or msg.caption or "").split(None, 3)
             if raw in ("dude", "pedro", "neutral"):
                 updates["persona"] = raw
                 updates["persona_custom"] = None
+            elif len(tail) == 4 and tail[3].strip().lower() == "setfile":
+                await _set_persona_from_file(rt, msg, name=raw)
+                return
             elif len(tail) == 4:
                 updates["persona"] = raw
                 updates["persona_custom"] = tail[3]
