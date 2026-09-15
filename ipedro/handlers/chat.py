@@ -78,6 +78,19 @@ _DUDE_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 
+# People call him by what he is at least as often as by name — "bot,
+# settle this", "shut up bot", "the bot is broken". None of those say Dale
+# or Rusty, so under a `mention` policy they went unanswered, which reads
+# as him ignoring the room. Word-bounded, so "both", "bottle" and the
+# @username's own trailing "bot" don't count. Singular only: "bots are
+# ruining twitter" is a topic, not an address. Bare "ai" is deliberately
+# left out — it's a subject people discuss — but addressed.py still routes
+# "the ai" to the classifier, which can see who was talking.
+_BOT_WORD_RE = re.compile(
+    r"\b(?:chat)?bot\b|\brobot\b",
+    re.IGNORECASE,
+)
+
 # Telegram's allowed reaction emoji set (subset; the API rejects others).
 _REACTION_POOL = (
     "👍", "👎", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱",
@@ -162,8 +175,13 @@ _MEME_WORD_RE = re.compile(r"\bmemes?\b", re.IGNORECASE)
 
 
 def _mentions_pedro(text: str | None) -> bool:
-    """Kept for backwards-compat; matches Dude aliases now."""
-    return bool(text) and _DUDE_NAME_RE.search(text) is not None
+    """Was he addressed — by one of his names, or as 'bot'?"""
+    if not text:
+        return False
+    return (
+        _DUDE_NAME_RE.search(text) is not None
+        or _BOT_WORD_RE.search(text) is not None
+    )
 
 
 def _mentions_cat(text: str | None) -> bool:

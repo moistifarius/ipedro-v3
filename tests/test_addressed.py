@@ -257,6 +257,48 @@ def test_the_name_still_needs_a_word_boundary(text):
 
 
 @pytest.mark.parametrize("text", [
+    "bot settle this",              # vocative, first word
+    "hey bot",
+    "shut up bot",
+    "good bot",
+    "ask the bot",
+    "the bot is broken",
+    "beep boop robot",
+    "stupid chatbot",
+])
+def test_being_called_bot_counts_as_being_addressed(text):
+    """People call him by what he is as often as by name. Under a `mention`
+    policy none of these said Dale or Rusty, so they went unanswered."""
+    from ipedro.handlers.chat import _mentions_pedro
+    assert _mentions_pedro(text)
+
+
+@pytest.mark.parametrize("text", [
+    "both of them",
+    "pass me a bottle",
+    "we hit rock bottom",
+    "bots are ruining twitter",     # plural: a topic, not an address
+    "robots are taking over",
+    "the ai boom",                  # left to the classifier, not a hard hit
+])
+def test_the_bot_word_needs_a_word_boundary_and_the_singular(text):
+    from ipedro.handlers.chat import _mentions_pedro
+    assert not _mentions_pedro(text)
+
+
+@pytest.mark.asyncio
+async def test_calling_him_bot_gets_an_answer_and_costs_nothing(monkeypatch):
+    """End to end: 'bot' is as good as his name, settled by the free layer
+    before the classifier is ever reached."""
+    rt = _mention_rt(monkeypatch)
+    msg = _msg(text="bot what do you think")
+    msg.answer = AsyncMock(return_value=SimpleNamespace(message_id=9))
+    await _handler(rt)(msg)
+    rt.openai.chat.assert_awaited_once()
+    rt.openai.cheap_completion.assert_not_awaited()
+
+
+@pytest.mark.parametrize("text", [
     "he's lying", "ask him", "his whole theory is nonsense",
     "the bot is broken", "that bot has lost it",
 ])
