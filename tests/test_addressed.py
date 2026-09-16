@@ -74,8 +74,10 @@ def test_ambiguous_lines_inside_the_window_go_to_the_classifier(text):
     assert addressed.quick_verdict(text, in_conversation=True) is None
 
 
-def test_plain_chatter_inside_the_window_is_not_for_him():
-    assert addressed.quick_verdict("the game was great", in_conversation=True) is False
+def test_plain_chatter_inside_the_window_still_goes_to_the_classifier():
+    """No signal at all — but he was just talking, so five messages after
+    a reply the window asks rather than assume it's not for him."""
+    assert addressed.quick_verdict("the game was great", in_conversation=True) is None
 
 
 def test_at_someone_else_is_never_for_him():
@@ -121,15 +123,38 @@ async def test_classifier_sees_the_recent_lines_with_the_bot_marked():
 
 
 @pytest.mark.asyncio
-async def test_wants_reply_skips_the_model_when_the_text_settles_it():
+async def test_wants_reply_skips_the_model_for_a_follow_up_opener():
     rt = SimpleNamespace(openai=SimpleNamespace(cheap_completion=AsyncMock()),
                          memory=SimpleNamespace())
     addressed.note_bot_reply(CHAT)
     assert await addressed.wants_reply(rt, CHAT, speaker="Matt", text="why?",
                                        memory_enabled=True) is True
+    rt.openai.cheap_completion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_wants_reply_skips_the_model_when_quiet_and_unaddressed():
+    rt = SimpleNamespace(openai=SimpleNamespace(cheap_completion=AsyncMock()),
+                         memory=SimpleNamespace())
+    # No note_bot_reply(): the window is closed, so plain chatter never
+    # reaches the model.
     assert await addressed.wants_reply(rt, CHAT, speaker="Matt", text="nice day",
                                        memory_enabled=True) is False
     rt.openai.cheap_completion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_wants_reply_asks_the_model_for_plain_chatter_in_the_window():
+    """The window after a reply now asks about everything that isn't
+    obviously aimed elsewhere, not just messages that look ambiguous."""
+    rt = SimpleNamespace(
+        openai=SimpleNamespace(cheap_completion=AsyncMock(return_value="NO")),
+        memory=SimpleNamespace(),
+    )
+    addressed.note_bot_reply(CHAT)
+    assert await addressed.wants_reply(rt, CHAT, speaker="Matt", text="nice day",
+                                       memory_enabled=True) is False
+    rt.openai.cheap_completion.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -210,6 +235,27 @@ async def test_an_ambiguous_line_is_settled_by_the_classifier(monkeypatch):
     await _handler(rt)(msg)
     rt.openai.cheap_completion.assert_awaited_once()
     rt.openai.chat.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_plain_chatter_is_checked_for_five_messages_then_stops(monkeypatch):
+    """The literal ask: the classifier looks at ordinary, signal-free chat
+    for five messages after a reply, then goes quiet again."""
+    rt = _mention_rt(monkeypatch, classifier="NO")
+    rt.chats.get_config.return_value.automod_enabled = False  # no GIF-roll noise
+    addressed.note_bot_reply(CHAT)
+    handler = _handler(rt)
+    for i in range(5):
+        msg = _msg(text=f"just chatting {i}")
+        msg.answer = AsyncMock(return_value=SimpleNamespace(message_id=9))
+        await handler(msg)
+    assert rt.openai.cheap_completion.await_count == 5
+    rt.openai.cheap_completion.reset_mock()
+    # The 6th message since the reply: the window has closed.
+    msg = _msg(text="just chatting 5")
+    msg.answer = AsyncMock(return_value=SimpleNamespace(message_id=9))
+    await handler(msg)
+    rt.openai.cheap_completion.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -323,9 +369,9 @@ def test_an_explicit_bot_reference_earns_a_look_even_when_quiet():
     assert addressed.quick_verdict("ask him", in_conversation=False) is False
 
 
-def test_plain_chatter_in_the_window_still_costs_nothing():
+def test_plain_chatter_in_the_window_now_goes_to_the_classifier():
     for text in ("lol", "nice weather", "brb"):
-        assert addressed.quick_verdict(text, in_conversation=True) is False
+        assert addressed.quick_verdict(text, in_conversation=True) is None
 
 
 # ── the window opens on every way he speaks, not just the AI reply ───────────

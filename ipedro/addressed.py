@@ -9,17 +9,18 @@ ignoring people.
 
 Two layers, cheapest first:
 
-  * a conversation window: the bot counts as "in the conversation" for a
-    few minutes after it last replied, while only a handful of messages
-    have gone by. Inside the window a crisp follow-up opener ("why",
-    "what do you mean", "prove it") is a reply to him, no model needed;
-  * a cheap classifier for the genuinely ambiguous cases — a "you" that
-    might mean him, a question to the room — with the last few lines of
-    chat so it can see who was talking to whom.
+  * a conversation window: for a few messages after the bot last replied,
+    it's fair game for anything that isn't obviously aimed at someone
+    else. A crisp follow-up opener ("why", "what do you mean", "prove
+    it") resolves as a reply to him for free; everything else in the
+    window goes to the classifier rather than risk missing a real one;
+  * outside the window, only an explicit reference to him or a question
+    plainly put to the room is worth a look — anything less and a busy
+    chat where Dale is quiet spends nothing.
 
-The classifier is the only part that costs anything, and it only runs
-inside the window or on an explicit question-to-the-room, so a busy chat
-where Dale is quiet spends nothing.
+The classifier is the only part that costs anything, and a cheap model
+call is a lot less than the cost of the reply it might trigger, so the
+window stays short and closes fast once the conversation moves on.
 """
 
 from __future__ import annotations
@@ -36,10 +37,11 @@ log = logging.getLogger(__name__)
 BOT_NAME = "Dale"
 
 # The bot is "in the conversation" this long after its last reply, and only
-# while this few messages have gone by since — after a dozen lines between
-# two other people, "you" almost never means the bot any more.
+# for this many messages since — after that many lines between two other
+# people, staying eligible for every message would mean tax on a chat
+# that's plainly moved on.
 _WINDOW_SECONDS = 600
-_WINDOW_MESSAGES = 6
+_WINDOW_MESSAGES = 5
 
 
 @dataclass
@@ -103,24 +105,13 @@ _FOLLOW_UP_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Second person, minus the plural forms that mean the room.
-_SECOND_PERSON_RE = re.compile(
-    r"\b(?:you|your|you're|youre|yours|yourself|u|ur)\b", re.IGNORECASE,
-)
-_PLURAL_YOU_RE = re.compile(
-    r"\b(?:you guys|you all|y'?all|you two|you lot|you people)\b", re.IGNORECASE,
-)
-
-# Third person pointed at the bot. "the bot" is explicit enough to earn a
-# look even when he's been quiet; a bare "he" only means him while he's in
-# the conversation, and even then the classifier decides — it can see who
-# was talking.
+# "the bot" is explicit enough to earn a look even when he's been quiet.
+# Everything softer than this (a bare "he", a "you" that might mean him) is
+# only checked while he's in the conversation, where the window already
+# sends the message to the classifier regardless — no separate regex needed.
 _BOT_NOUN_RE = re.compile(
     r"\b(?:the|that|this|your|ur)\s+(?:bot|robot)\b|\bthe\s+ai\b",
     re.IGNORECASE,
-)
-_THIRD_PERSON_RE = re.compile(
-    r"\b(?:he|him|his|he'?s|hes)\b", re.IGNORECASE,
 )
 
 # A question thrown to the room. Dale is a member of the room.
@@ -145,10 +136,12 @@ _AT_SOMEONE_RE = re.compile(r"^\s*@\w+")
 def quick_verdict(text: str, *, in_conversation: bool) -> bool | None:
     """True / False when the text settles it, None when a model should look.
 
-    Kept narrow on purpose: every None costs a classifier call, every
-    wrong True is the bot butting in. Inside the window the bar is low —
-    he was just talking — outside it only an explicit question to the room
-    earns a look.
+    Every wrong True is the bot butting in, so nothing here ever guesses
+    True except a crisp follow-up opener. Every None costs a classifier
+    call, so outside the window that's spent only on an explicit
+    reference to him or a question to the room. Inside it the bar drops
+    to the floor — he was just talking, so anything not plainly aimed at
+    someone else goes to the classifier.
     """
     text = (text or "").strip()
     if not text:
@@ -158,16 +151,7 @@ def quick_verdict(text: str, *, in_conversation: bool) -> bool | None:
     if in_conversation:
         if _FOLLOW_UP_RE.match(text):
             return True
-        if _PLURAL_YOU_RE.search(text):
-            return None
-        if (
-            _SECOND_PERSON_RE.search(text)
-            or _THIRD_PERSON_RE.search(text)     # "he's lying", "ask him"
-            or _BOT_NOUN_RE.search(text)
-            or "?" in text
-        ):
-            return None
-        return False
+        return None
     # Quiet: only an explicit reference to him, or a question plainly put
     # to the room, is worth the price of a look.
     if _BOT_NOUN_RE.search(text) or _ROOM_QUESTION_RE.search(text):
