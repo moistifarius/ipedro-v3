@@ -848,6 +848,7 @@ def build_router(rt: Runtime) -> Router:
                 rt, msg.chat.id,
                 speaker=display_name(msg.from_user) if msg.from_user else None,
                 text=typed, memory_enabled=cfg.memory_enabled,
+                user_id=from_user_id,
             )
         ):
             incoming = replace(incoming, has_mention_of_bot=True)
@@ -1021,7 +1022,7 @@ def build_router(rt: Runtime) -> Router:
             return
 
         sent = await msg.answer(reply, disable_notification=True)
-        track(msg.chat.id, sent.message_id, reply)
+        track(msg.chat.id, sent.message_id, reply, replied_to_user_id=from_user_id)
 
         # Post-send: never let a DB hiccup crash the handler after the user
         # already saw the reply — log it and move on (else stored history

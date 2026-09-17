@@ -32,12 +32,21 @@ _BUFFER_SIZE = 20
 _recent_sends: dict[int, deque[TrackedMessage]] = {}
 
 
-def track(chat_id: int, message_id: int | None, text: str | None) -> None:
+def track(
+    chat_id: int, message_id: int | None, text: str | None, *,
+    replied_to_user_id: int | None = None,
+) -> None:
     """Record that the bot just sent `message_id` to `chat_id`.
 
     Tolerant: silently no-ops if `message_id` is None (e.g. the send
     failed) or if `text` is None (e.g. it was a photo with no caption).
     The deque is created lazily on first use.
+
+    `replied_to_user_id` is who this was a direct answer to — pass it
+    only from the main AI reply, where that's actually known and true.
+    Every other call site (a canned line, an ambient GIF) leaves it
+    unset, which is the point: those don't put anyone on the hook to
+    answer back.
     """
     # Every AMBIENT reply that calls track() lands here — an automod bit,
     # the cat-mention intercept, a sent-back picture — and that's the one
@@ -48,7 +57,9 @@ def track(chat_id: int, message_id: int | None, text: str | None) -> None:
     # intercept) mostly don't call track() at all, so they don't open the
     # window either. Doing it at the main AI reply alone used to mean an
     # ambient bit's own "why?" follow-up went unanswered; that's fixed.
-    addressed.note_bot_reply(chat_id)
+    addressed.note_bot_reply(
+        chat_id, replied_to_user_id=replied_to_user_id, reply_text=text,
+    )
     if message_id is None:
         return
     snippet = (text or "")[:60].replace("\n", " ")

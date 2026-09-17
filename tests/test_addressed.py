@@ -175,6 +175,77 @@ async def test_wants_reply_pulls_recent_history_for_the_classifier():
     assert "[Dale]: it's a plot" in prompt and "[Luke]: propane is fine" in prompt
 
 
+# ── layer zero: he asked THIS person something, they're answering ───────────
+
+@pytest.mark.parametrize("text", [
+    "Why do you have this.",                             # the live miss: no "?" at all
+    "That's a tongue, Matt. Why do you have this.",       # trailing clause, same line
+    "That's a tongue, Matt.\n\nWhy do you have this.",    # trailing clause, own line
+    "What is that.", "Is that a joke.", "Do you eat those.",
+    "Why do you have this?",                              # ordinary "?" still counts
+])
+def test_asks_a_question_catches_the_personas_unpunctuated_style(text):
+    """The persona's clipped style regularly drops the '?' Dale would
+    otherwise ask with — a literal '?' check alone misses this."""
+    assert addressed._asks_a_question(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Nice.", "sh-sha.", "That's a tongue, Matt.",
+    "I know why you have this.",     # WH-word mid-sentence: not an open
+])
+def test_asks_a_question_is_false_for_ordinary_statements(text):
+    assert not addressed._asks_a_question(text)
+
+
+def test_answering_his_question_is_true_for_the_person_he_asked():
+    addressed.note_bot_reply(CHAT, replied_to_user_id=7, reply_text="Why do you have this.")
+    assert addressed.answering_his_question(CHAT, 7) is True
+
+
+def test_answering_his_question_is_false_for_someone_else():
+    """He asked Matt (7) — Luke (9) chiming in isn't 'answering'."""
+    addressed.note_bot_reply(CHAT, replied_to_user_id=7, reply_text="Why do you have this.")
+    assert addressed.answering_his_question(CHAT, 9) is False
+
+
+def test_answering_his_question_is_false_when_he_didnt_ask_anything():
+    addressed.note_bot_reply(CHAT, replied_to_user_id=7, reply_text="Nice.")
+    assert addressed.answering_his_question(CHAT, 7) is False
+
+
+def test_answering_his_question_is_false_for_a_send_with_no_known_target():
+    """track() call sites that don't know who they're answering (an
+    automod bit, an ambient GIF) leave replied_to_user_id unset — nobody
+    is on the hook just because the canned line happened to end in '?'."""
+    addressed.note_bot_reply(CHAT, reply_text="you gonna eat that?")
+    assert addressed.answering_his_question(CHAT, 7) is False
+
+
+def test_answering_his_question_closes_when_the_window_does():
+    addressed.note_bot_reply(CHAT, replied_to_user_id=7, reply_text="Why?")
+    for _ in range(addressed._WINDOW_MESSAGES + 1):
+        addressed.note_user_message(CHAT)
+    assert addressed.answering_his_question(CHAT, 7) is False
+
+
+@pytest.mark.asyncio
+async def test_wants_reply_short_circuits_for_the_person_he_asked():
+    """The exact shape of a live miss: 'thats ur tongue' has no opener and
+    no 'you' of its own — it would otherwise ride on the classifier."""
+    rt = SimpleNamespace(openai=SimpleNamespace(cheap_completion=AsyncMock()))
+    addressed.note_bot_reply(
+        CHAT, replied_to_user_id=7,
+        reply_text="That's a tongue, Matt. Why do you have this.",
+    )
+    hit = await addressed.wants_reply(
+        rt, CHAT, speaker="Matt", text="thats ur tongue",
+        memory_enabled=True, user_id=7,
+    )
+    assert hit is True
+    rt.openai.cheap_completion.assert_not_awaited()  # certain, not a gamble
+
+
 # ── end to end through on_message ────────────────────────────────────────────
 
 def _handler(rt):
@@ -201,6 +272,54 @@ def _mention_rt(monkeypatch, *, classifier="NO"):
     monkeypatch.setattr(chat, "build_context", fake_build)
     monkeypatch.setattr(chat, "resolve_impersonation", AsyncMock(return_value=None))
     return rt
+
+
+@pytest.mark.asyncio
+async def test_answering_his_direct_question_gets_a_reply_not_a_coin_flip(monkeypatch):
+    """A live miss, reproduced: he answers a picture question and asks one
+    back ('Why do you have this.'); the direct answer that follows has no
+    name, no reply-to, and no opener or 'you' of its own — only who sent
+    it says it's for him."""
+    rt = _mention_rt(monkeypatch)
+    rt.openai.chat = AsyncMock(
+        return_value="That's a tongue, Matt. Why do you have this."
+    )
+    handler = _handler(rt)
+
+    asked = _msg(text="dale whats this", user_id=7)
+    asked.answer = AsyncMock(return_value=SimpleNamespace(message_id=1))
+    await handler(asked)                     # explicit name: answers, opens the window
+
+    rt.openai.cheap_completion.reset_mock()
+    answer = _msg(text="thats ur tongue", user_id=7)   # same user, no name, no opener
+    answer.answer = AsyncMock(return_value=SimpleNamespace(message_id=2))
+    await handler(answer)
+
+    assert rt.openai.chat.await_count == 2
+    rt.openai.cheap_completion.assert_not_awaited()    # certain, not a gamble
+
+
+@pytest.mark.asyncio
+async def test_answering_his_direct_question_ignores_someone_else_chiming_in(monkeypatch):
+    """He asked Matt (7); Luke (9) piping up with an unrelated line right
+    after doesn't inherit Matt's free pass — it still needs a real signal."""
+    rt = _mention_rt(monkeypatch, classifier="NO")
+    rt.openai.chat = AsyncMock(
+        return_value="That's a tongue, Matt. Why do you have this."
+    )
+    handler = _handler(rt)
+
+    asked = _msg(text="dale whats this", user_id=7)
+    asked.answer = AsyncMock(return_value=SimpleNamespace(message_id=1))
+    await handler(asked)
+
+    rt.openai.chat.reset_mock()
+    other = _msg(text="lol gross", user_id=9)
+    other.answer = AsyncMock(return_value=SimpleNamespace(message_id=2))
+    await handler(other)
+
+    rt.openai.cheap_completion.assert_awaited_once()   # goes to the model, not a free yes
+    rt.openai.chat.assert_not_awaited()                # and the model said no
 
 
 @pytest.mark.asyncio
