@@ -668,6 +668,17 @@ async def test_the_style_nudge_does_not_claim_authority_over_voice():
 
 
 @pytest.mark.asyncio
+async def test_the_style_nudge_defaults_short_and_makes_long_earn_it():
+    """Regression: replies were running way too long way too often. The
+    rule now names a default (short) and requires long to be earned,
+    rather than just permitting either as equally likely."""
+    from ipedro.memory.context_builder import _STYLE_SYSTEM, _STYLE_REMINDER
+    assert "default short" in _STYLE_SYSTEM
+    assert "earned the room" in _STYLE_SYSTEM
+    assert "default short" in _STYLE_REMINDER
+
+
+@pytest.mark.asyncio
 async def test_the_style_nudge_repeats_after_the_breakpoint():
     """The full rule sits early, in the cached prefix — a summary, facts,
     retrieval hits and a full history window all come after it before

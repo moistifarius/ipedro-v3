@@ -323,6 +323,17 @@ async def test_answering_his_direct_question_ignores_someone_else_chiming_in(mon
 
 
 @pytest.mark.asyncio
+async def test_the_reply_token_cap_is_a_backstop_not_the_length_mechanism(monkeypatch):
+    """The prompt now carries the actual judgment on reply length; this
+    cap only has to stay generous enough to never cut off a real rant."""
+    rt = _mention_rt(monkeypatch)
+    msg = _msg(text="dale hi")
+    msg.answer = AsyncMock(return_value=SimpleNamespace(message_id=9))
+    await _handler(rt)(msg)
+    assert rt.openai.chat.await_args.kwargs["max_tokens"] == 300
+
+
+@pytest.mark.asyncio
 async def test_a_follow_up_right_after_the_bot_spoke_gets_answered(monkeypatch):
     """No name, no reply-to. He said something thirty seconds ago and
     someone said 'why?' — that is for him."""

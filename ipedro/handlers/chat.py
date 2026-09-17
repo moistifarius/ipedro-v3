@@ -1015,8 +1015,13 @@ def build_router(rt: Runtime) -> Router:
             persona_override=persona_override,
             capabilities=capability_brief(cfg),
         )
+        # 500 used to sit here — room for a small essay. The prompt now
+        # carries its own judgment on when a reply should run long; this
+        # is a backstop against a runaway generation, not the mechanism
+        # doing the actual work, so it stays generous enough to never cut
+        # off a genuine rant.
         reply = await rt.openai.chat(
-            ctx.messages, max_tokens=500, chat_id=msg.chat.id,
+            ctx.messages, max_tokens=300, chat_id=msg.chat.id,
         )
         if not reply:
             return
