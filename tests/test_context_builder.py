@@ -665,3 +665,35 @@ async def test_the_style_nudge_does_not_claim_authority_over_voice():
     rather than quietly becoming a second one."""
     from ipedro.memory.context_builder import _STYLE_SYSTEM
     assert "never overrides your persona" in _STYLE_SYSTEM
+
+
+@pytest.mark.asyncio
+async def test_the_style_nudge_repeats_after_the_breakpoint():
+    """The full rule sits early, in the cached prefix — a summary, facts,
+    retrieval hits and a full history window all come after it before
+    generation. A short repeat lands right before the model writes,
+    where dilution can't bury it, so it must be volatile: present, but
+    never marked as part of the cached prefix itself."""
+    from ipedro.openai_client import CACHE_BREAKPOINT
+    store = FakeStore(recent=[])
+    built = await build_context(
+        store=store, settings=_settings(), chat_id=1,
+        persona="dude", persona_custom=None, latest_user_text="hi",
+    )
+    reminders = [
+        m for m in built.messages
+        if m["role"] == "system" and "Rhythm check" in m["content"]
+    ]
+    assert len(reminders) == 1
+    assert not reminders[0].get(CACHE_BREAKPOINT)
+
+
+@pytest.mark.asyncio
+async def test_the_style_reminder_stands_down_for_impersonation_too():
+    store = FakeStore(recent=[])
+    built = await build_context(
+        store=store, settings=_settings(), chat_id=1,
+        persona="dude", persona_custom=None, latest_user_text="act like Luke",
+        persona_override="IMPERSONATION MODE: you are Luke.",
+    )
+    assert "Rhythm check" not in _system_text(built)

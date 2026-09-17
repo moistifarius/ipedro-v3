@@ -6,7 +6,9 @@ Combines, in priority order:
      prose-rhythm nudge — all stable/cached. Then, in the VOLATILE tail
      that follows the cache breakpoint: the current time value itself
      (the explainer of how to read it is cached; only the stamp isn't),
-     any extra per-turn system text, and retrieved semantic hits.
+     a one-line repeat of the rhythm nudge (so it lands right before
+     generation instead of getting buried under everything still to
+     come), any extra per-turn system text, and retrieved semantic hits.
   2. A condensed running summary (if any).
   3. Durable per-chat facts (if any).
   4. Semantically retrieved older snippets relevant to the latest user query.
@@ -87,12 +89,27 @@ _REACTION_SYSTEM = (
 _STYLE_SYSTEM = (
     "Write with burst and friction. Vary sentence length hard — a long "
     "winding one, then three words. Then one. Never let three sentences in "
-    "a row share a shape or a length. Reach past the expected word for the "
-    "odd, specific, slightly-wrong one: the second thing that comes to "
-    "mind, not the first. No balanced pairs, no tidy parallel lists, no "
-    "summing-up sentence at the end. Start somewhere unexpected and stop "
-    "before it gets neat. This governs rhythm and word choice only. It "
-    "never overrides your persona, your mood, or what you actually mean."
+    "a row share a shape or a length. The same goes for whole replies, not "
+    "just sentences inside one — don't settle into a default reply length "
+    "any more than a default sentence length: four words is a complete "
+    "reply sometimes, four sentences is sometimes what it takes. Reach "
+    "past the expected word for the odd, specific, slightly-wrong one: "
+    "the second thing that comes to mind, not the first. No balanced "
+    "pairs, no tidy parallel lists, no summing-up sentence at the end. "
+    "Cut stock hedges and connectors — 'that said', 'honestly', 'look,', "
+    "'it's worth noting' — say the thing instead of announcing you're "
+    "about to. Start somewhere unexpected and stop before it gets neat. "
+    "This governs rhythm and word choice only. It never overrides your "
+    "persona, your mood, or what you actually mean."
+)
+
+# The same rule, one line, planted after the cache breakpoint so it lands
+# right before generation instead of getting buried under a summary,
+# facts, retrieval hits and a full history window — everything _STYLE_
+# SYSTEM sits ahead of. Cheap on purpose: the full rule already explained
+# itself, this is a repeat, not a second policy.
+_STYLE_REMINDER = (
+    "(Rhythm check: vary the length, reach past the obvious word, cut the hedging.)"
 )
 
 
@@ -367,6 +384,8 @@ async def build_context(
     # Everything from here changes per request. It sits after the
     # breakpoint, so it costs full price but invalidates nothing.
     _add({"role": "system", "content": _format_now(now, settings.tzinfo)})
+    if not persona_override:
+        _add({"role": "system", "content": _STYLE_REMINDER})
     if extra_system:
         _add({"role": "system", "content": extra_system})
     # Retrieval is embedded against the message being answered, so its top
