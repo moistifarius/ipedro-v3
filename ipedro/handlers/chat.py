@@ -373,7 +373,10 @@ async def _handle_meme_generate(rt: Runtime, msg: Message, cfg, topic: str) -> N
             BufferedInputFile(image, filename="meme.png"),
             caption=caption, disable_notification=True,
         )
-        track(msg.chat.id, sent.message_id, caption)
+        track(
+            msg.chat.id, sent.message_id, caption,
+            replied_to_user_id=msg.from_user.id if msg.from_user else None,
+        )
     except Exception as exc:
         log.warning("meme generate send failed in %s: %s", msg.chat.id, exc)
         await msg.reply(
@@ -470,7 +473,10 @@ async def _handle_meme_request(
             )
             try:
                 sent = await msg.reply(note, disable_notification=True)
-                track(msg.chat.id, sent.message_id, note)
+                track(
+                    msg.chat.id, sent.message_id, note,
+                    replied_to_user_id=msg.from_user.id if msg.from_user else None,
+                )
                 await _record_bot_turn(rt, cfg, msg.chat.id, note)
             except Exception:  # pragma: no cover - defensive
                 pass
@@ -704,7 +710,7 @@ def build_router(rt: Runtime) -> Router:
         if cfg.response_policy != "commands" and _THANKS_PEDRO_RE.search(typed):
             line = random.choice(_THANKS_PEDRO_LINES)
             sent = await msg.reply(line, disable_notification=True)
-            track(msg.chat.id, sent.message_id, line)
+            track(msg.chat.id, sent.message_id, line, replied_to_user_id=from_user_id)
             if cfg.memory_enabled:
                 try:
                     await rt.memory.record_message(

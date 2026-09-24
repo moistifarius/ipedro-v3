@@ -9,10 +9,12 @@ ignoring people.
 
 Three layers, cheapest first:
 
-  * he asked someone something directly, and they're answering: certain,
-    for free, whatever their reply says — a real answer ("that's ur
-    tongue") often carries no opener and no "you" of its own, so this is
-    the one case worth tracking by who, not by pattern-matching what;
+  * he just personally replied to someone, and it's their turn: certain,
+    for free, whatever they say back — a thanks, a correction ("i was
+    being sarcastic asshole"), a flat "fuck off" carry no opener, no
+    "you", often no question either, so this is the one case worth
+    tracking by WHO he was just talking to, not by pattern-matching what
+    they said back;
   * a conversation window: for a few messages after the bot last replied,
     it's fair game for anything that isn't obviously aimed at someone
     else. A crisp follow-up opener ("why", "what do you mean", "prove
@@ -52,8 +54,7 @@ _WINDOW_MESSAGES = 5
 class _ChatWindow:
     last_reply_at: float = 0.0
     since_reply: int = field(default=0)
-    asked_user_id: int | None = None
-    asked_question: bool = False
+    addressed_user_id: int | None = None
 
 
 _windows: dict[int, _ChatWindow] = {}
@@ -64,49 +65,21 @@ def reset() -> None:
     _windows.clear()
 
 
-# A WH-/auxiliary-led final line, for a question that dropped its "?" — the
-# persona's clipped style favors "Why do you have this." over "...this?",
-# and a literal "?" check misses that entirely.
-_QUESTION_OPENER_RE = re.compile(
-    r"^\W*(?:why|what|wat|wut|who|when|where|how|"
-    r"do|does|did|don'?t|doesn'?t|didn'?t|"
-    r"are|is|isn'?t|aren'?t|"
-    r"can|could|would|will|should)\b",
-    re.IGNORECASE,
-)
-
-
-def _asks_a_question(text: str | None) -> bool:
-    if not text:
-        return False
-    if "?" in text:
-        return True
-    lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
-    if not lines:
-        return False
-    # The last sentence of the last line, so a mid-paragraph "why" ("...
-    # that's why he left.") doesn't count — only a clause that OPENS on
-    # one does, same bar _FOLLOW_UP_RE holds free-layer openers to.
-    sentences = re.split(r"(?<=[.!])\s+", lines[-1])
-    return bool(_QUESTION_OPENER_RE.match(sentences[-1]))
-
-
 def note_bot_reply(
     chat_id: int, *, now: float | None = None,
-    replied_to_user_id: int | None = None, reply_text: str | None = None,
+    replied_to_user_id: int | None = None,
 ) -> None:
     """The bot just said something in this chat: open the window.
 
-    `replied_to_user_id` + `reply_text` are only meaningful for a genuine
-    answer to one specific person (the main AI reply) — every other kind
-    of send (a canned line, an ambient GIF) leaves them unset, which is
-    exactly the point: those don't mean anyone owes the bot an answer.
+    `replied_to_user_id` is only meaningful for a genuine answer to one
+    specific person (the main AI reply) — every other kind of send (a
+    canned line, an ambient GIF) leaves it unset, which is exactly the
+    point: those don't put anyone specific back on the hook.
     """
     w = _windows.setdefault(chat_id, _ChatWindow())
     w.last_reply_at = time.time() if now is None else now
     w.since_reply = 0
-    w.asked_user_id = replied_to_user_id
-    w.asked_question = _asks_a_question(reply_text)
+    w.addressed_user_id = replied_to_user_id
 
 
 def note_user_message(chat_id: int) -> None:
@@ -127,20 +100,22 @@ def in_conversation(chat_id: int, *, now: float | None = None) -> bool:
     )
 
 
-def answering_his_question(chat_id: int, user_id: int | None) -> bool:
-    """He just asked THIS person something directly, and it's their turn.
+def is_his_turn(chat_id: int, user_id: int | None) -> bool:
+    """He just personally replied to THIS person — it's their turn.
 
-    Whatever they say back is a reply to him, whatever it says — no regex,
-    no classifier, no gamble. This is the case free-layer patterns keep
-    missing: a real answer ("that's ur tongue") carries no opener, no
-    "you", sometimes not even a question mark of its own, so it looked
-    like ordinary chatter right up until the window widened to catch it
-    on a coin flip instead of for certain.
+    Whatever they say back is aimed at him, no matter what it says: a
+    thanks, a correction, a flat "fuck off". No regex, no classifier, no
+    gamble. This is the case free-layer patterns keep missing — a real
+    reaction carries no opener, no "you", often not even a question of
+    its own, so it read as ordinary chatter every time. Tracking WHO he
+    was just talking to, instead of pattern-matching what they say back,
+    catches all of it — not just the cases that happen to ask him
+    something.
     """
     if user_id is None:
         return False
     w = _windows.get(chat_id)
-    if w is None or not w.asked_question or w.asked_user_id != user_id:
+    if w is None or w.addressed_user_id != user_id:
         return False
     return in_conversation(chat_id)
 
@@ -267,7 +242,8 @@ async def wants_reply(
     user_id: int | None = None,
 ) -> bool:
     """Does this un-named, un-replied message want the bot to answer?"""
-    if answering_his_question(chat_id, user_id):
+    stripped = (text or "").strip()
+    if stripped and not _AT_SOMEONE_RE.match(stripped) and is_his_turn(chat_id, user_id):
         return True
     verdict = quick_verdict(text, in_conversation=in_conversation(chat_id))
     if verdict is not None:

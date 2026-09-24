@@ -57,9 +57,7 @@ def track(
     # intercept) mostly don't call track() at all, so they don't open the
     # window either. Doing it at the main AI reply alone used to mean an
     # ambient bit's own "why?" follow-up went unanswered; that's fixed.
-    addressed.note_bot_reply(
-        chat_id, replied_to_user_id=replied_to_user_id, reply_text=text,
-    )
+    addressed.note_bot_reply(chat_id, replied_to_user_id=replied_to_user_id)
     if message_id is None:
         return
     snippet = (text or "")[:60].replace("\n", " ")

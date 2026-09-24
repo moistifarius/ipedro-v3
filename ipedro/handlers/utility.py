@@ -157,9 +157,13 @@ async def post_meme_to_chat(rt: Runtime, msg: Message, meme) -> str | None:
     if not data:
         return None
     caption = build_caption(meme)
+    replied_to_user_id = msg.from_user.id if msg.from_user else None
     try:
         sent = await _answer_reddit_media(msg, data, meme.media.kind, caption)
-        track(msg.chat.id, sent.message_id, caption)
+        track(
+            msg.chat.id, sent.message_id, caption,
+            replied_to_user_id=replied_to_user_id,
+        )
     except Exception as exc:
         log.warning("reddit meme send failed in %s: %s", msg.chat.id, exc)
         return None
@@ -172,7 +176,10 @@ async def post_meme_to_chat(rt: Runtime, msg: Message, meme) -> str | None:
                 gsent = await _answer_reddit_media(
                     msg, cdata, meme.comment_media.kind, None,
                 )
-                track(msg.chat.id, gsent.message_id, "[reddit comment gif]")
+                track(
+                    msg.chat.id, gsent.message_id, "[reddit comment gif]",
+                    replied_to_user_id=replied_to_user_id,
+                )
             except Exception as exc:
                 log.info(
                     "reddit comment-media send failed in %s: %s",
