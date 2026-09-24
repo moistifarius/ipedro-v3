@@ -7,19 +7,26 @@ making that up" or "source?" — aimed squarely at him, naming nobody.
 Under a `mention` policy those went unanswered, which reads as the bot
 ignoring people.
 
-Two layers, cheapest first:
+Three layers, cheapest first:
 
-  * a conversation window: the bot counts as "in the conversation" for a
-    few minutes after it last replied, while only a handful of messages
-    have gone by. Inside the window a crisp follow-up opener ("why",
-    "what do you mean", "prove it") is a reply to him, no model needed;
-  * a cheap classifier for the genuinely ambiguous cases — a "you" that
-    might mean him, a question to the room — with the last few lines of
-    chat so it can see who was talking to whom.
+  * he just personally replied to someone, and it's their turn: certain,
+    for free, whatever they say back — a thanks, a correction ("i was
+    being sarcastic asshole"), a flat "fuck off" carry no opener, no
+    "you", often no question either, so this is the one case worth
+    tracking by WHO he was just talking to, not by pattern-matching what
+    they said back;
+  * a conversation window: for a few messages after the bot last replied,
+    it's fair game for anything that isn't obviously aimed at someone
+    else. A crisp follow-up opener ("why", "what do you mean", "prove
+    it") resolves as a reply to him for free; everything else in the
+    window goes to the classifier rather than risk missing a real one;
+  * outside the window, only an explicit reference to him or a question
+    plainly put to the room is worth a look — anything less and a busy
+    chat where Dale is quiet spends nothing.
 
-The classifier is the only part that costs anything, and it only runs
-inside the window or on an explicit question-to-the-room, so a busy chat
-where Dale is quiet spends nothing.
+The classifier is the only part that costs anything, and a cheap model
+call is a lot less than the cost of the reply it might trigger, so the
+window stays short and closes fast once the conversation moves on.
 """
 
 from __future__ import annotations
@@ -36,16 +43,18 @@ log = logging.getLogger(__name__)
 BOT_NAME = "Dale"
 
 # The bot is "in the conversation" this long after its last reply, and only
-# while this few messages have gone by since — after a dozen lines between
-# two other people, "you" almost never means the bot any more.
+# for this many messages since — after that many lines between two other
+# people, staying eligible for every message would mean tax on a chat
+# that's plainly moved on.
 _WINDOW_SECONDS = 600
-_WINDOW_MESSAGES = 6
+_WINDOW_MESSAGES = 5
 
 
 @dataclass
 class _ChatWindow:
     last_reply_at: float = 0.0
     since_reply: int = field(default=0)
+    addressed_user_id: int | None = None
 
 
 _windows: dict[int, _ChatWindow] = {}
@@ -56,11 +65,21 @@ def reset() -> None:
     _windows.clear()
 
 
-def note_bot_reply(chat_id: int, *, now: float | None = None) -> None:
-    """The bot just said something in this chat: open the window."""
+def note_bot_reply(
+    chat_id: int, *, now: float | None = None,
+    replied_to_user_id: int | None = None,
+) -> None:
+    """The bot just said something in this chat: open the window.
+
+    `replied_to_user_id` is only meaningful for a genuine answer to one
+    specific person (the main AI reply) — every other kind of send (a
+    canned line, an ambient GIF) leaves it unset, which is exactly the
+    point: those don't put anyone specific back on the hook.
+    """
     w = _windows.setdefault(chat_id, _ChatWindow())
     w.last_reply_at = time.time() if now is None else now
     w.since_reply = 0
+    w.addressed_user_id = replied_to_user_id
 
 
 def note_user_message(chat_id: int) -> None:
@@ -79,6 +98,26 @@ def in_conversation(chat_id: int, *, now: float | None = None) -> bool:
         now - w.last_reply_at <= _WINDOW_SECONDS
         and w.since_reply <= _WINDOW_MESSAGES
     )
+
+
+def is_his_turn(chat_id: int, user_id: int | None) -> bool:
+    """He just personally replied to THIS person — it's their turn.
+
+    Whatever they say back is aimed at him, no matter what it says: a
+    thanks, a correction, a flat "fuck off". No regex, no classifier, no
+    gamble. This is the case free-layer patterns keep missing — a real
+    reaction carries no opener, no "you", often not even a question of
+    its own, so it read as ordinary chatter every time. Tracking WHO he
+    was just talking to, instead of pattern-matching what they say back,
+    catches all of it — not just the cases that happen to ask him
+    something.
+    """
+    if user_id is None:
+        return False
+    w = _windows.get(chat_id)
+    if w is None or w.addressed_user_id != user_id:
+        return False
+    return in_conversation(chat_id)
 
 
 # ── the free layer ───────────────────────────────────────────────────────────
@@ -103,24 +142,13 @@ _FOLLOW_UP_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Second person, minus the plural forms that mean the room.
-_SECOND_PERSON_RE = re.compile(
-    r"\b(?:you|your|you're|youre|yours|yourself|u|ur)\b", re.IGNORECASE,
-)
-_PLURAL_YOU_RE = re.compile(
-    r"\b(?:you guys|you all|y'?all|you two|you lot|you people)\b", re.IGNORECASE,
-)
-
-# Third person pointed at the bot. "the bot" is explicit enough to earn a
-# look even when he's been quiet; a bare "he" only means him while he's in
-# the conversation, and even then the classifier decides — it can see who
-# was talking.
+# "the bot" is explicit enough to earn a look even when he's been quiet.
+# Everything softer than this (a bare "he", a "you" that might mean him) is
+# only checked while he's in the conversation, where the window already
+# sends the message to the classifier regardless — no separate regex needed.
 _BOT_NOUN_RE = re.compile(
     r"\b(?:the|that|this|your|ur)\s+(?:bot|robot)\b|\bthe\s+ai\b",
     re.IGNORECASE,
-)
-_THIRD_PERSON_RE = re.compile(
-    r"\b(?:he|him|his|he'?s|hes)\b", re.IGNORECASE,
 )
 
 # A question thrown to the room. Dale is a member of the room.
@@ -145,10 +173,12 @@ _AT_SOMEONE_RE = re.compile(r"^\s*@\w+")
 def quick_verdict(text: str, *, in_conversation: bool) -> bool | None:
     """True / False when the text settles it, None when a model should look.
 
-    Kept narrow on purpose: every None costs a classifier call, every
-    wrong True is the bot butting in. Inside the window the bar is low —
-    he was just talking — outside it only an explicit question to the room
-    earns a look.
+    Every wrong True is the bot butting in, so nothing here ever guesses
+    True except a crisp follow-up opener. Every None costs a classifier
+    call, so outside the window that's spent only on an explicit
+    reference to him or a question to the room. Inside it the bar drops
+    to the floor — he was just talking, so anything not plainly aimed at
+    someone else goes to the classifier.
     """
     text = (text or "").strip()
     if not text:
@@ -158,16 +188,7 @@ def quick_verdict(text: str, *, in_conversation: bool) -> bool | None:
     if in_conversation:
         if _FOLLOW_UP_RE.match(text):
             return True
-        if _PLURAL_YOU_RE.search(text):
-            return None
-        if (
-            _SECOND_PERSON_RE.search(text)
-            or _THIRD_PERSON_RE.search(text)     # "he's lying", "ask him"
-            or _BOT_NOUN_RE.search(text)
-            or "?" in text
-        ):
-            return None
-        return False
+        return None
     # Quiet: only an explicit reference to him, or a question plainly put
     # to the room, is worth the price of a look.
     if _BOT_NOUN_RE.search(text) or _ROOM_QUESTION_RE.search(text):
@@ -218,8 +239,12 @@ async def classify(
 
 async def wants_reply(
     rt, chat_id: int, *, speaker: str | None, text: str, memory_enabled: bool,
+    user_id: int | None = None,
 ) -> bool:
     """Does this un-named, un-replied message want the bot to answer?"""
+    stripped = (text or "").strip()
+    if stripped and not _AT_SOMEONE_RE.match(stripped) and is_his_turn(chat_id, user_id):
+        return True
     verdict = quick_verdict(text, in_conversation=in_conversation(chat_id))
     if verdict is not None:
         return verdict

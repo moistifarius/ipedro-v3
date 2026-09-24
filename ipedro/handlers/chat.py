@@ -373,7 +373,10 @@ async def _handle_meme_generate(rt: Runtime, msg: Message, cfg, topic: str) -> N
             BufferedInputFile(image, filename="meme.png"),
             caption=caption, disable_notification=True,
         )
-        track(msg.chat.id, sent.message_id, caption)
+        track(
+            msg.chat.id, sent.message_id, caption,
+            replied_to_user_id=msg.from_user.id if msg.from_user else None,
+        )
     except Exception as exc:
         log.warning("meme generate send failed in %s: %s", msg.chat.id, exc)
         await msg.reply(
@@ -470,7 +473,10 @@ async def _handle_meme_request(
             )
             try:
                 sent = await msg.reply(note, disable_notification=True)
-                track(msg.chat.id, sent.message_id, note)
+                track(
+                    msg.chat.id, sent.message_id, note,
+                    replied_to_user_id=msg.from_user.id if msg.from_user else None,
+                )
                 await _record_bot_turn(rt, cfg, msg.chat.id, note)
             except Exception:  # pragma: no cover - defensive
                 pass
@@ -704,7 +710,7 @@ def build_router(rt: Runtime) -> Router:
         if cfg.response_policy != "commands" and _THANKS_PEDRO_RE.search(typed):
             line = random.choice(_THANKS_PEDRO_LINES)
             sent = await msg.reply(line, disable_notification=True)
-            track(msg.chat.id, sent.message_id, line)
+            track(msg.chat.id, sent.message_id, line, replied_to_user_id=from_user_id)
             if cfg.memory_enabled:
                 try:
                     await rt.memory.record_message(
@@ -848,6 +854,7 @@ def build_router(rt: Runtime) -> Router:
                 rt, msg.chat.id,
                 speaker=display_name(msg.from_user) if msg.from_user else None,
                 text=typed, memory_enabled=cfg.memory_enabled,
+                user_id=from_user_id,
             )
         ):
             incoming = replace(incoming, has_mention_of_bot=True)
@@ -1014,14 +1021,19 @@ def build_router(rt: Runtime) -> Router:
             persona_override=persona_override,
             capabilities=capability_brief(cfg),
         )
+        # 500 used to sit here — room for a small essay. The prompt now
+        # carries its own judgment on when a reply should run long; this
+        # is a backstop against a runaway generation, not the mechanism
+        # doing the actual work, so it stays generous enough to never cut
+        # off a genuine rant.
         reply = await rt.openai.chat(
-            ctx.messages, max_tokens=500, chat_id=msg.chat.id,
+            ctx.messages, max_tokens=300, chat_id=msg.chat.id,
         )
         if not reply:
             return
 
         sent = await msg.answer(reply, disable_notification=True)
-        track(msg.chat.id, sent.message_id, reply)
+        track(msg.chat.id, sent.message_id, reply, replied_to_user_id=from_user_id)
 
         # Post-send: never let a DB hiccup crash the handler after the user
         # already saw the reply — log it and move on (else stored history

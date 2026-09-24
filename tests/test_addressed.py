@@ -74,8 +74,10 @@ def test_ambiguous_lines_inside_the_window_go_to_the_classifier(text):
     assert addressed.quick_verdict(text, in_conversation=True) is None
 
 
-def test_plain_chatter_inside_the_window_is_not_for_him():
-    assert addressed.quick_verdict("the game was great", in_conversation=True) is False
+def test_plain_chatter_inside_the_window_still_goes_to_the_classifier():
+    """No signal at all — but he was just talking, so five messages after
+    a reply the window asks rather than assume it's not for him."""
+    assert addressed.quick_verdict("the game was great", in_conversation=True) is None
 
 
 def test_at_someone_else_is_never_for_him():
@@ -121,15 +123,38 @@ async def test_classifier_sees_the_recent_lines_with_the_bot_marked():
 
 
 @pytest.mark.asyncio
-async def test_wants_reply_skips_the_model_when_the_text_settles_it():
+async def test_wants_reply_skips_the_model_for_a_follow_up_opener():
     rt = SimpleNamespace(openai=SimpleNamespace(cheap_completion=AsyncMock()),
                          memory=SimpleNamespace())
     addressed.note_bot_reply(CHAT)
     assert await addressed.wants_reply(rt, CHAT, speaker="Matt", text="why?",
                                        memory_enabled=True) is True
+    rt.openai.cheap_completion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_wants_reply_skips_the_model_when_quiet_and_unaddressed():
+    rt = SimpleNamespace(openai=SimpleNamespace(cheap_completion=AsyncMock()),
+                         memory=SimpleNamespace())
+    # No note_bot_reply(): the window is closed, so plain chatter never
+    # reaches the model.
     assert await addressed.wants_reply(rt, CHAT, speaker="Matt", text="nice day",
                                        memory_enabled=True) is False
     rt.openai.cheap_completion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_wants_reply_asks_the_model_for_plain_chatter_in_the_window():
+    """The window after a reply now asks about everything that isn't
+    obviously aimed elsewhere, not just messages that look ambiguous."""
+    rt = SimpleNamespace(
+        openai=SimpleNamespace(cheap_completion=AsyncMock(return_value="NO")),
+        memory=SimpleNamespace(),
+    )
+    addressed.note_bot_reply(CHAT)
+    assert await addressed.wants_reply(rt, CHAT, speaker="Matt", text="nice day",
+                                       memory_enabled=True) is False
+    rt.openai.cheap_completion.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -148,6 +173,81 @@ async def test_wants_reply_pulls_recent_history_for_the_classifier():
     assert hit is False
     prompt = rt.openai.cheap_completion.await_args.args[0]
     assert "[Dale]: it's a plot" in prompt and "[Luke]: propane is fine" in prompt
+
+
+# ── layer zero: he just personally replied to someone, it's their turn ──────
+
+def test_is_his_turn_is_true_for_the_person_he_just_answered():
+    addressed.note_bot_reply(CHAT, replied_to_user_id=7)
+    assert addressed.is_his_turn(CHAT, 7) is True
+
+
+def test_is_his_turn_is_false_for_someone_else():
+    """He answered Matt (7) — Luke (9) chiming in doesn't inherit it."""
+    addressed.note_bot_reply(CHAT, replied_to_user_id=7)
+    assert addressed.is_his_turn(CHAT, 9) is False
+
+
+def test_is_his_turn_does_not_require_a_question():
+    """The live miss this generalizes from: Dale's reply ('easy. eyes
+    peeled out there') asked nothing at all, and the correction that
+    followed ('i was being sarcastic asshole') still needs to land."""
+    addressed.note_bot_reply(CHAT, replied_to_user_id=7)
+    assert addressed.is_his_turn(CHAT, 7) is True
+
+
+def test_is_his_turn_is_false_for_a_send_with_no_known_target():
+    """track() call sites that don't know who they're answering (an
+    automod bit, an ambient GIF) leave replied_to_user_id unset — nobody
+    is put on the hook by a canned line."""
+    addressed.note_bot_reply(CHAT)
+    assert addressed.is_his_turn(CHAT, 7) is False
+
+
+def test_is_his_turn_closes_when_the_window_does():
+    addressed.note_bot_reply(CHAT, replied_to_user_id=7)
+    for _ in range(addressed._WINDOW_MESSAGES + 1):
+        addressed.note_user_message(CHAT)
+    assert addressed.is_his_turn(CHAT, 7) is False
+
+
+def test_is_his_turn_moves_on_when_he_replies_to_someone_else():
+    """His next reply re-targets the window — it isn't still Matt's turn
+    once Dale has moved on to answering Luke."""
+    addressed.note_bot_reply(CHAT, replied_to_user_id=7)
+    addressed.note_bot_reply(CHAT, replied_to_user_id=9)
+    assert addressed.is_his_turn(CHAT, 7) is False
+    assert addressed.is_his_turn(CHAT, 9) is True
+
+
+@pytest.mark.asyncio
+async def test_wants_reply_short_circuits_for_the_person_he_just_answered():
+    """The exact shape of two live misses: 'thats ur tongue' and 'i was
+    being sarcastic asshole' both have no opener and no 'you' of their
+    own — they'd otherwise ride on the classifier's judgment."""
+    rt = SimpleNamespace(openai=SimpleNamespace(cheap_completion=AsyncMock()))
+    addressed.note_bot_reply(CHAT, replied_to_user_id=7)
+    for text in ("thats ur tongue", "i was being sarcastic asshole"):
+        hit = await addressed.wants_reply(
+            rt, CHAT, speaker="Matt", text=text,
+            memory_enabled=True, user_id=7,
+        )
+        assert hit is True, text
+    rt.openai.cheap_completion.assert_not_awaited()  # certain, not a gamble
+
+
+@pytest.mark.asyncio
+async def test_wants_reply_still_defers_to_an_explicit_other_target():
+    """Even mid-window, '@someone else' overrides the free-turn shortcut —
+    the safety valve quick_verdict already relies on."""
+    rt = SimpleNamespace(openai=SimpleNamespace(cheap_completion=AsyncMock(return_value="NO")))
+    addressed.note_bot_reply(CHAT, replied_to_user_id=7)
+    hit = await addressed.wants_reply(
+        rt, CHAT, speaker="Matt", text="@luke you see this",
+        memory_enabled=True, user_id=7,
+    )
+    assert hit is False
+    rt.openai.cheap_completion.assert_not_awaited()  # @someone is a free False too
 
 
 # ── end to end through on_message ────────────────────────────────────────────
@@ -176,6 +276,92 @@ def _mention_rt(monkeypatch, *, classifier="NO"):
     monkeypatch.setattr(chat, "build_context", fake_build)
     monkeypatch.setattr(chat, "resolve_impersonation", AsyncMock(return_value=None))
     return rt
+
+
+@pytest.mark.asyncio
+async def test_replying_to_him_gets_an_answer_not_a_coin_flip(monkeypatch):
+    """A live miss, reproduced: he answers a picture question ('Why do you
+    have this.'); the direct answer that follows has no name, no
+    reply-to, and no opener or 'you' of its own — only who sent it says
+    it's for him."""
+    rt = _mention_rt(monkeypatch)
+    rt.openai.chat = AsyncMock(
+        return_value="That's a tongue, Matt. Why do you have this."
+    )
+    handler = _handler(rt)
+
+    asked = _msg(text="dale whats this", user_id=7)
+    asked.answer = AsyncMock(return_value=SimpleNamespace(message_id=1))
+    await handler(asked)                     # explicit name: answers, opens the window
+
+    rt.openai.cheap_completion.reset_mock()
+    answer = _msg(text="thats ur tongue", user_id=7)   # same user, no name, no opener
+    answer.answer = AsyncMock(return_value=SimpleNamespace(message_id=2))
+    await handler(answer)
+
+    assert rt.openai.chat.await_count == 2
+    rt.openai.cheap_completion.assert_not_awaited()    # certain, not a gamble
+
+
+@pytest.mark.asyncio
+async def test_a_correction_with_no_question_behind_it_still_gets_an_answer(monkeypatch):
+    """The live miss, reproduced exactly: 'thanks dale' fires the canned
+    thanks-pedro line — no AI call, no question asked, just a fixed
+    send-off ('easy. eyes peeled out there' is literally one of the
+    canned lines). The blunt correction that followed ('i was being
+    sarcastic asshole') used to get silence because that canned reply
+    never said WHO it was personally answering."""
+    rt = _mention_rt(monkeypatch)
+    rt.openai.chat = AsyncMock(return_value="anything")
+    handler = _handler(rt)
+
+    thanks = _msg(text="thanks dale that makes me feel a lot better", user_id=7)
+    await handler(thanks)
+    rt.openai.chat.assert_not_awaited()       # the canned line, not an AI reply
+    thanks.reply.assert_awaited_once()
+
+    rt.openai.cheap_completion.reset_mock()
+    correction = _msg(text="i was being sarcastic asshole", user_id=7)
+    correction.answer = AsyncMock(return_value=SimpleNamespace(message_id=2))
+    await handler(correction)
+
+    rt.openai.chat.assert_awaited_once()
+    rt.openai.cheap_completion.assert_not_awaited()   # certain, not a gamble
+
+
+@pytest.mark.asyncio
+async def test_replying_to_him_ignores_someone_else_chiming_in(monkeypatch):
+    """He answered Matt (7); Luke (9) piping up with an unrelated line
+    right after doesn't inherit Matt's free pass — it still needs a real
+    signal."""
+    rt = _mention_rt(monkeypatch, classifier="NO")
+    rt.openai.chat = AsyncMock(
+        return_value="That's a tongue, Matt. Why do you have this."
+    )
+    handler = _handler(rt)
+
+    asked = _msg(text="dale whats this", user_id=7)
+    asked.answer = AsyncMock(return_value=SimpleNamespace(message_id=1))
+    await handler(asked)
+
+    rt.openai.chat.reset_mock()
+    other = _msg(text="lol gross", user_id=9)
+    other.answer = AsyncMock(return_value=SimpleNamespace(message_id=2))
+    await handler(other)
+
+    rt.openai.cheap_completion.assert_awaited_once()   # goes to the model, not a free yes
+    rt.openai.chat.assert_not_awaited()                # and the model said no
+
+
+@pytest.mark.asyncio
+async def test_the_reply_token_cap_is_a_backstop_not_the_length_mechanism(monkeypatch):
+    """The prompt now carries the actual judgment on reply length; this
+    cap only has to stay generous enough to never cut off a real rant."""
+    rt = _mention_rt(monkeypatch)
+    msg = _msg(text="dale hi")
+    msg.answer = AsyncMock(return_value=SimpleNamespace(message_id=9))
+    await _handler(rt)(msg)
+    assert rt.openai.chat.await_args.kwargs["max_tokens"] == 300
 
 
 @pytest.mark.asyncio
@@ -210,6 +396,27 @@ async def test_an_ambiguous_line_is_settled_by_the_classifier(monkeypatch):
     await _handler(rt)(msg)
     rt.openai.cheap_completion.assert_awaited_once()
     rt.openai.chat.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_plain_chatter_is_checked_for_five_messages_then_stops(monkeypatch):
+    """The literal ask: the classifier looks at ordinary, signal-free chat
+    for five messages after a reply, then goes quiet again."""
+    rt = _mention_rt(monkeypatch, classifier="NO")
+    rt.chats.get_config.return_value.automod_enabled = False  # no GIF-roll noise
+    addressed.note_bot_reply(CHAT)
+    handler = _handler(rt)
+    for i in range(5):
+        msg = _msg(text=f"just chatting {i}")
+        msg.answer = AsyncMock(return_value=SimpleNamespace(message_id=9))
+        await handler(msg)
+    assert rt.openai.cheap_completion.await_count == 5
+    rt.openai.cheap_completion.reset_mock()
+    # The 6th message since the reply: the window has closed.
+    msg = _msg(text="just chatting 5")
+    msg.answer = AsyncMock(return_value=SimpleNamespace(message_id=9))
+    await handler(msg)
+    rt.openai.cheap_completion.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -323,9 +530,9 @@ def test_an_explicit_bot_reference_earns_a_look_even_when_quiet():
     assert addressed.quick_verdict("ask him", in_conversation=False) is False
 
 
-def test_plain_chatter_in_the_window_still_costs_nothing():
+def test_plain_chatter_in_the_window_now_goes_to_the_classifier():
     for text in ("lol", "nice weather", "brb"):
-        assert addressed.quick_verdict(text, in_conversation=True) is False
+        assert addressed.quick_verdict(text, in_conversation=True) is None
 
 
 # ── the window opens on every way he speaks, not just the AI reply ───────────
