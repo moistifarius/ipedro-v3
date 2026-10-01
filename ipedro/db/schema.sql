@@ -144,6 +144,28 @@ CREATE INDEX IF NOT EXISTS activity_log_recent_idx
 CREATE INDEX IF NOT EXISTS activity_log_chat_recent_idx
     ON activity_log (chat_id, created_at DESC);
 
+-- Change requests (/evolve) -------------------------------------------------
+-- The owner asking the bot, in DM, to change itself. Filed as a GitHub
+-- issue only after the owner taps Approve; a GitHub Action turns the issue
+-- into a pull request. `request` is only ever the owner's own typed words —
+-- never model output or chat content (ipedro/evolve.py explains why).
+-- status: pending -> filing -> filed | failed, or pending -> cancelled.
+-- 'filing' is the atomic claim that stops a double-tap filing twice.
+CREATE TABLE IF NOT EXISTS change_requests (
+    id            BIGSERIAL PRIMARY KEY,
+    requester_id  BIGINT NOT NULL,
+    request       TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    issue_number  INTEGER,
+    issue_url     TEXT,
+    error         TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    decided_at    TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS change_requests_recent_idx
+    ON change_requests (created_at DESC);
+
 -- Duckhunt ------------------------------------------------------------------
 -- Persistent state for active spawns. At most one active duck per chat.
 CREATE TABLE IF NOT EXISTS duck_events (

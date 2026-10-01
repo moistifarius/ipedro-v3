@@ -54,6 +54,16 @@ class Settings(BaseSettings):
     openai_cheap_model: str = "gpt-4o-mini"
     text_provider: Literal["claude", "openai"] = "claude"
 
+    # /evolve — the owner's DM requests for the bot to change itself. An
+    # approved request is filed as a GitHub issue, which a GitHub Action
+    # (Claude Code) picks up and turns into a pull request. This token
+    # should be a fine-grained PAT scoped to the one repo with Issues
+    # read/write and NOTHING else: the bot only ever files issues, and the
+    # code itself is written by the Action under its own credentials.
+    # Unset = /evolve explains what's missing instead of failing.
+    evolve_github_token: str | None = None
+    evolve_github_repo: str = "moistifarius/ipedro-v3"
+
     # Database
     database_url: str
 

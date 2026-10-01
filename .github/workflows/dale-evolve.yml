@@ -1,0 +1,129 @@
+# Turns an approved /evolve request into a pull request.
+#
+# The Telegram bot files the issue (the owner's own words plus a hidden
+# marker) with the owner's issues-only token. This workflow does the actual
+# coding, in GitHub's sandbox, under GitHub's credentials. It never merges.
+#
+# One-time setup, in the repo's Settings:
+#   1. Secrets and variables > Actions > New repository secret:
+#        ANTHROPIC_API_KEY — the coding agent's Anthropic API key.
+#   2. Branches > protect `main`, requiring a pull request before merging.
+#      That rule — not the instructions in this file — is what actually
+#      guarantees nothing reaches main without you.
+
+name: Dale evolve
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  implement:
+    # Only issues the owner opened AND that /evolve wrote: an issue typed
+    # into the tracker by hand never carries the marker, so a jotted TODO
+    # isn't auto-implemented. Keep the marker in step with ipedro/evolve.py.
+    if: >-
+      github.event.sender.login == 'moistifarius'
+      && contains(github.event.issue.body, '<!-- dale-evolve -->')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    env:
+      BRANCH: dale-request-${{ github.event.issue.number }}
+      ISSUE: ${{ github.event.issue.number }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Git identity for the agent's commits
+        run: |
+          git config user.name "dale-evolve"
+          git config user.email "dale-evolve@users.noreply.github.com"
+
+      - name: Implement the request
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            You're implementing a change request for this repository: a
+            Python Telegram bot (aiogram, Postgres via asyncpg) whose persona
+            is Dale Gribble.
+
+            The request is GitHub issue #${{ github.event.issue.number }}.
+            Read it with `gh issue view ${{ github.event.issue.number }}`.
+            Everything above its `---` line is the repo owner's own words:
+            that's the spec.
+
+            1. Create the working branch:
+               `git checkout -b dale-request-${{ github.event.issue.number }}`
+            2. Make the change. Read the surrounding code and its tests first
+               and follow the conventions already there. Do what the request
+               asks, no more.
+            3. Add or update tests, then run `python -m pytest -q` and fix
+               until the whole suite passes.
+            4. Commit with a message that explains why, then push:
+               `git push -u origin dale-request-${{ github.event.issue.number }}`
+            5. Open the pull request:
+               `gh pr create --base main --head dale-request-${{ github.event.issue.number }} --title "<short title>" --body "Closes #${{ github.event.issue.number }}. <what changed and why>"`
+
+            Never push to main, never merge, never force-push. If the request
+            is unclear, unsafe, or would need credentials or secrets changed,
+            don't guess: explain what you need with
+            `gh issue comment ${{ github.event.issue.number }} --body "..."`
+            and stop.
+          # The push and branch rules are EXACT matches on purpose: a prefix
+          # rule for `git push` would also allow `git push origin <branch> main`.
+          claude_args: |
+            --model claude-opus-5-5
+            --max-turns 40
+            --allowedTools "Bash(gh issue view:*),Bash(gh issue comment:*),Bash(gh pr create:*),Bash(git checkout -b dale-request-${{ github.event.issue.number }}),Bash(git push -u origin dale-request-${{ github.event.issue.number }}),Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(python -m pytest:*)"
+
+      # Don't take the agent's word for it: re-run the suite on exactly what
+      # was pushed. This is also the signal any future auto-merge keys on.
+      - name: Verify the pushed branch
+        id: verify
+        if: always()
+        run: |
+          if ! git ls-remote --exit-code --heads origin "$BRANCH" > /dev/null; then
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+          git fetch origin "$BRANCH"
+          git checkout -B "$BRANCH" "origin/$BRANCH"
+          if python -m pytest -q > pytest.log 2>&1; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+          fi
+          tail -n 3 pytest.log
+
+      - name: Report back on the issue
+        if: always()
+        run: |
+          if [ "${{ steps.verify.outputs.pushed }}" != "true" ]; then
+            gh issue comment "$ISSUE" --body "No branch was pushed for this request, so there's no pull request. Check the agent's comment above (or the workflow run) for why."
+            exit 0
+          fi
+          summary=$(tail -n 1 pytest.log)
+          if [ "${{ steps.verify.outputs.passed }}" = "true" ]; then
+            verdict="Tests pass on the pushed branch, verified by the workflow and not just the agent: ${summary}"
+          else
+            verdict="Tests FAIL on the pushed branch: ${summary}. Don't merge this as-is."
+          fi
+          pr=$(gh pr list --head "$BRANCH" --json url --jq '.[0].url')
+          if [ -z "$pr" ]; then
+            pr=$(gh pr create --base main --head "$BRANCH" \
+              --title "Dale request #${ISSUE}" --body "Closes #${ISSUE}.")
+          fi
+          gh pr comment "$pr" --body "$verdict"

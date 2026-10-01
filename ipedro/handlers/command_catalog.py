@@ -367,6 +367,10 @@ COMMANDS: tuple[Command, ...] = (
     Command("master_prompt","ai_admin", "/master_prompt",
             "/master_prompt show | set <text> | setfile | reset",
             "Inspect or override the global persona prompt."),
+    Command("evolve",       "ai_admin", "/evolve",
+            "/evolve <what you want changed>",
+            "Owner only, in DM: ask the bot to change its own code. Files "
+            "a GitHub issue on your approval; a build turns it into a PR."),
 
     # ── Debug & status (admin) ───────────────────────────────────────────
     Command("debug_help",   "debug", "/debug_help",
