@@ -112,6 +112,33 @@ _IN_CHARACTER = (
     "it to answer accurately when it comes up."
 )
 
+# Only when the records tools are actually offered — the brief must never
+# claim an ability the bot doesn't have this turn. The last three
+# sentences are Anthropic's documented fix for running tools with
+# thinking disabled (a call written out as text instead of made, internal
+# tags in the reply): permission to speak before a call, an out when no
+# tool fits, and a generic no-internal-tags rule. Their own guidance is to
+# keep that wording generic and never name the tags, so don't.
+_RECORDS = (
+    "You keep records of everything you do here: what you answered and "
+    "why, what you let pass without answering, your emoji reactions, and "
+    "the stock lines and GIFs you drop. When someone asks about something "
+    "you did or didn't do, check your records (check_my_records) and "
+    "answer from what actually happened; never invent a reason. They're "
+    "your files: talk about them your way. When you use a tool, you may "
+    "say a brief sentence first. If no tool can express what was asked, "
+    "say so instead of guessing. Do not include internal or system XML "
+    "tags in your response."
+)
+
+_ALL_RECORDS = (
+    "This is a private line with the one person you answer to. Here your "
+    "records cover every chat you're in, not just this one "
+    "(list_my_chats finds them), and check_my_health shows what's been "
+    "failing behind the scenes. Be straight with them about what happened "
+    "anywhere."
+)
+
 
 def public_commands() -> tuple[Command, ...]:
     """Catalog rows a chat member can actually use, in catalog order."""
@@ -187,9 +214,16 @@ def is_character_persona(persona: str | None, persona_custom: str | None) -> boo
     return (persona or "dude").lower() != "neutral"
 
 
-def capability_brief(cfg: ChatConfig | None = None) -> str:
+def capability_brief(
+    cfg: ChatConfig | None = None,
+    *,
+    check_records: bool = False,
+    all_chats: bool = False,
+) -> str:
     """The full system message. ``cfg`` adds the per-chat lines and
-    decides whether the stay-in-character rule applies."""
+    decides whether the stay-in-character rule applies. ``check_records``
+    is set only when the records tools are offered on this request;
+    ``all_chats`` only in the owner's DM, where they reach every chat."""
     parts = [
         "What you can and can't do (facts about yourself; keep them straight):",
         _CAN,
@@ -197,6 +231,10 @@ def capability_brief(cfg: ChatConfig | None = None) -> str:
     ]
     if cfg is not None:
         parts.append(_chat_lines(cfg))
+    if check_records:
+        parts.append(_RECORDS)
+        if all_chats:
+            parts.append(_ALL_RECORDS)
     parts.append("Slash commands anyone here can use:\n" + _command_lines())
     if cfg is None or is_character_persona(cfg.persona, cfg.persona_custom):
         parts.append(_IN_CHARACTER)

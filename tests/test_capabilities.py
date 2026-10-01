@@ -171,7 +171,7 @@ def _reply_rt(cfg):
     rt = _rt_with()
     rt.chats.get_config.return_value = cfg
     rt.chats.upsert_default_config.return_value = cfg
-    rt.openai = SimpleNamespace(chat=AsyncMock(return_value="sh-sha"))
+    rt.openai = SimpleNamespace(chat=AsyncMock(return_value="sh-sha"), supports_tools=False)
     return rt
 
 

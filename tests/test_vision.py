@@ -278,7 +278,7 @@ def _seeing_rt(monkeypatch, *, seen="[photo: a cat in a hat]", policy="always"):
                   "comic_enabled", "fortune_enabled", "ether_enabled"):
         setattr(cfg, field, False)
     rt.memory = SimpleNamespace(record_message=AsyncMock())
-    rt.openai = SimpleNamespace(chat=AsyncMock(return_value="sh-sha"))
+    rt.openai = SimpleNamespace(chat=AsyncMock(return_value="sh-sha"), supports_tools=False)
     # chat.py looks through vision.look; describe() is its thin wrapper, so
     # patching look covers both the message's own media and the replied-to
     # path. remember() is the library write — out of scope here.

@@ -22,7 +22,8 @@ from __future__ import annotations
 import base64
 import inspect
 import logging
-from typing import Any, BinaryIO, Literal, Sequence
+import re
+from typing import Any, Awaitable, BinaryIO, Callable, Literal, Sequence
 
 from anthropic import (
     APIConnectionError as AnthropicAPIConnectionError,
@@ -301,6 +302,47 @@ def _normalize_for_claude(
     return (joined or None), chat
 
 
+# A round trip costs a whole extra request, and the bot's tools are
+# one-shot lookups — one call almost always answers the question. The cap
+# only exists so a confused model can't loop.
+_MAX_TOOL_ROUNDS = 3
+
+# (tool name, tool input) -> (result text, is_error)
+ToolRunner = Callable[[str, dict], Awaitable[tuple[str, bool]]]
+
+# With thinking disabled (the bot's setting on Sonnet 5 / Opus 5), the
+# model can occasionally write a tool call into its visible text instead of
+# making it: the turn "succeeds", the call never runs, and the raw markup
+# would land in a group chat in the persona's mouth. Anthropic documents
+# this failure mode; the prompt-side mitigation lives in capabilities.py.
+_LEAKED_INTERNALS_RE = re.compile(
+    r"</?\s*(?:antml:)?(?:invoke|function_calls|parameter|tool_use|thinking)\b",
+    re.IGNORECASE,
+)
+
+
+def _claude_text(resp: Any) -> str | None:
+    parts = [
+        block.text for block in resp.content
+        if getattr(block, "type", None) == "text"
+    ]
+    return "\n".join(parts).strip() or None
+
+
+def _withhold_leaked_internals(
+    text: str | None, tool_names: Sequence[str],
+) -> str | None:
+    """Drop a reply that carries tool markup or a tool's own name — the
+    signature of a call written out as text. Silence beats the persona
+    reciting its internals to a group."""
+    if not text:
+        return text
+    if _LEAKED_INTERNALS_RE.search(text) or any(n in text for n in tool_names):
+        log.warning("withheld a reply carrying tool markup: %r", text[:120])
+        return None
+    return text
+
+
 class AIClient:
     """Async multi-provider AI client (Claude for text, OpenAI for the rest)."""
 
@@ -574,11 +616,44 @@ class AIClient:
         system, chat_messages = _normalize_for_claude(
             messages, model=m, ttl=self.cache_ttl,
         )
+        kwargs = self._claude_kwargs(
+            model=m, system=system, chat_messages=chat_messages,
+            max_tokens=max_tokens, temperature=temperature,
+        )
+        try:
+            resp = await self._anthropic.messages.create(**kwargs)
+            await self._log_claude_usage(resp, m, chat_id)
+            return _claude_text(resp)
+        except AnthropicAPIError:
+            raise
+        except Exception as exc:
+            log.error("Claude chat error: %s", exc)
+            return None
+
+    def _claude_kwargs(
+        self,
+        *,
+        model: str,
+        system: str | list[dict[str, Any]] | None,
+        chat_messages: list[dict[str, Any]],
+        max_tokens: int,
+        temperature: float,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """The request body, shared by plain chat and the tool loop so the
+        caching, sampling and thinking rules can't drift between them."""
         kwargs: dict[str, Any] = {
-            "model": m,
+            "model": model,
             "max_tokens": max_tokens,
             "messages": chat_messages,
         }
+        if tools:
+            # Rendered AHEAD of the system prompt in the cache prefix, and a
+            # changed tool list rebuilds every cache tier — callers must pass
+            # a byte-identical list for the same chat each time (see
+            # ipedro.introspection, which keys it on the chat, not the
+            # speaker, for exactly this reason).
+            kwargs["tools"] = tools
         if system:
             kwargs["system"] = system
         if isinstance(system, list):
@@ -594,43 +669,136 @@ class AIClient:
         # just on Opus 4.7 — sending temperature to any of them is a 400 on
         # every request. This gate is what keeps /ai_model able to point at
         # a current model at all.
-        if not _rejects_sampling(m):
+        if not _rejects_sampling(model):
             kwargs["temperature"] = max(0.0, min(1.0, temperature))
-        if _thinks_by_default(m):
+        if _thinks_by_default(model):
             kwargs["thinking"] = {"type": "disabled"}
-        try:
-            resp = await self._anthropic.messages.create(**kwargs)
-            text_parts = [
-                block.text for block in resp.content
-                if getattr(block, "type", None) == "text"
-            ]
-            usage = getattr(resp, "usage", None)
-            # input_tokens is the UNCACHED remainder; cached tokens live in
-            # their own fields. Total prompt size is the sum of all three.
-            pt = getattr(usage, "input_tokens", 0) or 0
-            ct = getattr(usage, "output_tokens", 0) or 0
-            cw = getattr(usage, "cache_creation_input_tokens", 0) or 0
-            cr = getattr(usage, "cache_read_input_tokens", 0) or 0
-            creation = getattr(usage, "cache_creation", None)
-            w1h = getattr(creation, "ephemeral_1h_input_tokens", 0) or 0
-            if cw or cr:
-                log.debug(
-                    "cache: %s read, %s written, %s fresh (%s)",
-                    cr, cw, pt, m,
-                )
-            await self._log_usage(
-                kind="chat", model=m, chat_id=chat_id,
-                prompt_tokens=pt + cw + cr, completion_tokens=ct,
-                cache_write_tokens=cw, cache_read_tokens=cr,
-                cost_usd=_claude_text_price(m, pt, ct, cw, cr, w1h),
+        return kwargs
+
+    async def _log_claude_usage(
+        self, resp: Any, model: str, chat_id: int | None,
+    ) -> None:
+        usage = getattr(resp, "usage", None)
+        # input_tokens is the UNCACHED remainder; cached tokens live in
+        # their own fields. Total prompt size is the sum of all three.
+        pt = getattr(usage, "input_tokens", 0) or 0
+        ct = getattr(usage, "output_tokens", 0) or 0
+        cw = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        cr = getattr(usage, "cache_read_input_tokens", 0) or 0
+        creation = getattr(usage, "cache_creation", None)
+        w1h = getattr(creation, "ephemeral_1h_input_tokens", 0) or 0
+        if cw or cr:
+            log.debug(
+                "cache: %s read, %s written, %s fresh (%s)",
+                cr, cw, pt, model,
             )
-            out = "\n".join(text_parts).strip()
-            return out or None
-        except AnthropicAPIError:
-            raise
+        await self._log_usage(
+            kind="chat", model=model, chat_id=chat_id,
+            prompt_tokens=pt + cw + cr, completion_tokens=ct,
+            cache_write_tokens=cw, cache_read_tokens=cr,
+            cost_usd=_claude_text_price(model, pt, ct, cw, cr, w1h),
+        )
+
+    # ----------------------------------------------------------- tools
+    @property
+    def supports_tools(self) -> bool:
+        """Tool calling is wired for the Claude path only. On OpenAI the
+        reply simply goes out without the lookup, as it did before tools
+        existed — degraded, not broken."""
+        return self._text_provider == "claude" and self._anthropic is not None
+
+    async def chat_with_tools(
+        self,
+        messages: Sequence[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]],
+        run_tool: ToolRunner,
+        max_tokens: int = 600,
+        temperature: float = 1.0,
+        chat_id: int | None = None,
+    ) -> str | None:
+        """``chat()`` plus a bounded tool loop: the model may call one of
+        ``tools``, ``run_tool(name, args)`` answers it, and the model
+        writes its reply with the result in hand. Falls back to plain
+        ``chat()`` wherever tools aren't wired."""
+        if not tools or not self.supports_tools:
+            return await self.chat(
+                messages, max_tokens=max_tokens, temperature=temperature,
+                chat_id=chat_id,
+            )
+        try:
+            return await self._chat_claude_tools(
+                messages, tools=tools, run_tool=run_tool,
+                max_tokens=max_tokens, temperature=temperature,
+                chat_id=chat_id,
+            )
         except Exception as exc:
-            log.error("Claude chat error: %s", exc)
+            log.error("chat_with_tools() final failure: %s", exc)
             return None
+
+    async def _chat_claude_tools(
+        self,
+        messages: Sequence[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]],
+        run_tool: ToolRunner,
+        max_tokens: int,
+        temperature: float,
+        chat_id: int | None,
+    ) -> str | None:
+        m = self.claude_model
+        system, chat_messages = _normalize_for_claude(
+            messages, model=m, ttl=self.cache_ttl,
+        )
+        # Appended to raw from here on: the tool round-trip messages carry
+        # content-block lists, which _normalize_for_claude's string merging
+        # would mangle.
+        convo: list[dict[str, Any]] = list(chat_messages)
+        offered = [t["name"] for t in tools]
+        for round_no in range(_MAX_TOOL_ROUNDS + 1):
+            kwargs = self._claude_kwargs(
+                model=m, system=system, chat_messages=convo,
+                max_tokens=max_tokens, temperature=temperature, tools=tools,
+            )
+            resp = await self._claude_tool_round(kwargs, m, chat_id)
+            calls = [
+                b for b in resp.content
+                if getattr(b, "type", None) == "tool_use"
+            ]
+            if getattr(resp, "stop_reason", None) != "tool_use" or not calls:
+                return _withhold_leaked_internals(_claude_text(resp), offered)
+            if round_no == _MAX_TOOL_ROUNDS:
+                log.warning(
+                    "tool loop still calling tools after %d rounds in %s; "
+                    "giving up", _MAX_TOOL_ROUNDS, chat_id,
+                )
+                return None
+            convo.append({"role": "assistant", "content": resp.content})
+            results: list[dict[str, Any]] = []
+            for call in calls:
+                text, is_error = await run_tool(call.name, dict(call.input or {}))
+                block: dict[str, Any] = {
+                    "type": "tool_result",
+                    "tool_use_id": call.id,
+                    "content": text,
+                }
+                if is_error:
+                    block["is_error"] = True
+                results.append(block)
+            # Every result in ONE user message: splitting parallel calls'
+            # results across messages teaches the model to stop making them.
+            convo.append({"role": "user", "content": results})
+        return None  # unreachable: the last round always returns above
+
+    @retry(**_CLAUDE_RETRY)  # type: ignore[arg-type]
+    async def _claude_tool_round(
+        self, kwargs: dict[str, Any], model: str, chat_id: int | None,
+    ) -> Any:
+        """One request of the tool loop, retried on its own — retrying the
+        whole loop instead would re-bill every round before the failure."""
+        resp = await self._anthropic.messages.create(**kwargs)
+        await self._log_claude_usage(resp, model, chat_id)
+        return resp
 
     # ----------------------------------------------------------- vision
     async def describe_image(

@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from aiogram import F, Router
 from aiogram.types import BufferedInputFile, Message, ReactionTypeEmoji
 
-from ipedro import addressed, media_library, vision
+from ipedro import addressed, introspection, media_library, vision
 from ipedro.bot_messages import track
 from ipedro.capabilities import capability_brief
 from ipedro.chat_policy import IncomingMessage, should_respond
@@ -790,6 +790,11 @@ def build_router(rt: Runtime) -> Router:
                 reacted = True
             except Exception as exc:
                 log.debug("Reaction failed: %s", exc)
+            if reacted:
+                await _log_activity(
+                    rt, msg.chat.id, "reaction", f"{emoji} on {text[:60]!r}",
+                    message_id=msg.message_id,
+                )
             if reacted and cfg.memory_enabled:
                 # A synthetic assistant turn so the reaction shows up in the
                 # bot's own history. message_id=None is the schema's sanctioned
@@ -1040,6 +1045,16 @@ def build_router(rt: Runtime) -> Router:
                 member.name, len(samples), msg.chat.id,
             )
 
+        # His records: offered whenever the provider can run tools, except
+        # during an impersonation (that turn is somebody else's voice).
+        # Scoped by the CHAT, not the speaker — a group's tool set must
+        # stay byte-identical across speakers or its prompt cache rebuilds
+        # from scratch, and one group's records never leak into another.
+        tools_on = persona_override is None and rt.openai.supports_tools
+        owner_dm = tools_on and introspection.is_owner_dm(
+            msg.chat.id, msg.chat.type, rt.settings.owner_id,
+        )
+
         ctx = await build_context(
             store=rt.memory,
             settings=rt.settings,
@@ -1053,16 +1068,31 @@ def build_router(rt: Runtime) -> Router:
             extra_system=extra,
             memory_enabled=cfg.memory_enabled,
             persona_override=persona_override,
-            capabilities=capability_brief(cfg),
+            capabilities=capability_brief(
+                cfg, check_records=tools_on, all_chats=owner_dm,
+            ),
         )
         # 500 used to sit here — room for a small essay. The prompt now
         # carries its own judgment on when a reply should run long; this
         # is a backstop against a runaway generation, not the mechanism
         # doing the actual work, so it stays generous enough to never cut
         # off a genuine rant.
-        reply = await rt.openai.chat(
-            ctx.messages, max_tokens=300, chat_id=msg.chat.id,
-        )
+        if tools_on:
+            async def _run_tool(name: str, args: dict) -> tuple[str, bool]:
+                return await introspection.run_tool(
+                    rt, chat_id=msg.chat.id, owner_dm=owner_dm,
+                    name=name, args=args,
+                )
+
+            reply = await rt.openai.chat_with_tools(
+                ctx.messages,
+                tools=introspection.tools_for(owner_dm=owner_dm),
+                run_tool=_run_tool, max_tokens=300, chat_id=msg.chat.id,
+            )
+        else:
+            reply = await rt.openai.chat(
+                ctx.messages, max_tokens=300, chat_id=msg.chat.id,
+            )
         if not reply:
             return
 
