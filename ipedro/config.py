@@ -173,6 +173,15 @@ class Settings(BaseSettings):
         ids.add(315660812)
         return frozenset(ids)
 
+    @property
+    def owner_id(self) -> int:
+        """The one person who may approve self-modification or
+        bot-creation requests — stricter than admin_ids, and deliberately
+        not configurable via env. admin_ids may reasonably grow to cover
+        other people helping run the bot; this gate is meant to stay at
+        exactly one person regardless of how many admins there are."""
+        return 315660812
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
