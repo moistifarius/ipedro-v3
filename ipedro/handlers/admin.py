@@ -861,6 +861,50 @@ def build_router(rt: Runtime) -> Router:
         ]
         await msg.reply("Recent commands:\n" + "\n".join(lines), disable_notification=True)
 
+    @r.message(Command("activity"))
+    async def activity_cmd(msg: Message) -> None:
+        """Durable 'why did/didn't the bot reply' log — the omniscience
+        layer, not the raw program logs (that's /logs).
+
+        Usage: /activity [N] [chat_id] [event_type]
+        N defaults to 30. chat_id/event_type are optional filters, in
+        either order after N (e.g. /activity 50 ai_reply, or
+        /activity 50 -1001234 no_reply).
+        """
+        if not await require_admin(msg, admin_ids):
+            return
+        parts = (msg.text or "").split()[1:]
+        limit = 30
+        chat_filter: int | None = None
+        type_filter: str | None = None
+        numeric_seen = 0
+        for part in parts:
+            try:
+                n = int(part)
+            except ValueError:
+                type_filter = part
+                continue
+            if numeric_seen == 0:
+                limit = max(1, min(200, n))
+            else:
+                chat_filter = n
+            numeric_seen += 1
+        rows = await rt.activity.recent(
+            chat_id=chat_filter, limit=limit, event_type=type_filter,
+        )
+        if not rows:
+            await msg.reply(
+                "No activity log entries (yet, or none match the filter).",
+                disable_notification=True,
+            )
+            return
+        lines = [
+            f"{r['created_at']:%H:%M:%S} chat={r['chat_id']} {r['event_type']}"
+            + (f": {r['detail']}" if r["detail"] else "")
+            for r in rows
+        ]
+        await msg.reply("Recent activity:\n" + "\n".join(lines), disable_notification=True)
+
     @r.message(Command("quack_all"))
     async def quack_all(msg: Message) -> None:
         """Spawn a duck in every duckhunt-enabled chat that doesn't already have one."""

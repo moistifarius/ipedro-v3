@@ -121,6 +121,29 @@ CREATE TABLE IF NOT EXISTS command_log (
 CREATE INDEX IF NOT EXISTS command_log_recent_idx
     ON command_log (created_at DESC);
 
+-- Activity log (omniscience) -------------------------------------------------
+-- Durable record of WHY the bot did or didn't reply, independent of the
+-- in-memory-only ring buffer logging_setup.py keeps for raw log lines (that
+-- one dies on restart; this one is queryable history). event_type is a
+-- short fixed tag (ai_reply, automod, thanks_pedro, ambient_gif, no_reply,
+-- …), detail is a short human-readable reason. No chats(chat_id) FK: a
+-- message_id-bearing event can arrive for a chat row that hasn't been
+-- upserted yet (e.g. the chat.id lookup races the insert), and losing an
+-- activity row over that would defeat the point of it.
+CREATE TABLE IF NOT EXISTS activity_log (
+    id           BIGSERIAL PRIMARY KEY,
+    chat_id      BIGINT,
+    message_id   BIGINT,
+    event_type   TEXT NOT NULL,
+    detail       TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS activity_log_recent_idx
+    ON activity_log (created_at DESC);
+CREATE INDEX IF NOT EXISTS activity_log_chat_recent_idx
+    ON activity_log (chat_id, created_at DESC);
+
 -- Duckhunt ------------------------------------------------------------------
 -- Persistent state for active spawns. At most one active duck per chat.
 CREATE TABLE IF NOT EXISTS duck_events (

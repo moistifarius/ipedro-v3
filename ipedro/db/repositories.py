@@ -424,3 +424,54 @@ class CommandLogRepo:
             limit,
         )
         return [dict(r) for r in rows]
+
+
+class ActivityLogRepo:
+    """Durable 'why did/didn't the bot reply' history — see schema.sql for
+    the rationale on why this is separate from command_log and from the
+    in-memory ring buffer logging_setup.py keeps."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def log(
+        self,
+        chat_id: int | None,
+        event_type: str,
+        detail: str | None = None,
+        *,
+        message_id: int | None = None,
+    ) -> None:
+        await self.db.execute(
+            """
+            INSERT INTO activity_log (chat_id, message_id, event_type, detail)
+            VALUES ($1, $2, $3, $4)
+            """,
+            chat_id, message_id, event_type, detail,
+        )
+
+    async def recent(
+        self,
+        chat_id: int | None = None,
+        limit: int = 50,
+        event_type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Most recent rows, newest first. Optional chat/type filters —
+        omitting both gives a cross-chat feed, for the admin view."""
+        conditions: list[str] = []
+        args: list[Any] = []
+        if chat_id is not None:
+            args.append(chat_id)
+            conditions.append(f"chat_id = ${len(args)}")
+        if event_type is not None:
+            args.append(event_type)
+            conditions.append(f"event_type = ${len(args)}")
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        args.append(limit)
+        rows = await self.db.fetch(
+            f"SELECT chat_id, message_id, event_type, detail, created_at "
+            f"  FROM activity_log {where} "
+            f"  ORDER BY id DESC LIMIT ${len(args)}",
+            *args,
+        )
+        return [dict(r) for r in rows]

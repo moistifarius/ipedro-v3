@@ -106,6 +106,7 @@ def _rt_with(
         chats=chats, users=users, duckhunt=duckhunt,
         openai=SimpleNamespace(chat=AsyncMock(return_value="PASS: ok")),
         memory=SimpleNamespace(),
+        activity=SimpleNamespace(log=AsyncMock()),
     )
 
 

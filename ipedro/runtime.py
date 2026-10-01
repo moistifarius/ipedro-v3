@@ -8,7 +8,7 @@ from aiogram import Bot
 
 from ipedro.config import Settings
 from ipedro.db.pool import Database
-from ipedro.db.repositories import ChatRepo, CommandLogRepo, UserRepo
+from ipedro.db.repositories import ActivityLogRepo, ChatRepo, CommandLogRepo, UserRepo
 from ipedro.duckhunt.service import DuckhuntService
 from ipedro.memory.store import MemoryStore
 from ipedro.openai_client import OpenAIClient
@@ -25,4 +25,5 @@ class Runtime:
     chats: ChatRepo
     users: UserRepo
     command_log: CommandLogRepo
+    activity: ActivityLogRepo
     pgvector_available: bool

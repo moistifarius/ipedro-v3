@@ -212,6 +212,19 @@ def _challenge_is_stale(challenge) -> bool:
     return age > _BEF_CHALLENGE_TTL_SECONDS
 
 
+async def _log_activity(
+    rt: Runtime, chat_id: int, event_type: str, detail: str | None = None,
+    *, message_id: int | None = None,
+) -> None:
+    """Record why the bot did or didn't reply. Best-effort: a logging
+    failure must never break the message pipeline, same rule as every
+    other post-send bookkeeping call in this file."""
+    try:
+        await rt.activity.log(chat_id, event_type, detail, message_id=message_id)
+    except Exception as exc:
+        log.warning("activity log failed for %s: %s", chat_id, exc)
+
+
 async def _reply_automod_media(msg: Message, media: MediaResponse) -> None:
     """Send an automod media response; fall back to its text on any failure."""
     data = await fetch_automod_media(media)
@@ -711,6 +724,7 @@ def build_router(rt: Runtime) -> Router:
             line = random.choice(_THANKS_PEDRO_LINES)
             sent = await msg.reply(line, disable_notification=True)
             track(msg.chat.id, sent.message_id, line, replied_to_user_id=from_user_id)
+            await _log_activity(rt, msg.chat.id, "thanks_pedro", line)
             if cfg.memory_enabled:
                 try:
                     await rt.memory.record_message(
@@ -738,15 +752,21 @@ def build_router(rt: Runtime) -> Router:
         if automod is not None:
             if isinstance(automod, MediaResponse):
                 await _reply_automod_media(msg, automod)
+                kind = "media"
             elif isinstance(automod, DaleGif):
                 await dale.send_random(
                     rt.db, msg, automod.tag,
                     caption=automod.caption or None,
                     fallback=automod.fallback,
                 )
+                kind = "gif"
             else:
                 sent = await msg.reply(automod, disable_notification=True)
                 track(msg.chat.id, sent.message_id, automod)
+                kind = "text"
+            await _log_activity(
+                rt, msg.chat.id, "automod", f"{kind} trigger on {typed[:60]!r}",
+            )
             return
 
         # Ambient emoji reaction (rare, never on commands or our own intercepts).
@@ -889,6 +909,9 @@ def build_router(rt: Runtime) -> Router:
                     await maybe_summarize(
                         rt.memory, rt.openai, rt.settings, msg.chat.id,
                     )
+                await _log_activity(
+                    rt, msg.chat.id, "ambient_gif", f"random roll on {typed[:60]!r}",
+                )
                 return
 
         if not should_respond(
@@ -898,6 +921,7 @@ def build_router(rt: Runtime) -> Router:
             # "Taking credit": when a positive line is spotted, Pedro
             # occasionally inserts itself even when policy wouldn't reply.
             # Skipped under the explicit commands-only opt-out.
+            credit_taken = False
             if (
                 cfg.response_policy != "commands"
                 and _POSITIVITY_RE.search(typed)
@@ -906,6 +930,7 @@ def build_router(rt: Runtime) -> Router:
                 line = random.choice(_CREDIT_LINES)
                 sent = await msg.answer(line, disable_notification=True)
                 track(msg.chat.id, sent.message_id, line)
+                credit_taken = True
                 if cfg.memory_enabled:
                     try:
                         await rt.memory.record_message(
@@ -920,6 +945,15 @@ def build_router(rt: Runtime) -> Router:
             # Trigger background summarization opportunistically even when we don't reply.
             if cfg.memory_enabled:
                 await maybe_summarize(rt.memory, rt.openai, rt.settings, msg.chat.id)
+            if credit_taken:
+                await _log_activity(
+                    rt, msg.chat.id, "credit_line", f"on {typed[:60]!r}",
+                )
+            else:
+                await _log_activity(
+                    rt, msg.chat.id, "no_reply",
+                    f"policy={cfg.response_policy} text={typed[:60]!r}",
+                )
             return
 
         # "dale send that pic of the grill" → hand back a picture from this
@@ -1034,6 +1068,16 @@ def build_router(rt: Runtime) -> Router:
 
         sent = await msg.answer(reply, disable_notification=True)
         track(msg.chat.id, sent.message_id, reply, replied_to_user_id=from_user_id)
+        if incoming.is_reply_to_bot:
+            reason = "reply-to"
+        elif incoming.has_mention_of_bot:
+            reason = "addressed"
+        else:
+            reason = "ambient-roll"
+        await _log_activity(
+            rt, msg.chat.id, "ai_reply", f"{reason}: {typed[:60]!r}",
+            message_id=sent.message_id,
+        )
 
         # Post-send: never let a DB hiccup crash the handler after the user
         # already saw the reply — log it and move on (else stored history
