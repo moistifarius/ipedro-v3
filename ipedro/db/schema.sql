@@ -191,6 +191,9 @@ CREATE TABLE IF NOT EXISTS bot_registry (
     last_seen_at  TIMESTAMPTZ
 );
 
+-- The owner's few words the persona was written from (ipedro/persona_gen.py).
+ALTER TABLE bot_registry ADD COLUMN IF NOT EXISTS description TEXT;
+
 -- What every bot says in a group, so the others can hear it (Telegram
 -- never delivers one bot's group messages to another). Lives in the hub
 -- database — Dale's — and is pruned after a day: it's a wire, not a

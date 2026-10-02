@@ -46,6 +46,10 @@ bot's admin user. Fields:
 | `ether` | `on` / `off` — make this chat reachable as a destination for `/ether` radio transmissions sent from other ether-enabled chats. Off by default. Needs ≥ 2 chats opted in for a transmission to have anywhere to land. |
 | `ducknames` | `on` / `off` — include this chat's named befriended ducks in the global `/ducknames` listing. Default `on`. Turn off if you want your roster private (your in-chat `/duckfriends` and `/duckstats` still work either way). |
 
+**Long personas:** `/chat_config persona <name> setfile` — send a `.txt`
+file with that caption, or reply to one with it, to give this chat a
+custom persona longer than a Telegram message allows (up to 64 KB).
+
 ### `/ether <text>` (and on voice notes)
 
 Manually transmit into the ether, as a **far-away radio voice** rather
@@ -152,9 +156,11 @@ stuck challenge with `/debug_clear_challenge [chat_id]`.
 Ducks may also wander off on their own at any time — more likely as they
 hang around longer, and almost certainly gone after a day.
 
-### "bad bot" / "bad pedro"
-Reply to one of the bot's messages with either phrase to ask the bot to
-delete that message.
+### "bad bot" / "bad dale"
+Reply to one of the bot's messages with "bad bot" or "bad <any of its
+names>" (Dale: dale, rusty, pedro, dude, duder, boomhauer) to make it
+delete that message. Another bot run with `/newbot` takes "bad <its own
+names>".
 
 ## Admin (private DM, user 315660812)
 
@@ -169,6 +175,14 @@ Send a literal message to a known chat as the bot.
 
 ### `/logs`
 Tail the in-DB command audit log.
+
+### `/activity [N] [chat_id] [event_type]`
+The durable "why did/didn't he answer" log: every AI reply (and whether it
+was a reply-to, an address, or an ambient roll), every deliberate silence,
+automod hit, canned line, ambient GIF and emoji reaction. N defaults to
+30 (max 200); `chat_id` and `event_type` filter it, e.g. `/activity 50
+no_reply` or `/activity 50 -1001234 ai_reply`. Dale can read the same
+records himself mid-conversation when someone asks why he did something.
 
 ### `/duckstats_reset [chat_id] [user | all]`
 Clear duckhunt scoreboard rows. Three forms:
@@ -346,3 +360,45 @@ Admin-only override: flag specific chats so the ambient loops
 `/config` wizard — this is the admin's lever for keeping a chat quiet
 without exposing the toggle to chat members. Same panel is reachable
 from `/manage → 💬 Chats → 🤫 Silenced chats`. Persisted in `kv_store`.
+
+## Owner only (DM with Dale, user 315660812)
+
+Stricter than admin: only the owner, and only in a private chat with the
+bot. Silently ignored in groups.
+
+### `/evolve <what you want changed>`
+Ask the bot to change its own code. Shows the exact GitHub issue first;
+tap **File it** and a GitHub Action turns it into a pull request. Your
+words go to the coding agent verbatim. The PR merges itself only if its
+tests pass and it touches nothing but content (prompts, personas, canned
+lines, the GIF seed list, tests); anything else waits for you. Needs
+`EVOLVE_GITHUB_TOKEN` on the bot host.
+
+### `/newbot <token> <Name>[, other names]` + a short description
+Add another bot: its own Telegram account (make it in @BotFather first,
+and turn its Group Privacy off), its own process and its own memory.
+On the lines after the first, describe it in a few words:
+
+    /newbot 123456789:AAH... Hank, hank hill
+    sells propane, can't stand Luke's crypto talk
+
+Its persona is written from that description plus what every bot
+remembers about the people and things it names (facts about a Luke,
+messages about crypto, from Dale's memory and every other bot's). The
+message holding the token is deleted on sight; a token posted in a group
+is deleted and you get a DM. The `bots` compose service runs it within
+seconds. No description: the persona is written from the name alone.
+
+### `/bot_persona <#n or name> [new description]`
+Without a description, shows a bot's persona and what it was written
+from. With one, rewrites it the same way and restarts the bot on it. A
+`/master_prompt` set in that bot's own DM still wins until you
+`/master_prompt reset` there.
+
+### `/bots`
+The other bots, whether each is running, and why one died.
+
+### `/bot_stop <#n or name>`, `/bot_start <#n or name>`, `/bot_remove <#n or name>`
+Stop, restart or remove one. A removed bot's database is kept, and
+`/newbot` with its token brings it back (with a freshly written persona).
+

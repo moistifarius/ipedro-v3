@@ -19,7 +19,7 @@ from aiogram import Bot, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from ipedro import bots
+from ipedro import bots, persona_gen
 from ipedro.auth import is_owner
 from ipedro.handlers.common import auth_ctx
 from ipedro.runtime import Runtime
@@ -36,6 +36,10 @@ _PRIVACY_WARNING = (
     "Bot Settings → Group Privacy → Turn off (then re-add it to any group "
     "it's already in)."
 )
+
+# A persona shown back in full would crowd out everything else in the
+# reply; this much is enough to judge it, and /bot_persona shows the rest.
+_PERSONA_PREVIEW = 1500
 
 _NOT_DELETED = (
     "⚠️ I couldn't delete your message, and it has the token in it. "
@@ -86,6 +90,48 @@ async def _supervisor_line(rt: Runtime) -> str:
         + ", so nothing here starts or stops. It's the `bots` service in "
         "docker/docker-compose.yml."
     )
+
+
+def _preview(persona: str) -> str:
+    if len(persona) <= _PERSONA_PREVIEW:
+        return persona
+    return persona[:_PERSONA_PREVIEW].rstrip() + " …"
+
+
+def _found_line(draft: persona_gen.PersonaDraft) -> str:
+    if not draft.generated:
+        return "(Couldn't reach the model, so this is just your description.)"
+    hits = [f"{s} ({n})" for s, n in draft.found.items() if n]
+    if hits:
+        return "Drew on what the chats remember about: " + ", ".join(hits) + "."
+    if draft.found:
+        return ("Found nothing in the chats' memory about "
+                + ", ".join(draft.found) + ".")
+    return ""
+
+
+async def _write_persona(rt, say, *, name: str, aliases: str,
+                         description: str | None) -> persona_gen.PersonaDraft:
+    """Tell the owner it's working (the lookups and the writing take a few
+    seconds), then write the persona."""
+    try:
+        await say(
+            f"Writing {name}'s persona"
+            + (" from your description and what the chats remember…"
+               if description else " from the name alone…"),
+            disable_notification=True,
+        )
+    except Exception:
+        pass
+    try:
+        return await persona_gen.build_persona(
+            rt, name=name, aliases=aliases, description=description,
+        )
+    except Exception as exc:
+        log.warning("persona generation failed: %s", exc)
+        return persona_gen.PersonaDraft(
+            persona_gen.fallback_persona(name, description), {}, False,
+        )
 
 
 def _describe(b: bots.BotRow, now: datetime) -> str:
@@ -197,12 +243,8 @@ def build_router(rt: Runtime) -> Router:
                 disable_notification=True,
             )
             return
-        row = await bots.register(
-            rt.db, req, telegram_id=me.id, username=me.username or str(me.id),
-            created_by=ctx.user_id,
-        )
-        if row is None:
-            existing = await bots.find_by_telegram_id(rt.db, me.id)
+        existing = await bots.find_by_telegram_id(rt.db, me.id)
+        if existing is not None and existing.status != "removed":
             await say(
                 f"@{me.username} is already bot #{existing.id} "
                 f"({existing.status}). /bot_start, /bot_stop or "
@@ -210,13 +252,28 @@ def build_router(rt: Runtime) -> Router:
                 disable_notification=True,
             )
             return
+        draft = await _write_persona(
+            rt, say, name=req.name, aliases=req.aliases,
+            description=req.description,
+        )
+        row = await bots.register(
+            rt.db, req, telegram_id=me.id, username=me.username or str(me.id),
+            created_by=ctx.user_id, persona=draft.persona,
+        )
+        if row is None:                 # registered in the seconds since
+            await say(
+                f"@{me.username} got registered meanwhile. /bots shows it."
+                + tail, disable_notification=True,
+            )
+            return
         lines = [
             f"Added {row.name} (@{row.username}) as bot #{row.id}, answering "
             f"to: {row.aliases}.",
-            "Persona: " + (
-                "set." if row.persona else
-                f"none given, so it starts as plain '{row.name}'."
-            ) + " DM it /master_prompt to change it any time.",
+            "Its persona:\n" + _preview(draft.persona),
+            " ".join(x for x in (
+                _found_line(draft),
+                f"/bot_persona #{row.id} <description> rewrites it.",
+            ) if x),
             await _supervisor_line(rt),
         ]
         if not getattr(me, "can_read_all_group_messages", True):
@@ -261,6 +318,57 @@ def build_router(rt: Runtime) -> Router:
         await msg.reply(f"#{row.id} {row.name} {done}.", disable_notification=True)
         await rt.command_log.add(
             msg.chat.id, msg.from_user.id, f"/bot_{verb}", f"#{row.id}", True,
+        )
+
+    @r.message(Command("bot_persona"))
+    async def persona_cmd(msg: Message) -> None:
+        """/bot_persona <#n or name> [new description]: show a bot's
+        persona, or rewrite it from a new description."""
+        if not await _owner(msg):
+            return
+        parts = (msg.text or "").split(None, 2)
+        if len(parts) < 2:
+            await msg.reply(
+                "Usage: /bot_persona <#number or name> [new description]\n"
+                "Without a description it shows the current persona.",
+                disable_notification=True,
+            )
+            return
+        found = await bots.resolve(rt.db, parts[1])
+        if len(found) != 1:
+            await msg.reply(
+                f"No single bot called {parts[1]!r}. /bots lists them; use "
+                "the #number.",
+                disable_notification=True,
+            )
+            return
+        row = found[0]
+        description = " ".join(parts[2].split()) if len(parts) > 2 else ""
+        if not description:
+            await msg.reply(
+                f"#{row.id} {row.name}"
+                + (f", described as: {row.description}" if row.description else "")
+                + "\n\n" + _preview(row.persona or "(no persona)"),
+                disable_notification=True,
+            )
+            return
+        draft = await _write_persona(
+            rt, msg.reply, name=row.name, aliases=row.aliases,
+            description=description,
+        )
+        await bots.set_persona(rt.db, row.id, draft.persona, description)
+        await msg.reply(
+            f"#{row.id} {row.name}'s new persona:\n{_preview(draft.persona)}\n\n"
+            + " ".join(x for x in (
+                _found_line(draft),
+                "It restarts with it within a few seconds. A /master_prompt "
+                "set in its own DM still wins; /master_prompt reset there "
+                "to use this one.",
+            ) if x),
+            disable_notification=True,
+        )
+        await rt.command_log.add(
+            msg.chat.id, msg.from_user.id, "/bot_persona", f"#{row.id}", True,
         )
 
     @r.message(Command("bot_start"))

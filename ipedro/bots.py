@@ -48,7 +48,9 @@ _NOT_INHERITED = frozenset({
 
 USAGE = (
     "Usage: /newbot <token> <Name>[, other names it answers to]\n"
-    "Anything on the lines after that is its persona.\n\n"
+    "On the lines after that, describe it in a few words: who it is, who "
+    "it loves or can't stand. I'll write its persona from that and from "
+    "what the chats remember about whoever and whatever you mention.\n\n"
     "Make the bot first: @BotFather → /newbot gives you the token. Then "
     "turn its Group Privacy off (@BotFather → /mybots → Bot Settings) so "
     "it can hear a group, not just commands and replies."
@@ -64,7 +66,7 @@ class NewBotRequest:
     token: str = field(repr=False)
     name: str
     aliases: str              # comma-separated, as BOT_ALIASES takes them
-    persona: str | None = field(default=None, repr=False)
+    description: str | None = None   # the owner's few words; the persona is written from it
 
 
 @dataclass(frozen=True)
@@ -78,6 +80,7 @@ class BotRow:
     # Never in a repr: a logged row must not carry the token with it.
     token: str = field(repr=False)
     persona: str | None = field(default=None, repr=False)
+    description: str | None = field(default=None, repr=False)
     running: bool = False
     started_at: datetime | None = None
     restarts: int = 0
@@ -92,6 +95,7 @@ class BotRow:
             token=r["token"], persona=r["persona"], running=r["running"],
             started_at=r["started_at"], restarts=r["restarts"],
             last_exit=r["last_exit"], last_seen_at=r["last_seen_at"],
+            description=r["description"] if "description" in r.keys() else None,
         )
 
 
@@ -110,7 +114,8 @@ def contains_token(text: str | None) -> bool:
 
 def parse_newbot(text: str) -> NewBotRequest:
     """'/newbot <token> <Name>[, alias, ...]' on the first line; everything
-    after the first line is the persona."""
+    after the first line describes it (ipedro/persona_gen.py writes the
+    persona from that)."""
     first, _, rest = (text or "").partition("\n")
     parts = first.split(None, 2)
     if len(parts) < 3:
@@ -129,7 +134,7 @@ def parse_newbot(text: str) -> NewBotRequest:
     aliases = ", ".join(dict.fromkeys(n.lower() for n in names))
     return NewBotRequest(
         token=token, name=names[0], aliases=aliases,
-        persona=rest.strip() or None,
+        description=" ".join(rest.split()) or None,
     )
 
 
@@ -182,26 +187,40 @@ def fingerprint(row: BotRow) -> str:
 # ── the registry ─────────────────────────────────────────────────────────────
 
 async def register(
-    db, req: NewBotRequest, *, telegram_id: int, username: str, created_by: int,
+    db, req: NewBotRequest, *, telegram_id: int, username: str,
+    created_by: int, persona: str | None,
 ) -> BotRow | None:
     """Add a bot, or bring back a removed one with these settings. None
     when it's already registered and not removed — the owner stops or
     removes it first, rather than a second /newbot silently replacing it."""
     row = await db.fetchrow(
         """
-        INSERT INTO bot_registry
-            (telegram_id, username, name, aliases, persona, token, created_by)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO bot_registry (telegram_id, username, name, aliases,
+                                  persona, description, token, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         ON CONFLICT (telegram_id) DO UPDATE SET
             username = EXCLUDED.username, name = EXCLUDED.name,
             aliases = EXCLUDED.aliases, persona = EXCLUDED.persona,
+            description = EXCLUDED.description,
             token = EXCLUDED.token, created_by = EXCLUDED.created_by,
             status = 'active', updated_at = NOW()
         WHERE bot_registry.status = 'removed'
         RETURNING *
         """,
-        telegram_id, username, req.name, req.aliases, req.persona, req.token,
-        created_by,
+        telegram_id, username, req.name, req.aliases, persona,
+        req.description, req.token, created_by,
+    )
+    return BotRow.from_record(row) if row else None
+
+
+async def set_persona(
+    db, bot_id: int, persona: str, description: str | None,
+) -> BotRow | None:
+    """A new persona for a bot; the supervisor restarts it with this one."""
+    row = await db.fetchrow(
+        "UPDATE bot_registry SET persona = $2, description = $3, "
+        "updated_at = NOW() WHERE id = $1 RETURNING *",
+        bot_id, persona, description,
     )
     return BotRow.from_record(row) if row else None
 
