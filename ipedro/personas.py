@@ -26,9 +26,24 @@ NEUTRAL_PROMPT = (
 # Module-level cache; updated by set_master_prompt_override().
 _master_prompt_override: str | None = None
 
+# What the master persona falls back to with no /master_prompt override:
+# Dale, unless this deployment is a different bot (settings.bot_persona,
+# applied once at startup by set_default_prompt).
+_default_prompt: str = DEFAULT_DALE_PROMPT
+
+
+def default_prompt() -> str:
+    return _default_prompt
+
+
+def set_default_prompt(text: str | None) -> None:
+    """Replace (or restore, with None) the persona this bot starts as."""
+    global _default_prompt
+    _default_prompt = text.strip() if text and text.strip() else DEFAULT_DALE_PROMPT
+
 
 def current_master_prompt() -> str:
-    return _master_prompt_override or DEFAULT_DUDE_PROMPT
+    return _master_prompt_override or _default_prompt
 
 
 def set_master_prompt_override(text: str | None) -> None:

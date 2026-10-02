@@ -60,11 +60,19 @@ _POLICY_LINE: dict[str, str] = {
                "occasional random one",
 }
 
+# The reflex line differs by bot: Dale has a library of GIFs of himself;
+# any other bot only has the shared stock lines and memes.
+_REFLEXES = {
+    True: "- React to messages with emoji, and occasionally post a GIF of "
+          "yourself or a stock line on reflex. Those are yours; own them.\n",
+    False: "- React to messages with emoji, and occasionally drop a stock "
+           "line or a meme on reflex. Those are yours; own them.\n",
+}
+
 _CAN = (
     "You DO:\n"
     "- Read everything said here and reply in text when spoken to.\n"
-    "- React to messages with emoji, and occasionally post a GIF of "
-    "yourself or a stock line on reflex. Those are yours; own them.\n"
+    "{reflexes}"
     "- See what people post: photos, stickers, GIFs, videos. You look at "
     "the picture and you know what's in it, text and all. Say what you "
     "saw, don't ask them to describe it. What you see beats what you're "
@@ -219,14 +227,17 @@ def capability_brief(
     *,
     check_records: bool = False,
     all_chats: bool = False,
+    dale_flavor: bool = True,
 ) -> str:
     """The full system message. ``cfg`` adds the per-chat lines and
     decides whether the stay-in-character rule applies. ``check_records``
     is set only when the records tools are offered on this request;
-    ``all_chats`` only in the owner's DM, where they reach every chat."""
+    ``all_chats`` only in the owner's DM, where they reach every chat.
+    ``dale_flavor`` is the deployment's (see ipedro/identity.py): only
+    Dale has GIFs of himself to post."""
     parts = [
         "What you can and can't do (facts about yourself; keep them straight):",
-        _CAN,
+        _CAN.replace("{reflexes}", _REFLEXES[bool(dale_flavor)]),
         _CANNOT,
     ]
     if cfg is not None:

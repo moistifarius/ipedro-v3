@@ -358,7 +358,7 @@ async def test_a_description_never_fires_a_canned_automod_bit(monkeypatch):
     monkeypatch.setattr(chat, "should_respond", lambda *a, **k: False)
     fired = []
     monkeypatch.setattr(chat, "_automod_response",
-                        lambda t: fired.append(t) or None)
+                        lambda t, **k: fired.append(t) or None)
     msg = _media_msg(text=None)
     msg.text = None
     msg.caption = "heh"

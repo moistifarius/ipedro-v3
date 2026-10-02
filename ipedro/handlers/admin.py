@@ -35,7 +35,7 @@ from ipedro.logging_setup import recent_log_lines
 from ipedro.memory.summarizer import force_summarize
 from ipedro.memory.tokens import count_tokens
 from ipedro.personas import (
-    DEFAULT_DUDE_PROMPT, current_master_prompt, set_master_prompt_override,
+    current_master_prompt, default_prompt, set_master_prompt_override,
 )
 from ipedro.runtime import Runtime
 from ipedro.silenced_chats import (
@@ -1867,8 +1867,8 @@ def build_router(rt: Runtime) -> Router:
         sub = raw[1].lower() if len(raw) >= 2 else "show"
         if sub == "show":
             current = current_master_prompt()
-            is_default = current == DEFAULT_DUDE_PROMPT
-            tag = "(default Dale)" if is_default else "(override active)"
+            is_default = current == default_prompt()
+            tag = "(default persona)" if is_default else "(override active)"
             tokens = count_tokens(current)
             head = (
                 f"Master persona prompt {tag} "
@@ -1885,7 +1885,7 @@ def build_router(rt: Runtime) -> Router:
             await kv_delete(rt.db, "pedro_master_prompt")  # legacy key
             set_master_prompt_override(None)
             await msg.reply(
-                "Reset to default Dale prompt.", disable_notification=True,
+                "Reset to the default persona.", disable_notification=True,
             )
             return
         if sub == "set":

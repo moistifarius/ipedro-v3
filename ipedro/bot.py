@@ -34,7 +34,7 @@ from ipedro.logging_setup import configure_logging
 from ipedro.celebrations import run_celebrations_loop
 from ipedro.comic import run_comic_loop
 from ipedro.kv import kv_get
-from ipedro.personas import set_master_prompt_override
+from ipedro.personas import set_default_prompt, set_master_prompt_override
 from ipedro.memory.store import MemoryStore
 from ipedro.openai_client import OpenAIClient
 from ipedro.monthly_recap import run_monthly_recap_loop
@@ -88,6 +88,10 @@ async def build_runtime(settings: Settings) -> Runtime:
         "AI text provider: %s (claude=%s, openai=%s)",
         openai.text_provider, openai.claude_model, openai.text_model,
     )
+
+    # Who this bot starts as with no /master_prompt override: Dale, unless
+    # this deployment is a different bot (see ipedro/identity.py).
+    set_default_prompt(settings.bot_persona)
 
     # Pick up any persisted master-prompt override before serving requests.
     # Falls back to the legacy key set by earlier versions.

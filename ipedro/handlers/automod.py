@@ -540,13 +540,20 @@ _AUTOMOD_TRIGGERS: tuple[
 
 
 def _automod_response(
-    text: str | None, rng: random.Random | None = None,
+    text: str | None, rng: random.Random | None = None, *,
+    dale_gifs: bool = True,
 ) -> "str | MediaResponse | DaleGif | None":
-    """First matching AutoMod-style canned response for `text`, or None."""
+    """First matching AutoMod-style canned response for `text`, or None.
+
+    ``dale_gifs=False`` passes over the Dale GIF rows — a bot that isn't
+    Dale has no GIFs of itself to send — and keeps scanning, so a later
+    row that also matches still gets its turn."""
     if not text:
         return None
     r = rng or random
     for pattern, response in _AUTOMOD_TRIGGERS:
+        if not dale_gifs and isinstance(response, DaleGif):
+            continue
         if pattern.search(text):
             # Both markers pass through untouched; only a real tuple means
             # "pick one of these at random".

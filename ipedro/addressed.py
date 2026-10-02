@@ -38,8 +38,9 @@ from dataclasses import dataclass, field
 
 log = logging.getLogger(__name__)
 
-# What the persona answers to. The name regex in handlers/chat.py lists
-# the aliases; the classifier only needs the one people actually use.
+# What the persona answers to when the caller doesn't say otherwise. The
+# deployment's identity (ipedro/identity.py) holds the full alias list;
+# the classifier only needs the one name people actually use.
 BOT_NAME = "Dale"
 
 # The bot is "in the conversation" this long after its last reply, and only
@@ -239,7 +240,7 @@ async def classify(
 
 async def wants_reply(
     rt, chat_id: int, *, speaker: str | None, text: str, memory_enabled: bool,
-    user_id: int | None = None,
+    user_id: int | None = None, bot_name: str = BOT_NAME,
 ) -> bool:
     """Does this un-named, un-replied message want the bot to answer?"""
     stripped = (text or "").strip()
@@ -256,11 +257,11 @@ async def wants_reply(
             log.info("addressed: recent_messages failed in %s: %s", chat_id, exc)
             rows = []
         for m in rows:
-            who = BOT_NAME if m.role == "assistant" else (m.author_name or "someone")
+            who = bot_name if m.role == "assistant" else (m.author_name or "someone")
             recent.append((who, m.content))
     hit = await classify(
         rt.openai, speaker=speaker or "someone", text=text, recent=recent,
-        chat_id=chat_id,
+        chat_id=chat_id, bot=bot_name,
     )
     log.debug("addressed classifier in %s: %r -> %s", chat_id, text[:60], hit)
     return hit

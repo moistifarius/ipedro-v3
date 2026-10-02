@@ -54,6 +54,17 @@ class Settings(BaseSettings):
     openai_cheap_model: str = "gpt-4o-mini"
     text_provider: Literal["claude", "openai"] = "claude"
 
+    # Identity — who this bot is (see ipedro/identity.py). Unset means
+    # Dale, exactly as he's always been. Set these to run the same code as
+    # a different bot: a name, the comma-separated names people will call
+    # it by (blank = just the name), "plain" to drop Dale's own flourishes
+    # (his catchphrases, GIF library, /start blurb), and the persona it
+    # starts with until /master_prompt changes it.
+    bot_name: str = "Dale"
+    bot_aliases: str = ""
+    bot_flavor: Literal["dale", "plain"] = "dale"
+    bot_persona: str | None = None
+
     # /evolve — the owner's DM requests for the bot to change itself. An
     # approved request is filed as a GitHub issue, which a GitHub Action
     # (Claude Code) picks up and turns into a pull request. This token

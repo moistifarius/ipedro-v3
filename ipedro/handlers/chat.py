@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from aiogram import F, Router
 from aiogram.types import BufferedInputFile, Message, ReactionTypeEmoji
 
-from ipedro import addressed, introspection, media_library, vision
+from ipedro import addressed, identity, introspection, media_library, vision
 from ipedro.bot_messages import track
 from ipedro.capabilities import capability_brief
 from ipedro.chat_policy import IncomingMessage, should_respond
@@ -54,30 +54,9 @@ log = logging.getLogger(__name__)
 _BEF_CHALLENGE_TTL_SECONDS = 3600  # 1h
 
 # Name-mention triggers — when someone calls the bot by name, it tends
-# to engage. The current persona is Dale (idale), who goes by Rusty
-# Shackleford when he thinks he's being watched — and that IS the display
-# name in the chat, so people call him "rusty" far more often than
-# "rusty shackleford". Requiring the full alias meant half the times he
-# was addressed by name didn't register. Legacy Boomhauer / Dude / Pedro
-# aliases still match so people who knew earlier personas keep getting a
-# response. Bare first names are allowed even though they're common names
-# — the bot can handle the occasional false hit.
-_DUDE_NAME_RE = re.compile(
-    r"\bdale\s+gribble\b"
-    r"|\brusty\s+shackleford\b"
-    r"|\bshackleford\b"
-    r"|\brusty\b"
-    r"|\bidale\b"
-    r"|\bdale\b"
-    r"|\bboomhauer\b"
-    r"|\bboomhaur\b"           # common misspelling
-    r"|\bthe\s+dude\b"
-    r"|\bduder(ino)?\b"
-    r"|\bel\s+duderino\b"
-    r"|\bhis\s+dudeness\b"
-    r"|\bpedro\b",
-    re.IGNORECASE,
-)
+# to engage. Which names those are is the deployment's identity
+# (ipedro/identity.py): Dale's full alias list by default, a configured
+# bot's own names otherwise.
 
 # People call him by what he is at least as often as by name — "bot,
 # settle this", "shut up bot", "the bot is broken". None of those say Dale
@@ -175,12 +154,14 @@ _CAT_EMOJI = frozenset("🐈🐱😺😸😹😻😼😽🙀😿😾")
 _MEME_WORD_RE = re.compile(r"\bmemes?\b", re.IGNORECASE)
 
 
-def _mentions_pedro(text: str | None) -> bool:
+def _mentions_pedro(
+    text: str | None, ident: identity.Identity = identity.DALE,
+) -> bool:
     """Was he addressed — by one of his names, or as 'bot'?"""
     if not text:
         return False
     return (
-        _DUDE_NAME_RE.search(text) is not None
+        ident.name_re.search(text) is not None
         or _BOT_WORD_RE.search(text) is not None
     )
 
@@ -507,9 +488,12 @@ async def _handle_meme_request(
 
 def build_router(rt: Runtime) -> Router:
     r = Router(name="chat")
+    # Who this deployment is: its names, and whether Dale's own canned
+    # lines and GIFs are his to use. Fixed for the life of the process.
+    ident = identity.from_settings(rt.settings)
 
     # Reply-to-bot "bad bot" / "bad dale" deletion shortcut.
-    @r.message(F.text.lower().in_({"bad bot", "bad pedro", "bad dude", "bad duder", "bad dale", "bad boomhauer", "bad rusty"}))
+    @r.message(F.text.lower().in_(ident.rebuke_phrases))
     async def remove_message(msg: Message) -> None:
         if not msg.reply_to_message:
             return
@@ -688,7 +672,10 @@ def build_router(rt: Runtime) -> Router:
             return  # media we couldn't see and nothing typed
 
         # Auto-grudge: insults toward the bot earn a 24h snark flag.
-        if await maybe_auto_grudge(rt.db, msg.chat.id, from_user_id, typed):
+        if await maybe_auto_grudge(
+            rt.db, msg.chat.id, from_user_id, typed,
+            names_pattern=ident.names_pattern,
+        ):
             log.info(
                 "Auto-grudge added: chat=%s user=%s text=%r",
                 msg.chat.id, from_user_id, typed[:80],
@@ -720,8 +707,14 @@ def build_router(rt: Runtime) -> Router:
                     log.warning("media library failed in %s: %s", msg.chat.id, exc)
 
         # "thanks pedro" → passive-aggressive line. Intercepts before the
-        # normal flow so we don't also run an AI reply.
-        if cfg.response_policy != "commands" and _THANKS_PEDRO_RE.search(typed):
+        # normal flow so we don't also run an AI reply. Dale's names and
+        # Dale's lines, so Dale only: another bot thanked by name just
+        # gets an ordinary reply.
+        if (
+            ident.dale_flavor
+            and cfg.response_policy != "commands"
+            and _THANKS_PEDRO_RE.search(typed)
+        ):
             line = random.choice(_THANKS_PEDRO_LINES)
             sent = await msg.reply(line, disable_notification=True)
             track(msg.chat.id, sent.message_id, line, replied_to_user_id=from_user_id)
@@ -746,7 +739,7 @@ def build_router(rt: Runtime) -> Router:
         # 'stonks' → the actual image). Fixed intercept; skip the AI reply.
         # Not written to memory — canned bits aren't conversational context.
         automod = (
-            _automod_response(typed)
+            _automod_response(typed, dale_gifs=ident.dale_flavor)
             if cfg.automod_enabled and cfg.response_policy != "commands"
             else None
         )
@@ -859,7 +852,7 @@ def build_router(rt: Runtime) -> Router:
         incoming = IncomingMessage(
             text=typed,
             has_mention_of_bot=(
-                _has_bot_mention(msg, bot_username) or _mentions_pedro(typed)
+                _has_bot_mention(msg, bot_username) or _mentions_pedro(typed, ident)
             ),
             is_reply_to_bot=_is_reply_to_bot(msg, bot_id),
             is_command=False,
@@ -880,7 +873,7 @@ def build_router(rt: Runtime) -> Router:
                 rt, msg.chat.id,
                 speaker=display_name(msg.from_user) if msg.from_user else None,
                 text=typed, memory_enabled=cfg.memory_enabled,
-                user_id=from_user_id,
+                user_id=from_user_id, bot_name=ident.name,
             )
         ):
             incoming = replace(incoming, has_mention_of_bot=True)
@@ -892,9 +885,11 @@ def build_router(rt: Runtime) -> Router:
         # silence, not noise. Text only: since vision, stickers and photos
         # reach this point too, and a sticker volley rolling the dice on
         # every frame turned "occasional" into "constant" — and a GIF fired
-        # back at a GIF reads as a reply, not a stray.
+        # back at a GIF reads as a reply, not a stray. The library is GIFs
+        # of Dale, so another bot never rolls for one.
         if (
             typed
+            and ident.dale_flavor
             and cfg.automod_enabled
             and cfg.response_policy != "commands"
             and not incoming.has_mention_of_bot
@@ -926,10 +921,12 @@ def build_router(rt: Runtime) -> Router:
         ):
             # "Taking credit": when a positive line is spotted, Pedro
             # occasionally inserts itself even when policy wouldn't reply.
-            # Skipped under the explicit commands-only opt-out.
+            # Skipped under the explicit commands-only opt-out, and for any
+            # bot that isn't Dale: the lines are his.
             credit_taken = False
             if (
-                cfg.response_policy != "commands"
+                ident.dale_flavor
+                and cfg.response_policy != "commands"
                 and _POSITIVITY_RE.search(typed)
                 and random.random() < _CREDIT_PROBABILITY
             ):
@@ -1071,6 +1068,7 @@ def build_router(rt: Runtime) -> Router:
             persona_override=persona_override,
             capabilities=capability_brief(
                 cfg, check_records=tools_on, all_chats=owner_dm,
+                dale_flavor=ident.dale_flavor,
             ),
         )
         # 500 used to sit here — room for a small essay. The prompt now

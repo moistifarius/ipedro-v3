@@ -5,8 +5,10 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 
 from ipedro.db.pool import Database
+from ipedro.identity import DALE
 
 log = logging.getLogger(__name__)
 
@@ -15,21 +17,37 @@ VALID_FLAGS = ("shutup", "snark", "grudge")
 # Auto-grudge decays after this long. Re-insulting refreshes it.
 GRUDGE_TTL = timedelta(hours=24)
 
-# Matches insults directed at Pedro/bot in the same message.
-_INSULT_RE = re.compile(
-    r"\b(stupid|dumb|trash|garbage|shut\s*up|fuck\s*off|fuck\s*you|"
+# Insult words, before or after one of the bot's names (or "bot") in the
+# same message. The names come from the deployment's identity: this used
+# to list only the legacy Dude/Pedro aliases, so "dale you're useless"
+# never registered at all.
+_INSULTS_BEFORE = (
+    r"stupid|dumb|trash|garbage|shut\s*up|fuck\s*off|fuck\s*you|"
     r"shitty|hate|useless|broken|terrible|awful|kill\s*yourself|kys|"
-    r"die|piece\s*of\s*shit)\b.{0,40}"
-    r"\b(the\s+dude|dude|duder|el\s+duderino|pedro|bot)\b"
-    r"|\b(the\s+dude|dude|duder|el\s+duderino|pedro|bot)\b.{0,40}"
-    r"\b(stupid|dumb|trash|garbage|shut\s*up|fuck\s*off|fuck\s*you|"
-    r"shitty|hate|useless|broken|terrible|awful|piece\s*of\s*shit)\b",
-    re.IGNORECASE,
+    r"die|piece\s*of\s*shit"
+)
+_INSULTS_AFTER = (
+    r"stupid|dumb|trash|garbage|shut\s*up|fuck\s*off|fuck\s*you|"
+    r"shitty|hate|useless|broken|terrible|awful|piece\s*of\s*shit"
 )
 
 
-def is_insult_to_bot(text: str | None) -> bool:
-    return bool(text) and _INSULT_RE.search(text) is not None
+@lru_cache(maxsize=16)
+def _insult_re(names_pattern: str) -> re.Pattern:
+    # Lookarounds around the names, as in identity.py: an alias can end in
+    # punctuation, where \b would never match.
+    names = rf"(?<!\w)(?:(?:{names_pattern})|bot)(?!\w)"
+    return re.compile(
+        rf"\b(?:{_INSULTS_BEFORE})\b.{{0,40}}{names}"
+        rf"|{names}.{{0,40}}\b(?:{_INSULTS_AFTER})\b",
+        re.IGNORECASE,
+    )
+
+
+def is_insult_to_bot(
+    text: str | None, names_pattern: str = DALE.names_pattern,
+) -> bool:
+    return bool(text) and _insult_re(names_pattern).search(text) is not None
 
 
 async def set_flag(
@@ -91,9 +109,10 @@ async def list_flags(db: Database, chat_id: int) -> list[dict]:
 
 async def maybe_auto_grudge(
     db: Database, chat_id: int, user_id: int | None, text: str | None,
+    *, names_pattern: str = DALE.names_pattern,
 ) -> bool:
     """If `text` insults the bot, add a 24h grudge against user_id. Returns True if set."""
-    if user_id is None or not is_insult_to_bot(text):
+    if user_id is None or not is_insult_to_bot(text, names_pattern):
         return False
     await set_flag(db, chat_id, user_id, "grudge", ttl=GRUDGE_TTL)
     return True
