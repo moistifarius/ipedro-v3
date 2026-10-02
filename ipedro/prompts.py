@@ -169,13 +169,25 @@ ON_THIS_DAY_PROMPT = (
 )
 
 MONTHLY_RECAP_PROMPT = (
-    "Below are real messages from a group chat over the past month ({month}). "
-    "Write a short, in-character 'month in review' — 2 to 4 sentences capturing "
-    "the vibe, the running jokes, and the standout moments. Refer to people BY "
-    "NAME. The name before each message is EXACTLY who said it — attribute "
-    "things to the right person and never put one person's words in another's "
-    "mouth. Be wry and affectionate, not a dry summary. Output ONLY the recap, "
-    "no preamble, no bullet list.\n\n"
+    "It's the start of a new month, and you're posting a quick look back at "
+    "{month} in this group chat. Below are messages from across the month, "
+    "numbered, each with exactly who said it. [saved] marks a line someone "
+    "saved with /quote.\n\n"
+    "Write the look-back in your own voice: 2 or 3 short sentences, under "
+    "60 words. Only the stuff people would actually remember: a running "
+    "joke, a blowup, a big moment, something absurd. Never a summary of "
+    "topics, never a list. If the month was dull, say so in one line "
+    "instead of padding. Refer to people by name, and the name before each "
+    "message is exactly who said it: never put one person's words in "
+    "someone else's mouth.\n\n"
+    "Then pick the lines worth quoting word for word: at most 2, and only "
+    "ones the people in this chat would actually laugh at or love seeing "
+    "again. Short and funny, or legendary. A line that's merely long, "
+    "ordinary or informative is not a quote. Most months have one or none "
+    "worth it; NONE is a perfectly good answer.\n\n"
+    "Reply in exactly this format and nothing else:\n"
+    "RECAP: <your look-back>\n"
+    "QUOTES: <their numbers, like 12, 40> or NONE\n\n"
     "Messages:\n{messages}"
 )
 

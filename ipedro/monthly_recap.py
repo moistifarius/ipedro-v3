@@ -1,23 +1,29 @@
-"""Month-in-review — a best-of recap posted at the start of each month.
+"""Month-in-review — a short look back posted at the start of each month.
 
 Replaces the daily 'on this day' auto-post (that module still powers the
 on-demand /onthisday command). Once per opted-in, recently-active chat, when a
 new local month begins, the bot posts a recap of the month just finished:
 
-  * an in-character AI 'month in review' line or two,
-  * a handful of verbatim highlights (saved quotes first — those are the bits
-    people already flagged as good — then the month's meatiest messages),
+  * two or three sentences in the chat's own persona about what people would
+    actually remember,
+  * at most two verbatim quotes — and only when the model judges one genuinely
+    funny or memorable; most months get one or none,
   * a compact stats line (messages, people, top yapper, quotes saved).
 
-Every message fed to the AI is labelled with the speaker's name so the recap
-attributes things to the right person. Restart-safe via
-chat_state.last_monthly_recap. Degrades gracefully when the AI is down.
+It used to append six "highlights" chosen by length — the month's longest
+messages — which read as random lines nobody cared about. Quotes are now the
+model's pick from a numbered list, rendered from our own copy by number, so
+they're always verbatim and always attributed to whoever really said them.
+
+Restart-safe via chat_state.last_monthly_recap. Degrades gracefully when the
+AI is down: the fallback line and the stats, never a quote dump.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timezone
 
@@ -28,6 +34,7 @@ from ipedro.bot_messages import track
 from ipedro.config import Settings
 from ipedro.db.pool import Database
 from ipedro.openai_client import OpenAIClient
+from ipedro.personas import current_master_prompt, resolve_persona
 from ipedro.prompts import MONTHLY_RECAP_PROMPT
 from ipedro.silenced_chats import is_silenced
 
@@ -36,8 +43,11 @@ log = logging.getLogger(__name__)
 _TICK_SECONDS = 3600  # hourly, like the other daily loops
 _ACTIVE_WINDOW_DAYS = 45
 _MIN_MESSAGE_CHARS = 12
-_MAX_HIGHLIGHTS = 6
-_AI_POOL_SIZE = 60           # messages sampled for the AI recap
+_POOL_SIZE = 150             # messages sampled, evenly across the month
+_POOL_LINE_CHARS = 300       # each one cut to this for the model to read
+_MAX_QUOTES = 2
+# Longer than this isn't a quote, it's a paragraph — and cutting it short
+# would cut the punchline, so an over-long pick is dropped, never trimmed.
 _MAX_QUOTE_CHARS = 280
 
 # name of the message author, best-effort, from the users join.
@@ -60,7 +70,7 @@ class RecapStats:
 class MonthlyRecapResult:
     month_label: str                    # "July 2026"
     recap: str                          # the AI (or fallback) review
-    highlights: list[tuple[str, str]]   # (name, text) verbatim
+    quotes: list[tuple[str, str]]       # (name, text) verbatim; usually 0-1
     stats: RecapStats | None = field(default=None)
 
 
@@ -115,89 +125,121 @@ async def _fetch_saved_quotes(db: Database, chat_id: int, start_utc, end_utc):
     return [(r["name"] or "someone", r["text"].strip()) for r in rows if r["text"]]
 
 
-async def _fetch_long_messages(db: Database, chat_id: int, start_utc, end_utc):
+async def _fetch_recap_pool(db: Database, chat_id: int, start_utc, end_utc):
+    """Up to _POOL_SIZE substantive messages (name, text), spread evenly over
+    the WHOLE month. (It used to take the month's first 400 and sample those,
+    so in a busy chat the recap only ever saw the first few days.) Commands
+    and bare media notes ("[photo: …]") are left out: neither is something
+    anyone said."""
     rows = await db.fetch(
         f"""
-        SELECT {_NAME_SQL} AS name, m.content AS text
-          FROM messages m
-          LEFT JOIN users u ON u.user_id = m.user_id
-         WHERE m.chat_id = $1 AND m.role = 'user'
-           AND m.created_at >= $2 AND m.created_at < $3
-           AND char_length(TRIM(m.content)) >= $4
-           AND LEFT(TRIM(m.content), 1) <> '/'
-         ORDER BY char_length(m.content) DESC
-         LIMIT 25
+        WITH month AS (
+            SELECT {_NAME_SQL} AS name, m.content AS text, m.created_at,
+                   ROW_NUMBER() OVER (ORDER BY m.created_at) AS rn,
+                   COUNT(*) OVER () AS total
+              FROM messages m
+              LEFT JOIN users u ON u.user_id = m.user_id
+             WHERE m.chat_id = $1 AND m.role = 'user'
+               AND m.created_at >= $2 AND m.created_at < $3
+               AND char_length(TRIM(m.content)) >= $4
+               AND LEFT(TRIM(m.content), 1) NOT IN ('/', '[')
+        )
+        SELECT name, text FROM month
+         WHERE (rn - 1) % GREATEST(CEIL(total::numeric / $5::int)::int, 1) = 0
+         ORDER BY created_at
+         LIMIT $5::int
         """,
-        chat_id, start_utc, end_utc, _MIN_MESSAGE_CHARS,
+        chat_id, start_utc, end_utc, _MIN_MESSAGE_CHARS, _POOL_SIZE,
     )
     return [(r["name"], r["text"].strip()) for r in rows]
 
 
-async def _fetch_recap_pool(db: Database, chat_id: int, start_utc, end_utc):
-    """A chronological sample of substantive messages (name, text) for the AI
-    to narrate. Sampled evenly across the month so the recap isn't front- or
-    back-loaded."""
-    rows = await db.fetch(
-        f"""
-        SELECT {_NAME_SQL} AS name, m.content AS text
-          FROM messages m
-          LEFT JOIN users u ON u.user_id = m.user_id
-         WHERE m.chat_id = $1 AND m.role = 'user'
-           AND m.created_at >= $2 AND m.created_at < $3
-           AND char_length(TRIM(m.content)) >= $4
-           AND LEFT(TRIM(m.content), 1) <> '/'
-         ORDER BY m.created_at ASC
-         LIMIT 400
-        """,
-        chat_id, start_utc, end_utc, _MIN_MESSAGE_CHARS,
-    )
-    pool = [(r["name"], r["text"].strip()) for r in rows]
-    if len(pool) <= _AI_POOL_SIZE:
-        return pool
-    stride = len(pool) / _AI_POOL_SIZE
-    return [pool[int(i * stride)] for i in range(_AI_POOL_SIZE)]
-
-
-def _select_highlights(
-    saved: list[tuple[str, str]], long_msgs: list[tuple[str, str]],
-) -> list[tuple[str, str]]:
-    """Saved quotes first (already curated), then the meatiest messages.
-    Dedups identical text and spreads across people before repeating one."""
-    seen_text: set[str] = set()
-    seen_people: set[str] = set()
-    primary: list[tuple[str, str]] = []
-    extras: list[tuple[str, str]] = []
-    for name, text in list(saved) + list(long_msgs):
+def _candidates(
+    saved: list[tuple[str, str]], pool: list[tuple[str, str]],
+) -> list[tuple[str, str, bool]]:
+    """(name, text, saved) for the model to read and pick from: lines
+    someone saved with /quote first, then the month's sample, each text
+    once."""
+    seen: set[str] = set()
+    out: list[tuple[str, str, bool]] = []
+    for (name, text), was_saved in (
+        [(q, True) for q in saved] + [(m, False) for m in pool]
+    ):
         key = text.lower()
-        if key in seen_text:
+        if not text or key in seen:
             continue
-        seen_text.add(key)
-        if name in seen_people:
-            extras.append((name, text))
-        else:
-            seen_people.add(name)
-            primary.append((name, text))
-    chosen = primary[:_MAX_HIGHLIGHTS]
-    if len(chosen) < _MAX_HIGHLIGHTS:
-        chosen += extras[: _MAX_HIGHLIGHTS - len(chosen)]
-    return chosen
+        seen.add(key)
+        out.append((name, text, was_saved))
+    return out
 
 
-_FALLBACK_RECAP = "Another month in the books. Here's what stuck to the tape."
+_FALLBACK_RECAP = "Another month in the books."
+
+_QUOTES_LINE_RE = re.compile(r"^\s*QUOTES\s*:(.*)$", re.IGNORECASE | re.MULTILINE)
+_RECAP_LABEL_RE = re.compile(r"^\s*RECAP\s*:\s*", re.IGNORECASE)
+
+
+def _parse_reply(raw: str | None, n_candidates: int) -> tuple[str, list[int]]:
+    """The model's 'RECAP: … / QUOTES: 3, 17 | NONE' reply as (recap, the
+    1-based candidate numbers it picked). Anything unparseable picks
+    nothing: no quote is always the safe answer."""
+    text = (raw or "").strip()
+    picks: list[int] = []
+    m = _QUOTES_LINE_RE.search(text)
+    if m:
+        for num in re.findall(r"\d+", m.group(1)):
+            i = int(num)
+            if 1 <= i <= n_candidates and i not in picks:
+                picks.append(i)
+        text = text[: m.start()].strip()
+    return _RECAP_LABEL_RE.sub("", text, count=1).strip(), picks[:_MAX_QUOTES]
+
+
+async def _chat_persona(db: Database, chat_id: int) -> str:
+    try:
+        row = await db.fetchrow(
+            "SELECT persona, persona_custom FROM chat_config WHERE chat_id = $1",
+            chat_id,
+        )
+    except Exception as exc:                       # pragma: no cover - defensive
+        log.info("monthly-recap: persona lookup failed for %s: %s", chat_id, exc)
+        row = None
+    if row is None:
+        return current_master_prompt()
+    return resolve_persona(row["persona"], row["persona_custom"])
 
 
 async def _ai_recap(
     openai: OpenAIClient, month_label: str,
-    pool: list[tuple[str, str]], chat_id: int,
-) -> str:
-    if not pool:
-        return _FALLBACK_RECAP
-    joined = "\n".join(f"- {name}: {text}" for name, text in pool)
-    line = await openai.cheap_completion(
-        MONTHLY_RECAP_PROMPT.format(month=month_label, messages=joined[:4000]),
-        max_tokens=220, chat_id=chat_id,
+    candidates: list[tuple[str, str, bool]], chat_id: int, persona: str,
+) -> tuple[str, list[tuple[str, str]]]:
+    """(recap, quotes). One call to the main model, in the chat's persona:
+    this posts once a month, so it gets the model that can tell funny from
+    long."""
+    if not candidates:
+        return _FALLBACK_RECAP, []
+    listing = "\n".join(
+        f"{i}. {'[saved] ' if saved else ''}{name}: "
+        f"{' '.join(text.split())[:_POOL_LINE_CHARS]}"
+        for i, (name, text, saved) in enumerate(candidates, start=1)
     )
-    return (line or "").strip() or _FALLBACK_RECAP
+    raw = await openai.chat(
+        [
+            {"role": "system", "content": persona},
+            {"role": "user", "content": MONTHLY_RECAP_PROMPT.format(
+                month=month_label, messages=listing,
+            )},
+        ],
+        max_tokens=300, chat_id=chat_id,
+    )
+    recap, picks = _parse_reply(raw, len(candidates))
+    if not recap:
+        return _FALLBACK_RECAP, []
+    quotes = [
+        (candidates[i - 1][0], candidates[i - 1][1]) for i in picks
+        if len(candidates[i - 1][1]) <= _MAX_QUOTE_CHARS
+    ]
+    return recap, quotes
 
 
 async def build_monthly_recap(
@@ -214,25 +256,22 @@ async def build_monthly_recap(
         return None
 
     saved = await _fetch_saved_quotes(db, chat_id, start_utc, end_utc)
-    long_msgs = await _fetch_long_messages(db, chat_id, start_utc, end_utc)
-    highlights = _select_highlights(saved, long_msgs)
     pool = await _fetch_recap_pool(db, chat_id, start_utc, end_utc)
-    recap = await _ai_recap(openai, month_label, pool, chat_id)
-
+    recap, quotes = await _ai_recap(
+        openai, month_label, _candidates(saved, pool), chat_id,
+        await _chat_persona(db, chat_id),
+    )
     return MonthlyRecapResult(
-        month_label=month_label, recap=recap, highlights=highlights, stats=stats,
+        month_label=month_label, recap=recap, quotes=quotes, stats=stats,
     )
 
 
 def render_monthly_recap(result: MonthlyRecapResult) -> str:
     lines = [f"🗓️ {result.month_label} in review", "", result.recap]
-    if result.highlights:
+    if result.quotes:
         lines.append("")
-        lines.append("Highlights:")
-        for name, text in result.highlights:
-            snippet = text if len(text) <= _MAX_QUOTE_CHARS \
-                else text[: _MAX_QUOTE_CHARS - 1].rstrip() + "…"
-            lines.append(f"“{snippet}” — {name}")
+        for name, text in result.quotes:
+            lines.append(f"“{text}” — {name}")
     s = result.stats
     if s and s.messages:
         bits = [f"{s.messages} messages", f"{s.people} people"]
