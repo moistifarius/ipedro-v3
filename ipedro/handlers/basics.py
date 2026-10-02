@@ -137,6 +137,8 @@ HELP_TEXT_ADMIN = (
     "\n"
     "Persona & providers:\n"
     "/master_prompt show|set <text>|setfile|reset - global persona prompt\n"
+    "/newbot <token> <Name> - (owner) add another bot; /bots lists them; "
+    "/bot_stop, /bot_start, /bot_remove <#n>\n"
     "/ai_provider show|claude|openai - switch text-completion provider\n"
     "/ai_model show|[provider] <model_id> - switch text model\n"
     "\n"

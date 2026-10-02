@@ -166,6 +166,31 @@ CREATE TABLE IF NOT EXISTS change_requests (
 CREATE INDEX IF NOT EXISTS change_requests_recent_idx
     ON change_requests (created_at DESC);
 
+-- The other bots the owner has added with /newbot (ipedro/bots.py). Each
+-- is its own Telegram account, process and database; this table is how
+-- the owner's DM tells the supervisor (ipedro/supervisor.py) what to run,
+-- and how the supervisor reports back. `status` is what the owner wants:
+-- active | stopped | removed. running / started_at / restarts /
+-- last_exit / last_seen_at are what the supervisor last saw.
+CREATE TABLE IF NOT EXISTS bot_registry (
+    id            BIGSERIAL PRIMARY KEY,
+    telegram_id   BIGINT NOT NULL UNIQUE,
+    username      TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    aliases       TEXT NOT NULL DEFAULT '',
+    persona       TEXT,
+    token         TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'active',
+    created_by    BIGINT NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    running       BOOLEAN NOT NULL DEFAULT FALSE,
+    started_at    TIMESTAMPTZ,
+    restarts      INTEGER NOT NULL DEFAULT 0,
+    last_exit     TEXT,
+    last_seen_at  TIMESTAMPTZ
+);
+
 -- Duckhunt ------------------------------------------------------------------
 -- Persistent state for active spawns. At most one active duck per chat.
 CREATE TABLE IF NOT EXISTS duck_events (

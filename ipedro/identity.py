@@ -109,3 +109,14 @@ def from_settings(settings) -> Identity:
     if not aliases and name == "Dale" and flavor == "dale":
         return DALE
     return _build(name, aliases or (name.lower(),), flavor == "dale")
+
+
+def starting_persona(settings) -> str | None:
+    """The persona text a deployment starts with; None means Dale's own.
+    A bot that isn't Dale and was given no persona is just itself, by
+    name — never Dale by default."""
+    persona = (getattr(settings, "bot_persona", None) or "").strip()
+    if persona:
+        return persona
+    ident = from_settings(settings)
+    return None if ident.dale_flavor else f"You are {ident.name}."

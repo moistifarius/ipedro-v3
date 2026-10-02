@@ -47,6 +47,11 @@ GUARDED: tuple[str, ...] = (
     "ipedro/merge_policy.py",
     "ipedro/evolve.py",
     "ipedro/handlers/evolve.py",
+    # making other bots: new Telegram accounts, their tokens, their processes
+    "ipedro/bots.py",
+    "ipedro/supervisor.py",
+    "ipedro/handlers/bots.py",
+    "ipedro/identity.py",
     # who may do what, and what the bot can see about itself
     "ipedro/auth.py",
     "ipedro/config.py",
@@ -74,6 +79,7 @@ GUARDED: tuple[str, ...] = (
     "tests/test_common.py",
     "tests/test_introspection.py",
     "tests/test_automod_rules.py",
+    "tests/test_bots.py",
 )
 
 

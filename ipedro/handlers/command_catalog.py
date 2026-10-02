@@ -371,6 +371,14 @@ COMMANDS: tuple[Command, ...] = (
             "/evolve <what you want changed>",
             "Owner only, in DM: ask the bot to change its own code. Files "
             "a GitHub issue on your approval; a build turns it into a PR."),
+    Command("newbot",       "ai_admin", "/newbot",
+            "/newbot <token> <Name>[, aliases] (persona on later lines)",
+            "Owner only, in DM: add another bot — its own Telegram "
+            "account, process and memory, run by the supervisor."),
+    Command("bots",         "ai_admin", "/bots",
+            "/bots · /bot_stop|/bot_start|/bot_remove <#n or name>",
+            "Owner only, in DM: list the other bots and whether they're "
+            "running; stop, start or remove one."),
 
     # ── Debug & status (admin) ───────────────────────────────────────────
     Command("debug_help",   "debug", "/debug_help",

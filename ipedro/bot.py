@@ -20,6 +20,7 @@ from ipedro.ambient_loops import run_ambient_loops
 from ipedro.handlers import admin as admin_h
 from ipedro.handlers import ai as ai_h
 from ipedro.handlers import basics as basics_h
+from ipedro.handlers import bots as bots_h
 from ipedro.handlers import chat as chat_h
 from ipedro.handlers import dale as dale_h, media as media_h
 from ipedro.handlers import debug as debug_h
@@ -34,6 +35,7 @@ from ipedro.logging_setup import configure_logging
 from ipedro.celebrations import run_celebrations_loop
 from ipedro.comic import run_comic_loop
 from ipedro.kv import kv_get
+from ipedro.identity import starting_persona
 from ipedro.personas import set_default_prompt, set_master_prompt_override
 from ipedro.memory.store import MemoryStore
 from ipedro.openai_client import OpenAIClient
@@ -91,7 +93,7 @@ async def build_runtime(settings: Settings) -> Runtime:
 
     # Who this bot starts as with no /master_prompt override: Dale, unless
     # this deployment is a different bot (see ipedro/identity.py).
-    set_default_prompt(settings.bot_persona)
+    set_default_prompt(starting_persona(settings))
 
     # Pick up any persisted master-prompt override before serving requests.
     # Falls back to the legacy key set by earlier versions.
@@ -153,6 +155,8 @@ def build_dispatcher(rt: Runtime) -> Dispatcher:
     dp.include_router(dale_h.build_router(rt))
     dp.include_router(media_h.build_router(rt))
     dp.include_router(evolve_h.build_router(rt))
+    if rt.settings.manages_bots:
+        dp.include_router(bots_h.build_router(rt))
     dp.include_router(chat_h.build_router(rt))
     return dp
 

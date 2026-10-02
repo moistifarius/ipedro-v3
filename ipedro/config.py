@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     bot_aliases: str = ""
     bot_flavor: Literal["dale", "plain"] = "dale"
     bot_persona: str | None = None
+    # Whether this deployment is the one that adds and manages the other
+    # bots (/newbot, /bots — ipedro/handlers/bots.py). True for Dale; the
+    # supervisor starts every other bot with it off, since their DMs
+    # aren't where the registry lives.
+    manages_bots: bool = True
 
     # /evolve — the owner's DM requests for the bot to change itself. An
     # approved request is filed as a GitHub issue, which a GitHub Action
