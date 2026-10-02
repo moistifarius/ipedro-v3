@@ -69,6 +69,10 @@ class Settings(BaseSettings):
     # supervisor starts every other bot with it off, since their DMs
     # aren't where the registry lives.
     manages_bots: bool = True
+    # Where the bots hear each other (ipedro/hub.py): Dale's database. Unset
+    # means this bot's own DATABASE_URL, which is right for Dale; the
+    # supervisor points every other bot at Dale's.
+    hub_database_url: str | None = None
 
     # /evolve — the owner's DM requests for the bot to change itself. An
     # approved request is filed as a GitHub issue, which a GitHub Action

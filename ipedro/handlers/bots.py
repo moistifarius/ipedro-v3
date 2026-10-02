@@ -95,8 +95,15 @@ def _describe(b: bots.BotRow, now: datetime) -> str:
     if b.running:
         state = f"running {_ago(b.started_at, now)}"
     else:
-        last = b.last_exit.splitlines()[0].rstrip(":") if b.last_exit else ""
-        last = bots.scrub(last, b.token)      # already scrubbed; belt and braces
+        last = ""
+        if b.last_exit:
+            # "exited with code 1 after 6s — TelegramUnauthorizedError: …":
+            # the header, and the traceback's last line, which says why.
+            lines = b.last_exit.splitlines()
+            last = lines[0].rstrip(":")
+            if len(lines) > 1:
+                last += " — " + lines[-1].strip()[:200]
+            last = bots.scrub(last, b.token)  # already scrubbed; belt and braces
         state = "⚠️ not running" + (f": {last}" if last else " yet")
     if b.restarts:
         state += f", {b.restarts} restart{'s' if b.restarts != 1 else ''}"

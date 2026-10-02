@@ -52,6 +52,7 @@ GUARDED: tuple[str, ...] = (
     "ipedro/supervisor.py",
     "ipedro/handlers/bots.py",
     "ipedro/identity.py",
+    "ipedro/hub.py",
     # who may do what, and what the bot can see about itself
     "ipedro/auth.py",
     "ipedro/config.py",

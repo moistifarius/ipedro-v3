@@ -43,7 +43,7 @@ HEARTBEAT_KEY = "supervisor_heartbeat"
 _NOT_INHERITED = frozenset({
     "TELEGRAM_BOT_TOKEN", "DATABASE_URL",
     "BOT_NAME", "BOT_ALIASES", "BOT_FLAVOR", "BOT_PERSONA",
-    "MANAGES_BOTS", "EVOLVE_GITHUB_TOKEN",
+    "MANAGES_BOTS", "EVOLVE_GITHUB_TOKEN", "HUB_DATABASE_URL",
 })
 
 USAGE = (
@@ -164,6 +164,8 @@ def child_env(
         "BOT_ALIASES": row.aliases,
         "BOT_FLAVOR": "plain",
         "MANAGES_BOTS": "false",
+        # Dale's own database is the hub where the bots hear each other.
+        "HUB_DATABASE_URL": base_database_url,
     })
     if row.persona:
         env["BOT_PERSONA"] = row.persona

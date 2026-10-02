@@ -17,6 +17,7 @@ from ipedro.duckhunt.debug_toggles import load_all as load_debug_toggles
 from ipedro.duckhunt.service import DuckhuntService
 from ipedro.duckhunt.spawner import run_spawner
 from ipedro.ambient_loops import run_ambient_loops
+from ipedro import hub
 from ipedro.handlers import admin as admin_h
 from ipedro.handlers import ai as ai_h
 from ipedro.handlers import basics as basics_h
@@ -205,10 +206,15 @@ async def run() -> None:
         name="monthly-recap",
     )
 
+    hub_task = asyncio.create_task(
+        hub.run(rt, settings, stop),
+        name="bot-hub",
+    )
+
     background_tasks = (
         spawner_task, share_photo_task, reminders_task,
         celebrations_task, comic_task, ambient_task,
-        monthly_recap_task,
+        monthly_recap_task, hub_task,
     )
 
     # A background loop dying is a silently-missing feature until restart —

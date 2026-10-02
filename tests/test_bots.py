@@ -310,6 +310,19 @@ async def test_a_crash_is_reported_scrubbed_and_restarted_with_backoff(world):
 
 
 @pytest.mark.asyncio
+async def test_a_long_traceback_never_pushes_out_the_header(world):
+    await world.sup.tick()
+    world.procs[0].exit(1, *[f"  frame {i} " + "x" * 200 for i in range(15)],
+                        "RuntimeError: the actual reason")
+    await _settle()
+    await world.sup.tick()
+    note = world.reports[-1][1]["last_exit"]
+    assert note.startswith("exited with code 1 after 0s:")
+    assert note.endswith("RuntimeError: the actual reason")
+    assert len(note) <= supervisor._EXIT_NOTE_MAX
+
+
+@pytest.mark.asyncio
 async def test_a_long_healthy_run_resets_the_backoff(world):
     await world.sup.tick()
     child = world.sup.children[3]
@@ -576,7 +589,8 @@ async def test_bots_lists_state_and_never_tokens(cmds):
     await cmds.h["list_cmd"](msg)
     text = _said(msg)[0]
     assert "#3 Hank (@HankBot): running 2h" in text
-    assert "#4 Peggy (@PeggyBot): ⚠️ not running: exited with code 1 after 2s, 3 restarts" in text
+    assert ("#4 Peggy (@PeggyBot): ⚠️ not running: exited with code 1 after "
+            "2s — <token>, 3 restarts") in text     # why, scrubbed again
     assert "#5 Bobby (@BobbyBot): stopped" in text
     assert TOKEN not in text
     assert "Supervisor checked in" in text

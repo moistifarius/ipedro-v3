@@ -191,6 +191,26 @@ CREATE TABLE IF NOT EXISTS bot_registry (
     last_seen_at  TIMESTAMPTZ
 );
 
+-- What every bot says in a group, so the others can hear it (Telegram
+-- never delivers one bot's group messages to another). Lives in the hub
+-- database — Dale's — and is pruned after a day: it's a wire, not a
+-- record. depth: 0 when a bot answered a human, parent + 1 when it
+-- answered another bot; see ipedro/hub.py for why that matters.
+CREATE TABLE IF NOT EXISTS bot_posts (
+    id                BIGSERIAL PRIMARY KEY,
+    chat_id           BIGINT NOT NULL,
+    message_id        BIGINT NOT NULL,
+    bot_id            BIGINT NOT NULL,
+    bot_username      TEXT,
+    bot_name          TEXT NOT NULL,
+    text              TEXT NOT NULL,
+    reply_to_user_id  BIGINT,
+    depth             INTEGER NOT NULL DEFAULT 0,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS bot_posts_created_idx ON bot_posts (created_at);
+
 -- Duckhunt ------------------------------------------------------------------
 -- Persistent state for active spawns. At most one active duck per chat.
 CREATE TABLE IF NOT EXISTS duck_events (

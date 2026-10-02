@@ -171,17 +171,19 @@ class Supervisor:
             child.backoff = BACKOFF_FIRST
         delay = child.backoff
         self._schedule_retry(child)
-        tail = "\n".join(child.tail)
+        # The header always survives; a long traceback gives way from the
+        # front, since its last line (the exception) is the part that says why.
         note = f"exited with code {code} after {int(ran)}s"
+        tail = "\n".join(child.tail)
         if tail:
-            note += ":\n" + tail
+            note += ":\n" + tail[-(_EXIT_NOTE_MAX - len(note) - 2):]
         log.warning(
             "bot #%s (%s) %s; restarting in %ds",
             child.row.id, child.row.name, note.splitlines()[0].rstrip(":"), delay,
         )
         await bots.report(
             self.db, child.row.id, running=False, restarts=child.restarts,
-            last_exit=note[-_EXIT_NOTE_MAX:],
+            last_exit=note,
         )
 
     async def _stop(self, bot_id: int, why: str) -> None:
