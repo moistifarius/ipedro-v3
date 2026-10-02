@@ -209,8 +209,9 @@ async def _remove(rt: Runtime, msg: Message, raw_id: str) -> None:
 
 
 async def _seed(rt: Runtime, msg: Message) -> None:
-    added, skipped = await dg.apply_seed(rt.db)
+    added, skipped, refused = await dg.apply_seed(rt.db)
+    note = f", {refused} refused (host not allowed)" if refused else ""
     await msg.reply(
-        f"Seeded: {added} added, {skipped} already there.",
+        f"Seeded: {added} added, {skipped} already there{note}.",
         disable_notification=True,
     )

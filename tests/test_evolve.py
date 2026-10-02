@@ -48,11 +48,17 @@ def test_the_marker_matches_what_the_workflow_keys_on():
 
 
 def test_the_workflow_never_interpolates_issue_text_into_a_shell():
-    """${{ github.event.issue.title/body }} inside a run: step is the classic
-    Actions injection hole. Only the issue NUMBER may be interpolated."""
-    text = WORKFLOW.read_text()
-    assert "${{ github.event.issue.title" not in text
-    assert "${{ github.event.issue.body" not in text
+    """${{ github.event.issue.title/body }} inside a run: script is the
+    classic Actions injection hole. Issue text may reach the agent through
+    `with:` (never run by a shell) or a step's `env:` (read as a variable),
+    but a run: script may only ever interpolate the issue NUMBER."""
+    import yaml
+
+    steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["implement"]["steps"]
+    for step in steps:
+        script = step.get("run", "")
+        assert "github.event.issue.title" not in script, step.get("name")
+        assert "github.event.issue.body" not in script, step.get("name")
 
 
 # ── filing ───────────────────────────────────────────────────────────────────

@@ -22,8 +22,9 @@ from ipedro.duckhunt.debug_toggles import is_on as debug_is_on
 from ipedro.duckhunt.scoring import challenge_is_over_time, over_time_line
 from ipedro.duckhunt.verdicts import parse_verdict
 from ipedro import dale_gifs as dale
+from ipedro.automod_media import fetch_automod_media
 from ipedro.handlers.automod import (
-    DaleGif, MediaResponse, _automod_response, fetch_automod_media,
+    DaleGif, MediaResponse, _automod_response,
 )
 from ipedro.handlers.common import (
     catify, display_name, fallback_cat_fact, get_or_create_chat_config,

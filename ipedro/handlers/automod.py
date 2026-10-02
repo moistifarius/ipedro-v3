@@ -26,19 +26,23 @@ House rules (enforced by tests/test_automod.py):
 - Media URLs are pinned to stable hosts (imgflip templates, KYM entry icons,
   giphy/tenor media) and were content-verified when added. A dead URL only
   costs the image: the text fallback still fires.
+
+This file is DATA ONLY, on purpose: ipedro/merge_policy.py treats it as
+plain content an /evolve change may merge without the owner looking. So
+nothing here touches the network (the fetcher lives in automod_media.py,
+which also enforces the media-host allowlist at fetch time), and the rules
+that matter most for safety — the 'kys' deflection, the host allowlist —
+are pinned by tests/test_automod_rules.py, which never merges unreviewed.
 """
 
 from __future__ import annotations
 
-import logging
 import random
 import re
 from dataclasses import dataclass
 from typing import NamedTuple
 
-import httpx
 
-log = logging.getLogger(__name__)
 
 
 class MediaResponse(NamedTuple):
@@ -67,46 +71,6 @@ class DaleGif:
     tag: str
     caption: str = ""
     fallback: str = ""
-
-
-# In-process cache of fetched media bytes. The URL set is small and fixed
-# (~16 templates, ~10MB total worst case), so a plain dict is plenty.
-_MEDIA_CACHE: dict[str, bytes] = {}
-_MEDIA_TIMEOUT = 10.0
-_MEDIA_MAX_BYTES = 10_000_000
-_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-)
-
-
-async def fetch_automod_media(media: MediaResponse) -> bytes | None:
-    """Download (and cache) the bytes for a MediaResponse. None on any failure."""
-    cached = _MEDIA_CACHE.get(media.url)
-    if cached is not None:
-        return cached
-    try:
-        async with httpx.AsyncClient(
-            follow_redirects=True, timeout=_MEDIA_TIMEOUT,
-            headers={"User-Agent": _UA},
-        ) as client:
-            async with client.stream("GET", media.url) as resp:
-                resp.raise_for_status()
-                chunks: list[bytes] = []
-                total = 0
-                async for chunk in resp.aiter_bytes():
-                    total += len(chunk)
-                    if total > _MEDIA_MAX_BYTES:
-                        log.info("automod media too large: %s", media.url)
-                        return None
-                    chunks.append(chunk)
-        data = b"".join(chunks)
-        if data:
-            _MEDIA_CACHE[media.url] = data
-            return data
-    except Exception as exc:
-        log.info("automod media fetch failed %s: %s", media.url, exc)
-    return None
 
 
 # ── 'gay' → a fixed copypasta bit. Matches the standalone word only. ──────────
