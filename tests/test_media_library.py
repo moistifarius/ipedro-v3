@@ -244,7 +244,8 @@ def _chat_rt(monkeypatch):
     rt.memory = SimpleNamespace(record_message=AsyncMock(),
                                 recent_messages=AsyncMock(return_value=[]))
     rt.openai = SimpleNamespace(chat=AsyncMock(return_value="sh-sha"),
-                                cheap_completion=AsyncMock(return_value="NO"))
+                                cheap_completion=AsyncMock(return_value="NO"),
+                                supports_tools=False)
     captured = {}
 
     async def fake_build(**kwargs):

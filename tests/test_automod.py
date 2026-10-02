@@ -8,7 +8,6 @@ the trigger phrase back with an emoji.
 from __future__ import annotations
 
 import random
-import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -17,7 +16,7 @@ import pytest
 from ipedro.handlers.automod import (
     _ALL_YOUR_BASE, _AMONG_US_COPYPASTA, _AUTOMOD_TRIGGERS, _COPIUM_LINES,
     _GAY_COPYPASTA, _GNU_LINUX_PASTA, _HOLY_HELL_CHAIN, _JACKDAW_PASTA,
-    _KYS_LINES, _L_RATIO_COPYPASTA, DaleGif, MediaResponse, _automod_response,
+    _L_RATIO_COPYPASTA, DaleGif, MediaResponse, _automod_response,
 )
 
 
@@ -69,28 +68,9 @@ def test_long_pastas_fire_verbatim():
 
 
 # ── kys deflection ───────────────────────────────────────────────────────────
-
-def test_kys_gets_a_deflection_and_wins_priority():
-    for t in ("kys", "kill yourself", "just neck yourself",
-              "i want to kill myself", "killurself", "kill ur self"):
-        assert _automod_response(t, random.Random(0)) in _KYS_LINES, t
-    # kys intercepts first — a joke trigger in the same message can't win
-    assert _automod_response("kys you gay loser", random.Random(0)) in _KYS_LINES
-    # deflection register only — never an actual instruction to self-harm.
-    banned = re.compile(r"\b(kill|kys|die|neck|rope)\b", re.IGNORECASE)
-    for line in _KYS_LINES:
-        assert not banned.search(line), line
-    assert _automod_response("that joke killed me lol") not in _KYS_LINES
-
-
-def test_kys_regex_has_word_boundaries_on_both_ends():
-    """Without a trailing \b, '...yourself' matched inside a longer word —
-    'fix that bottleneck yourself' has 'neck' immediately followed by
-    'yourself' with only a space between, which the old pattern's missing
-    right-hand boundary let slip through as a false positive."""
-    for t in ("fix that bottleneck yourself", "necking yourself into a corner",
-              "yourselfish behavior"):
-        assert _automod_response(t) is None, t
+# Lives in tests/test_automod_rules.py: that file is guarded by
+# ipedro/merge_policy.py, this one isn't, and these rules must never be
+# loosened in the same unreviewed change that edits the lines they guard.
 
 
 # ── the no-echo invariant ────────────────────────────────────────────────────
@@ -291,12 +271,8 @@ def test_media_entries_are_wellformed():
         assert m.fallback and len(m.fallback) <= 4000, m
 
 
-def test_media_hosts_are_pinned_stable_ones():
-    ok_hosts = ("i.imgflip.com", "i.kym-cdn.com", "media.giphy.com",
-                "media.tenor.com", "media1.tenor.com")
-    for _p, m in _media_entries():
-        host = m.url.split("/")[2]
-        assert host in ok_hosts, m.url
+# The allowed-hosts check moved to tests/test_automod_rules.py (guarded), and
+# is now enforced at fetch time in ipedro/automod_media.py besides.
 
 
 def test_matcher_returns_media_untouched():

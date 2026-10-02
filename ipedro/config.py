@@ -54,6 +54,36 @@ class Settings(BaseSettings):
     openai_cheap_model: str = "gpt-4o-mini"
     text_provider: Literal["claude", "openai"] = "claude"
 
+    # Identity — who this bot is (see ipedro/identity.py). Unset means
+    # Dale, exactly as he's always been. Set these to run the same code as
+    # a different bot: a name, the comma-separated names people will call
+    # it by (blank = just the name), "plain" to drop Dale's own flourishes
+    # (his catchphrases, GIF library, /start blurb), and the persona it
+    # starts with until /master_prompt changes it.
+    bot_name: str = "Dale"
+    bot_aliases: str = ""
+    bot_flavor: Literal["dale", "plain"] = "dale"
+    bot_persona: str | None = None
+    # Whether this deployment is the one that adds and manages the other
+    # bots (/newbot, /bots — ipedro/handlers/bots.py). True for Dale; the
+    # supervisor starts every other bot with it off, since their DMs
+    # aren't where the registry lives.
+    manages_bots: bool = True
+    # Where the bots hear each other (ipedro/hub.py): Dale's database. Unset
+    # means this bot's own DATABASE_URL, which is right for Dale; the
+    # supervisor points every other bot at Dale's.
+    hub_database_url: str | None = None
+
+    # /evolve — the owner's DM requests for the bot to change itself. An
+    # approved request is filed as a GitHub issue, which a GitHub Action
+    # (Claude Code) picks up and turns into a pull request. This token
+    # should be a fine-grained PAT scoped to the one repo with Issues
+    # read/write and NOTHING else: the bot only ever files issues, and the
+    # code itself is written by the Action under its own credentials.
+    # Unset = /evolve explains what's missing instead of failing.
+    evolve_github_token: str | None = None
+    evolve_github_repo: str = "moistifarius/ipedro-v3"
+
     # Database
     database_url: str
 
@@ -172,6 +202,15 @@ class Settings(BaseSettings):
         # 315660812 is always considered an admin per project requirements.
         ids.add(315660812)
         return frozenset(ids)
+
+    @property
+    def owner_id(self) -> int:
+        """The one person who may approve self-modification or
+        bot-creation requests — stricter than admin_ids, and deliberately
+        not configurable via env. admin_ids may reasonably grow to cover
+        other people helping run the bot; this gate is meant to stay at
+        exactly one person regardless of how many admins there are."""
+        return 315660812
 
 
 @lru_cache(maxsize=1)

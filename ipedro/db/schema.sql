@@ -121,6 +121,96 @@ CREATE TABLE IF NOT EXISTS command_log (
 CREATE INDEX IF NOT EXISTS command_log_recent_idx
     ON command_log (created_at DESC);
 
+-- Activity log (omniscience) -------------------------------------------------
+-- Durable record of WHY the bot did or didn't reply, independent of the
+-- in-memory-only ring buffer logging_setup.py keeps for raw log lines (that
+-- one dies on restart; this one is queryable history). event_type is a
+-- short fixed tag (ai_reply, automod, thanks_pedro, ambient_gif, no_reply,
+-- …), detail is a short human-readable reason. No chats(chat_id) FK: a
+-- message_id-bearing event can arrive for a chat row that hasn't been
+-- upserted yet (e.g. the chat.id lookup races the insert), and losing an
+-- activity row over that would defeat the point of it.
+CREATE TABLE IF NOT EXISTS activity_log (
+    id           BIGSERIAL PRIMARY KEY,
+    chat_id      BIGINT,
+    message_id   BIGINT,
+    event_type   TEXT NOT NULL,
+    detail       TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS activity_log_recent_idx
+    ON activity_log (created_at DESC);
+CREATE INDEX IF NOT EXISTS activity_log_chat_recent_idx
+    ON activity_log (chat_id, created_at DESC);
+
+-- Change requests (/evolve) -------------------------------------------------
+-- The owner asking the bot, in DM, to change itself. Filed as a GitHub
+-- issue only after the owner taps Approve; a GitHub Action turns the issue
+-- into a pull request. `request` is only ever the owner's own typed words —
+-- never model output or chat content (ipedro/evolve.py explains why).
+-- status: pending -> filing -> filed | failed, or pending -> cancelled.
+-- 'filing' is the atomic claim that stops a double-tap filing twice.
+CREATE TABLE IF NOT EXISTS change_requests (
+    id            BIGSERIAL PRIMARY KEY,
+    requester_id  BIGINT NOT NULL,
+    request       TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    issue_number  INTEGER,
+    issue_url     TEXT,
+    error         TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    decided_at    TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS change_requests_recent_idx
+    ON change_requests (created_at DESC);
+
+-- The other bots the owner has added with /newbot (ipedro/bots.py). Each
+-- is its own Telegram account, process and database; this table is how
+-- the owner's DM tells the supervisor (ipedro/supervisor.py) what to run,
+-- and how the supervisor reports back. `status` is what the owner wants:
+-- active | stopped | removed. running / started_at / restarts /
+-- last_exit / last_seen_at are what the supervisor last saw.
+CREATE TABLE IF NOT EXISTS bot_registry (
+    id            BIGSERIAL PRIMARY KEY,
+    telegram_id   BIGINT NOT NULL UNIQUE,
+    username      TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    aliases       TEXT NOT NULL DEFAULT '',
+    persona       TEXT,
+    token         TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'active',
+    created_by    BIGINT NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    running       BOOLEAN NOT NULL DEFAULT FALSE,
+    started_at    TIMESTAMPTZ,
+    restarts      INTEGER NOT NULL DEFAULT 0,
+    last_exit     TEXT,
+    last_seen_at  TIMESTAMPTZ
+);
+
+-- What every bot says in a group, so the others can hear it (Telegram
+-- never delivers one bot's group messages to another). Lives in the hub
+-- database — Dale's — and is pruned after a day: it's a wire, not a
+-- record. depth: 0 when a bot answered a human, parent + 1 when it
+-- answered another bot; see ipedro/hub.py for why that matters.
+CREATE TABLE IF NOT EXISTS bot_posts (
+    id                BIGSERIAL PRIMARY KEY,
+    chat_id           BIGINT NOT NULL,
+    message_id        BIGINT NOT NULL,
+    bot_id            BIGINT NOT NULL,
+    bot_username      TEXT,
+    bot_name          TEXT NOT NULL,
+    text              TEXT NOT NULL,
+    reply_to_user_id  BIGINT,
+    depth             INTEGER NOT NULL DEFAULT 0,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS bot_posts_created_idx ON bot_posts (created_at);
+
 -- Duckhunt ------------------------------------------------------------------
 -- Persistent state for active spawns. At most one active duck per chat.
 CREATE TABLE IF NOT EXISTS duck_events (

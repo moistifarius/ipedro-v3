@@ -371,12 +371,28 @@ def test_seed_set_is_sane():
 @pytest.mark.asyncio
 async def test_apply_seed_is_idempotent():
     db = _FakeDB()
-    added, skipped = await dg.apply_seed(db)
-    assert added == len(dg._SEED_GIFS) and skipped == 0
+    added, skipped, refused = await dg.apply_seed(db)
+    assert added == len(dg._SEED_GIFS) and skipped == 0 and refused == 0
 
-    added_2, skipped_2 = await dg.apply_seed(db)
+    added_2, skipped_2, _ = await dg.apply_seed(db)
     assert added_2 == 0 and skipped_2 == len(dg._SEED_GIFS)
     assert len(db.rows) == len(dg._SEED_GIFS)
+
+
+@pytest.mark.asyncio
+async def test_a_seed_on_an_unlisted_host_is_refused_at_runtime(monkeypatch):
+    """The seed table can merge without review (it's plain content), and so
+    can test files — so the host allowlist has to hold in the code itself,
+    not only in a test that the same change could loosen."""
+    monkeypatch.setattr(dg, "_SEED_GIFS", (
+        ("https://media.tenor.com/ok/dale.gif", ("agree",)),
+        ("https://evil.example/x.gif", ("agree",)),
+        ("http://media.tenor.com/plain-http.gif", ("agree",)),
+    ))
+    db = _FakeDB()
+    added, skipped, refused = await dg.apply_seed(db)
+    assert (added, skipped, refused) == (1, 0, 2)
+    assert [r["url"] for r in db.rows] == ["https://media.tenor.com/ok/dale.gif"]
 
 
 @pytest.mark.asyncio

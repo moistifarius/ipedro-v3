@@ -278,7 +278,7 @@ def _seeing_rt(monkeypatch, *, seen="[photo: a cat in a hat]", policy="always"):
                   "comic_enabled", "fortune_enabled", "ether_enabled"):
         setattr(cfg, field, False)
     rt.memory = SimpleNamespace(record_message=AsyncMock())
-    rt.openai = SimpleNamespace(chat=AsyncMock(return_value="sh-sha"))
+    rt.openai = SimpleNamespace(chat=AsyncMock(return_value="sh-sha"), supports_tools=False)
     # chat.py looks through vision.look; describe() is its thin wrapper, so
     # patching look covers both the message's own media and the replied-to
     # path. remember() is the library write — out of scope here.
@@ -358,7 +358,7 @@ async def test_a_description_never_fires_a_canned_automod_bit(monkeypatch):
     monkeypatch.setattr(chat, "should_respond", lambda *a, **k: False)
     fired = []
     monkeypatch.setattr(chat, "_automod_response",
-                        lambda t: fired.append(t) or None)
+                        lambda t, **k: fired.append(t) or None)
     msg = _media_msg(text=None)
     msg.text = None
     msg.caption = "heh"

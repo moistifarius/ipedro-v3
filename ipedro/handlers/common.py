@@ -9,7 +9,7 @@ from typing import Iterable
 
 from aiogram.types import Message
 
-from ipedro.auth import AuthContext, is_admin
+from ipedro.auth import AuthContext, is_admin, is_owner
 from ipedro.runtime import Runtime
 
 log = logging.getLogger(__name__)
@@ -83,6 +83,30 @@ async def require_admin(message: Message, admin_ids: Iterable[int]) -> bool:
             return False
         await message.reply(
             "This command is admin-only.", disable_notification=True,
+        )
+        return False
+    return True
+
+
+async def require_owner(message: Message, owner_id: int) -> bool:
+    """Enforce owner-only command. Stricter than require_admin: never
+    falls back to the admin_ids set, only settings.owner_id passes.
+
+    Reserved for requests consequential enough that being a bot admin
+    isn't sufficient trust — self-modification, bot-creation. Same
+    silent-in-groups behavior as require_admin, for the same reason.
+    """
+    ctx = auth_ctx(message)
+    if not is_owner(ctx, owner_id):
+        if ctx.chat_type != "private":
+            log.warning(
+                "Refused owner-only command %r from user %s in chat %s (%s)",
+                message.text, ctx.user_id, message.chat.id if message.chat else "?",
+                ctx.chat_type,
+            )
+            return False
+        await message.reply(
+            "This is owner-only.", disable_notification=True,
         )
         return False
     return True

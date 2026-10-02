@@ -12,19 +12,22 @@ from aiogram.client.default import DefaultBotProperties
 from ipedro.config import Settings, get_settings
 from ipedro.db.migrations import apply_schema, has_pgvector
 from ipedro.db.pool import Database, set_db
-from ipedro.db.repositories import ChatRepo, CommandLogRepo, UserRepo
+from ipedro.db.repositories import ActivityLogRepo, ChatRepo, CommandLogRepo, UserRepo
 from ipedro.duckhunt.debug_toggles import load_all as load_debug_toggles
 from ipedro.duckhunt.service import DuckhuntService
 from ipedro.duckhunt.spawner import run_spawner
 from ipedro.ambient_loops import run_ambient_loops
+from ipedro import hub
 from ipedro.handlers import admin as admin_h
 from ipedro.handlers import ai as ai_h
 from ipedro.handlers import basics as basics_h
+from ipedro.handlers import bots as bots_h
 from ipedro.handlers import chat as chat_h
 from ipedro.handlers import dale as dale_h, media as media_h
 from ipedro.handlers import debug as debug_h
 from ipedro.handlers import duckhunt as duck_h
 from ipedro.handlers import ether as ether_h
+from ipedro.handlers import evolve as evolve_h
 from ipedro.handlers import karma as karma_h
 from ipedro.handlers import mod as mod_h
 from ipedro.handlers import quiz as quiz_h
@@ -33,7 +36,8 @@ from ipedro.logging_setup import configure_logging
 from ipedro.celebrations import run_celebrations_loop
 from ipedro.comic import run_comic_loop
 from ipedro.kv import kv_get
-from ipedro.personas import set_master_prompt_override
+from ipedro.identity import starting_persona
+from ipedro.personas import set_default_prompt, set_master_prompt_override
 from ipedro.memory.store import MemoryStore
 from ipedro.openai_client import OpenAIClient
 from ipedro.monthly_recap import run_monthly_recap_loop
@@ -88,6 +92,10 @@ async def build_runtime(settings: Settings) -> Runtime:
         openai.text_provider, openai.claude_model, openai.text_model,
     )
 
+    # Who this bot starts as with no /master_prompt override: Dale, unless
+    # this deployment is a different bot (see ipedro/identity.py).
+    set_default_prompt(starting_persona(settings))
+
     # Pick up any persisted master-prompt override before serving requests.
     # Falls back to the legacy key set by earlier versions.
     override = (
@@ -115,6 +123,7 @@ async def build_runtime(settings: Settings) -> Runtime:
         chats=ChatRepo(db),
         users=UserRepo(db),
         command_log=CommandLogRepo(db),
+        activity=ActivityLogRepo(db),
         pgvector_available=pgvector_available,
     )
 
@@ -146,6 +155,9 @@ def build_dispatcher(rt: Runtime) -> Dispatcher:
     dp.include_router(ether_h.build_router(rt))
     dp.include_router(dale_h.build_router(rt))
     dp.include_router(media_h.build_router(rt))
+    dp.include_router(evolve_h.build_router(rt))
+    if rt.settings.manages_bots:
+        dp.include_router(bots_h.build_router(rt))
     dp.include_router(chat_h.build_router(rt))
     return dp
 
@@ -194,10 +206,15 @@ async def run() -> None:
         name="monthly-recap",
     )
 
+    hub_task = asyncio.create_task(
+        hub.run(rt, settings, stop),
+        name="bot-hub",
+    )
+
     background_tasks = (
         spawner_task, share_photo_task, reminders_task,
         celebrations_task, comic_task, ambient_task,
-        monthly_recap_task,
+        monthly_recap_task, hub_task,
     )
 
     # A background loop dying is a silently-missing feature until restart —

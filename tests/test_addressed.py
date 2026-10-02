@@ -268,6 +268,7 @@ def _mention_rt(monkeypatch, *, classifier="NO"):
     rt.openai = SimpleNamespace(
         chat=AsyncMock(return_value="sh-sha, it's a plot"),
         cheap_completion=AsyncMock(return_value=classifier),
+        supports_tools=False,   # the plain path; the tool loop has its own tests
     )
 
     async def fake_build(**kwargs):

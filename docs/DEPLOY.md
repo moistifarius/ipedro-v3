@@ -15,6 +15,31 @@ For Unraid-specific instructions see [`UNRAID.md`](UNRAID.md).
 | `CLAUDE_TEXT_MODEL` | no | Default `claude-sonnet-4-6`. Runtime-tunable via `/ai_model`. |
 | `OPENAI_TEXT_MODEL` | no | Default `gpt-4o-mini`. Runtime-tunable via `/ai_model`. |
 | `OPENAI_*_MODEL` | no | Image / embedding / transcription model overrides |
+| `EVOLVE_GITHUB_TOKEN` | no | Fine-grained PAT, this repo only, Issues read/write and nothing else. Lets the owner's `/evolve` file change requests. Unset → `/evolve` says what's missing. |
+| `BOT_NAME` | no | Default `Dale`. Set these four to run the same code as a different bot. |
+| `BOT_ALIASES` | no | Comma-separated names it answers to (and takes "bad <name>" for). Blank → just the name. |
+| `BOT_FLAVOR` | no | `dale` (default) or `plain`: plain drops Dale's own catchphrases, GIF reflexes and /start blurb. |
+| `BOT_PERSONA` | no | The persona prompt it starts with, until `/master_prompt` overrides it. Blank → Dale's. |
+
+## Other bots
+
+The owner can run more bots beside Dale, each its own Telegram account
+with its own memory. Make the account in @BotFather (and turn its Group
+Privacy off), then DM Dale:
+
+    /newbot 123456789:AAH... Hank, hank hill
+    You are Hank Hill. You sell propane and propane accessories.
+
+The first line is the token, its name, and any other names it answers
+to; the lines after are its persona. Dale deletes the message (it holds
+the token) and registers the bot. The `bots` service in
+`docker/docker-compose.yml` (`python -m ipedro.supervisor`) then creates
+its database (`ipedro_bot_<id>` on the same Postgres) and runs it.
+`/bots` shows what's running; `/bot_stop`, `/bot_start` and
+`/bot_remove` do what they say. A removed bot's database is kept.
+
+The supervisor needs the Postgres user to be allowed to create
+databases; the compose default user is.
 
 The full list of tunables (memory budgets, duckhunt parameters, etc.) is in
 `.env.example`. Anything missing falls back to the defaults declared in

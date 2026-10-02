@@ -35,7 +35,7 @@ from ipedro.logging_setup import recent_log_lines
 from ipedro.memory.summarizer import force_summarize
 from ipedro.memory.tokens import count_tokens
 from ipedro.personas import (
-    DEFAULT_DUDE_PROMPT, current_master_prompt, set_master_prompt_override,
+    current_master_prompt, default_prompt, set_master_prompt_override,
 )
 from ipedro.runtime import Runtime
 from ipedro.silenced_chats import (
@@ -860,6 +860,50 @@ def build_router(rt: Runtime) -> Router:
             for r in rows
         ]
         await msg.reply("Recent commands:\n" + "\n".join(lines), disable_notification=True)
+
+    @r.message(Command("activity"))
+    async def activity_cmd(msg: Message) -> None:
+        """Durable 'why did/didn't the bot reply' log — the omniscience
+        layer, not the raw program logs (that's /logs).
+
+        Usage: /activity [N] [chat_id] [event_type]
+        N defaults to 30. chat_id/event_type are optional filters, in
+        either order after N (e.g. /activity 50 ai_reply, or
+        /activity 50 -1001234 no_reply).
+        """
+        if not await require_admin(msg, admin_ids):
+            return
+        parts = (msg.text or "").split()[1:]
+        limit = 30
+        chat_filter: int | None = None
+        type_filter: str | None = None
+        numeric_seen = 0
+        for part in parts:
+            try:
+                n = int(part)
+            except ValueError:
+                type_filter = part
+                continue
+            if numeric_seen == 0:
+                limit = max(1, min(200, n))
+            else:
+                chat_filter = n
+            numeric_seen += 1
+        rows = await rt.activity.recent(
+            chat_id=chat_filter, limit=limit, event_type=type_filter,
+        )
+        if not rows:
+            await msg.reply(
+                "No activity log entries (yet, or none match the filter).",
+                disable_notification=True,
+            )
+            return
+        lines = [
+            f"{r['created_at']:%H:%M:%S} chat={r['chat_id']} {r['event_type']}"
+            + (f": {r['detail']}" if r["detail"] else "")
+            for r in rows
+        ]
+        await msg.reply("Recent activity:\n" + "\n".join(lines), disable_notification=True)
 
     @r.message(Command("quack_all"))
     async def quack_all(msg: Message) -> None:
@@ -1823,8 +1867,8 @@ def build_router(rt: Runtime) -> Router:
         sub = raw[1].lower() if len(raw) >= 2 else "show"
         if sub == "show":
             current = current_master_prompt()
-            is_default = current == DEFAULT_DUDE_PROMPT
-            tag = "(default Dale)" if is_default else "(override active)"
+            is_default = current == default_prompt()
+            tag = "(default persona)" if is_default else "(override active)"
             tokens = count_tokens(current)
             head = (
                 f"Master persona prompt {tag} "
@@ -1841,7 +1885,7 @@ def build_router(rt: Runtime) -> Router:
             await kv_delete(rt.db, "pedro_master_prompt")  # legacy key
             set_master_prompt_override(None)
             await msg.reply(
-                "Reset to default Dale prompt.", disable_notification=True,
+                "Reset to the default persona.", disable_notification=True,
             )
             return
         if sub == "set":

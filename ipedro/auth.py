@@ -36,3 +36,19 @@ def is_admin_user(user_id: int | None, admin_ids: Iterable[int]) -> bool:
     if user_id is None:
         return False
     return user_id in set(admin_ids)
+
+
+def is_owner(ctx: AuthContext, owner_id: int) -> bool:
+    """Return True only if the user IS the owner AND the request is private.
+
+    Stricter than is_admin, and deliberately never falls back to the
+    admin_ids set: being a bot admin and being allowed to approve a
+    self-modification or bot-creation request are different levels of
+    trust. Reserved for those — ordinary admin commands keep using
+    is_admin/is_admin_user.
+    """
+    if ctx.user_id is None:
+        return False
+    if ctx.chat_type != "private":
+        return False
+    return ctx.user_id == owner_id

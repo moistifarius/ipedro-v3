@@ -8,6 +8,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from ipedro import identity
 from ipedro.auth import is_admin_user
 from ipedro.db.chat_migration import migrate_chat
 from ipedro.handlers.common import get_or_create_chat_config
@@ -15,8 +16,15 @@ from ipedro.runtime import Runtime
 
 log = logging.getLogger(__name__)
 
-HELP_TEXT_PUBLIC = (
+_DALE_HELP_INTRO = (
     "Sh-sha. Name's Dale. Also Rusty Shackleford, when I'm being watched. "
+)
+_DALE_START = (
+    "Sh-sha. Dale Gribble. Pest control. Conspiracy buff. "
+    "Also goes by Rusty Shackleford. Type /help for commands."
+)
+
+HELP_TEXT_PUBLIC = _DALE_HELP_INTRO + (
     "I chat, look at whatever you post, generate images, transcribe voice, "
     "hunt ducks, and remember stuff — more or less.\n"
     "\n"
@@ -129,6 +137,8 @@ HELP_TEXT_ADMIN = (
     "\n"
     "Persona & providers:\n"
     "/master_prompt show|set <text>|setfile|reset - global persona prompt\n"
+    "/newbot <token> <Name> - (owner) add another bot; /bots lists them; "
+    "/bot_stop, /bot_start, /bot_remove <#n>\n"
     "/ai_provider show|claude|openai - switch text-completion provider\n"
     "/ai_model show|[provider] <model_id> - switch text model\n"
     "\n"
@@ -175,6 +185,25 @@ HELP_TEXT_ADMIN = (
 )
 
 
+def help_text_public(ident: identity.Identity = identity.DALE) -> str:
+    """The public /help as this bot says it: Dale's own intro only for
+    Dale, and the examples in whatever name the bot actually answers to."""
+    text = HELP_TEXT_PUBLIC
+    if not ident.dale_flavor:
+        text = text.replace(_DALE_HELP_INTRO, f"{ident.name} here. ", 1)
+    alias = ident.primary_alias
+    return (
+        text.replace("'dale send that pic", f"'{alias} send that pic")
+        .replace("'bad dale'", f"'bad {alias}'")
+    )
+
+
+def start_text(ident: identity.Identity = identity.DALE) -> str:
+    if ident.dale_flavor:
+        return _DALE_START
+    return f"{ident.name} here. Type /help for commands."
+
+
 def build_router(rt: Runtime) -> Router:
     r = Router(name="basics")
 
@@ -203,10 +232,7 @@ def build_router(rt: Runtime) -> Router:
     @r.message(Command("start"))
     async def start(msg: Message) -> None:
         await get_or_create_chat_config(rt, msg)
-        await msg.reply(
-            "Sh-sha. Dale Gribble. Pest control. Conspiracy buff. "
-            "Also goes by Rusty Shackleford. Type /help for commands."
-        )
+        await msg.reply(start_text(identity.from_settings(rt.settings)))
         await rt.command_log.add(
             msg.chat.id if msg.chat else None,
             msg.from_user.id if msg.from_user else None,
@@ -216,7 +242,10 @@ def build_router(rt: Runtime) -> Router:
     @r.message(Command("help"))
     async def help_(msg: Message) -> None:
         await get_or_create_chat_config(rt, msg)
-        await msg.reply(HELP_TEXT_PUBLIC, disable_notification=True)
+        await msg.reply(
+            help_text_public(identity.from_settings(rt.settings)),
+            disable_notification=True,
+        )
         # Append the admin reference as a second message when the caller
         # is a bot admin; non-admins don't see it at all.
         is_admin = (

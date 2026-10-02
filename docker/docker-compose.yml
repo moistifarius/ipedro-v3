@@ -61,3 +61,23 @@ services:
     environment:
       # Override DATABASE_URL so it points at the compose service name.
       DATABASE_URL: postgresql://${POSTGRES_USER:-ipedro}:${POSTGRES_PASSWORD:-ipedro}@postgres:5432/${POSTGRES_DB:-ipedro}
+
+  # The other bots added from Dale's DM with /newbot (ipedro/supervisor.py):
+  # one process per bot, each with its own database on the same Postgres.
+  # A separate service so restarting Dale never takes them down, and a bot
+  # crashing never touches Dale. Idle until the first /newbot.
+  bots:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: ipedro-v2:latest
+    restart: unless-stopped
+    logging: *logrotate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ipedro}:${POSTGRES_PASSWORD:-ipedro}@postgres:5432/${POSTGRES_DB:-ipedro}
+    entrypoint: ["python", "-m", "ipedro.supervisor"]

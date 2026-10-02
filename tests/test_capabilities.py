@@ -52,7 +52,7 @@ def test_every_public_command_is_in_the_brief():
 def test_admin_commands_are_never_advertised():
     brief = capability_brief(_cfg())
     admin_only = ("/memory_wipe", "/send_message", "/master_prompt",
-                  "/dalegif", "/quack_all", "/shutup", "/logs")
+                  "/dalegif", "/quack_all", "/shutup", "/logs", "/evolve")
     for name in admin_only:
         assert name not in brief, name
 
@@ -171,7 +171,7 @@ def _reply_rt(cfg):
     rt = _rt_with()
     rt.chats.get_config.return_value = cfg
     rt.chats.upsert_default_config.return_value = cfg
-    rt.openai = SimpleNamespace(chat=AsyncMock(return_value="sh-sha"))
+    rt.openai = SimpleNamespace(chat=AsyncMock(return_value="sh-sha"), supports_tools=False)
     return rt
 
 

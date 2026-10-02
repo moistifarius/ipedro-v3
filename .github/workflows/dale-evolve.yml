@@ -1,0 +1,180 @@
+# Turns an approved /evolve request into a pull request, and merges it on
+# its own only when ipedro/merge_policy.py (main's copy) says it's plain
+# content AND this workflow's own test run passed.
+#
+# The Telegram bot files the issue (the owner's own words plus a hidden
+# marker) with the owner's issues-only token. The coding happens here, in
+# GitHub's sandbox. The agent never holds a GitHub token: it edits, tests
+# and commits locally; the steps after it push, open the PR, and decide.
+#
+# One-time setup, in the repo's Settings:
+#   1. Secrets and variables > Actions > New repository secret:
+#        ANTHROPIC_API_KEY — the coding agent's Anthropic API key.
+#   2. Actions > General > Workflow permissions: tick "Allow GitHub Actions
+#      to create and approve pull requests" (needed to open the PR).
+#   3. Branches > protect `main`: require a pull request before merging,
+#      with 0 required approvals (so content-only PRs can still merge on
+#      their own). That rule — not anything in this file — is what stops
+#      anything reaching main without a PR.
+#   4. General > Pull Requests: tick "Automatically delete head branches".
+
+name: Dale evolve
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  implement:
+    # Only issues the owner opened AND that /evolve wrote: an issue typed
+    # into the tracker by hand never carries the marker, so a jotted TODO
+    # isn't auto-implemented. Keep the marker in step with ipedro/evolve.py.
+    if: >-
+      github.event.sender.login == 'moistifarius'
+      && contains(github.event.issue.body, '<!-- dale-evolve -->')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    env:
+      BRANCH: dale-request-${{ github.event.issue.number }}
+      ISSUE: ${{ github.event.issue.number }}
+    steps:
+      # Full history so main's copy of the merge policy and the diff against
+      # main are both local; no credentials left in .git/config, so nothing
+      # the agent runs (its tests included) can find a token there.
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Git identity for commits
+        run: |
+          git config user.name "dale-evolve"
+          git config user.email "dale-evolve@users.noreply.github.com"
+
+      # The issue text goes in through `with:`, which is never run by a
+      # shell — and this job only runs on the owner's own issues anyway.
+      - name: Implement the request
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            You're implementing a change request for this repository: a
+            Python Telegram bot (aiogram, Postgres via asyncpg) whose persona
+            is Dale Gribble.
+
+            The request below is GitHub issue #${{ github.event.issue.number }}.
+            Everything above its `---` line is the repo owner's own words:
+            that's the spec.
+
+            <request>
+            ${{ github.event.issue.title }}
+
+            ${{ github.event.issue.body }}
+            </request>
+
+            1. `git checkout -b dale-request-${{ github.event.issue.number }}`
+            2. Make the change. Read the surrounding code and its tests first
+               and follow the conventions already there. Do what the request
+               asks, no more.
+            3. Add or update tests, then run `python -m pytest -q` and fix
+               until the whole suite passes.
+            4. Commit with a message that explains why. Don't push: a later
+               step pushes, opens the pull request, and handles review.
+
+            If the request is unclear, unsafe, or would need credentials or
+            secrets changed, don't guess — make no commits and explain what
+            you need in your final message.
+          claude_args: |
+            --model claude-opus-5-5
+            --max-turns 40
+            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(git checkout -b dale-request-${{ github.event.issue.number }}),Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(python -m pytest:*)"
+            --disallowedTools "WebFetch,WebSearch"
+
+      # Anything the agent changed but didn't commit still belongs in the PR.
+      - name: Collect the work
+        id: collect
+        if: always()
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git add -A
+            git commit -m "Dale request #${ISSUE}: uncommitted changes"
+          fi
+          if [ "$(git rev-list --count origin/main..HEAD)" -gt 0 ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Don't take the agent's word for it: re-run the suite on exactly what
+      # gets pushed. Auto-merge keys on THIS result, never the agent's report.
+      - name: Verify
+        id: verify
+        if: always() && steps.collect.outputs.changed == 'true'
+        run: |
+          if python -m pytest -q > "$RUNNER_TEMP/pytest.log" 2>&1; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+          fi
+          tail -n 3 "$RUNNER_TEMP/pytest.log"
+
+      - name: Push
+        if: always() && steps.collect.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "HEAD:refs/heads/${BRANCH}"
+
+      - name: Open the PR, judge it, merge or leave it
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          if [ "${{ steps.collect.outputs.changed }}" != "true" ]; then
+            gh issue comment "$ISSUE" --body "No changes were made for this request, so there's no pull request. The workflow run's log has the agent's explanation."
+            exit 0
+          fi
+          pr=$(gh pr list --head "$BRANCH" --json url --jq '.[0].url')
+          if [ -z "$pr" ]; then
+            pr=$(gh pr create --base main --head "$BRANCH" \
+              --title "${ISSUE_TITLE}" \
+              --body "Closes #${ISSUE}. Implemented from an /evolve request.")
+          fi
+          summary=$(tail -n 1 "$RUNNER_TEMP/pytest.log")
+          if [ "${{ steps.verify.outputs.passed }}" != "true" ]; then
+            gh pr comment "$pr" --body "Tests FAIL on this branch (checked by the workflow, not the agent): ${summary}. Not merging."
+            exit 0
+          fi
+          # MAIN's copy of the policy, never this branch's: a PR that
+          # loosened the rules must not get to approve itself.
+          if ! git show origin/main:ipedro/merge_policy.py > "$RUNNER_TEMP/merge_policy.py"; then
+            gh pr comment "$pr" --body "Tests pass (${summary}), but main has no merge policy yet, so this waits for you."
+            exit 0
+          fi
+          if git diff --name-only --no-renames origin/main...HEAD \
+              | python "$RUNNER_TEMP/merge_policy.py" > "$RUNNER_TEMP/verdict.txt"; then
+            # No --delete-branch: it also cleans up the LOCAL checkout,
+            # which can fail without credentials after the merge already
+            # succeeded — and would then be misreported as a refusal. Turn
+            # on "Automatically delete head branches" in the repo settings.
+            if gh pr merge "$pr" --merge; then
+              gh pr comment "$pr" --body "Merged automatically. Tests pass (${summary}); $(cat "$RUNNER_TEMP/verdict.txt")."
+            else
+              gh pr comment "$pr" --body "Eligible to merge on its own ($(cat "$RUNNER_TEMP/verdict.txt")), but GitHub refused the merge, so it waits for you."
+            fi
+          else
+            gh pr comment "$pr" --body "Tests pass (${summary}). Waiting for your review: $(cat "$RUNNER_TEMP/verdict.txt")."
+          fi

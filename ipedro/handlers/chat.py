@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from aiogram import F, Router
 from aiogram.types import BufferedInputFile, Message, ReactionTypeEmoji
 
-from ipedro import addressed, media_library, vision
+from ipedro import addressed, identity, introspection, media_library, vision
 from ipedro.bot_messages import track
 from ipedro.capabilities import capability_brief
 from ipedro.chat_policy import IncomingMessage, should_respond
@@ -22,8 +22,9 @@ from ipedro.duckhunt.debug_toggles import is_on as debug_is_on
 from ipedro.duckhunt.scoring import challenge_is_over_time, over_time_line
 from ipedro.duckhunt.verdicts import parse_verdict
 from ipedro import dale_gifs as dale
+from ipedro.automod_media import fetch_automod_media
 from ipedro.handlers.automod import (
-    DaleGif, MediaResponse, _automod_response, fetch_automod_media,
+    DaleGif, MediaResponse, _automod_response,
 )
 from ipedro.handlers.common import (
     catify, display_name, fallback_cat_fact, get_or_create_chat_config,
@@ -53,30 +54,9 @@ log = logging.getLogger(__name__)
 _BEF_CHALLENGE_TTL_SECONDS = 3600  # 1h
 
 # Name-mention triggers — when someone calls the bot by name, it tends
-# to engage. The current persona is Dale (idale), who goes by Rusty
-# Shackleford when he thinks he's being watched — and that IS the display
-# name in the chat, so people call him "rusty" far more often than
-# "rusty shackleford". Requiring the full alias meant half the times he
-# was addressed by name didn't register. Legacy Boomhauer / Dude / Pedro
-# aliases still match so people who knew earlier personas keep getting a
-# response. Bare first names are allowed even though they're common names
-# — the bot can handle the occasional false hit.
-_DUDE_NAME_RE = re.compile(
-    r"\bdale\s+gribble\b"
-    r"|\brusty\s+shackleford\b"
-    r"|\bshackleford\b"
-    r"|\brusty\b"
-    r"|\bidale\b"
-    r"|\bdale\b"
-    r"|\bboomhauer\b"
-    r"|\bboomhaur\b"           # common misspelling
-    r"|\bthe\s+dude\b"
-    r"|\bduder(ino)?\b"
-    r"|\bel\s+duderino\b"
-    r"|\bhis\s+dudeness\b"
-    r"|\bpedro\b",
-    re.IGNORECASE,
-)
+# to engage. Which names those are is the deployment's identity
+# (ipedro/identity.py): Dale's full alias list by default, a configured
+# bot's own names otherwise.
 
 # People call him by what he is at least as often as by name — "bot,
 # settle this", "shut up bot", "the bot is broken". None of those say Dale
@@ -174,12 +154,14 @@ _CAT_EMOJI = frozenset("🐈🐱😺😸😹😻😼😽🙀😿😾")
 _MEME_WORD_RE = re.compile(r"\bmemes?\b", re.IGNORECASE)
 
 
-def _mentions_pedro(text: str | None) -> bool:
+def _mentions_pedro(
+    text: str | None, ident: identity.Identity = identity.DALE,
+) -> bool:
     """Was he addressed — by one of his names, or as 'bot'?"""
     if not text:
         return False
     return (
-        _DUDE_NAME_RE.search(text) is not None
+        ident.name_re.search(text) is not None
         or _BOT_WORD_RE.search(text) is not None
     )
 
@@ -210,6 +192,19 @@ def _challenge_is_stale(challenge) -> bool:
         created = created.replace(tzinfo=timezone.utc)
     age = (datetime.now(timezone.utc) - created).total_seconds()
     return age > _BEF_CHALLENGE_TTL_SECONDS
+
+
+async def _log_activity(
+    rt: Runtime, chat_id: int, event_type: str, detail: str | None = None,
+    *, message_id: int | None = None,
+) -> None:
+    """Record why the bot did or didn't reply. Best-effort: a logging
+    failure must never break the message pipeline, same rule as every
+    other post-send bookkeeping call in this file."""
+    try:
+        await rt.activity.log(chat_id, event_type, detail, message_id=message_id)
+    except Exception as exc:
+        log.warning("activity log failed for %s: %s", chat_id, exc)
 
 
 async def _reply_automod_media(msg: Message, media: MediaResponse) -> None:
@@ -493,9 +488,12 @@ async def _handle_meme_request(
 
 def build_router(rt: Runtime) -> Router:
     r = Router(name="chat")
+    # Who this deployment is: its names, and whether Dale's own canned
+    # lines and GIFs are his to use. Fixed for the life of the process.
+    ident = identity.from_settings(rt.settings)
 
     # Reply-to-bot "bad bot" / "bad dale" deletion shortcut.
-    @r.message(F.text.lower().in_({"bad bot", "bad pedro", "bad dude", "bad duder", "bad dale", "bad boomhauer", "bad rusty"}))
+    @r.message(F.text.lower().in_(ident.rebuke_phrases))
     async def remove_message(msg: Message) -> None:
         if not msg.reply_to_message:
             return
@@ -674,7 +672,10 @@ def build_router(rt: Runtime) -> Router:
             return  # media we couldn't see and nothing typed
 
         # Auto-grudge: insults toward the bot earn a 24h snark flag.
-        if await maybe_auto_grudge(rt.db, msg.chat.id, from_user_id, typed):
+        if await maybe_auto_grudge(
+            rt.db, msg.chat.id, from_user_id, typed,
+            names_pattern=ident.names_pattern,
+        ):
             log.info(
                 "Auto-grudge added: chat=%s user=%s text=%r",
                 msg.chat.id, from_user_id, typed[:80],
@@ -706,11 +707,18 @@ def build_router(rt: Runtime) -> Router:
                     log.warning("media library failed in %s: %s", msg.chat.id, exc)
 
         # "thanks pedro" → passive-aggressive line. Intercepts before the
-        # normal flow so we don't also run an AI reply.
-        if cfg.response_policy != "commands" and _THANKS_PEDRO_RE.search(typed):
+        # normal flow so we don't also run an AI reply. Dale's names and
+        # Dale's lines, so Dale only: another bot thanked by name just
+        # gets an ordinary reply.
+        if (
+            ident.dale_flavor
+            and cfg.response_policy != "commands"
+            and _THANKS_PEDRO_RE.search(typed)
+        ):
             line = random.choice(_THANKS_PEDRO_LINES)
             sent = await msg.reply(line, disable_notification=True)
             track(msg.chat.id, sent.message_id, line, replied_to_user_id=from_user_id)
+            await _log_activity(rt, msg.chat.id, "thanks_pedro", line)
             if cfg.memory_enabled:
                 try:
                     await rt.memory.record_message(
@@ -731,22 +739,28 @@ def build_router(rt: Runtime) -> Router:
         # 'stonks' → the actual image). Fixed intercept; skip the AI reply.
         # Not written to memory — canned bits aren't conversational context.
         automod = (
-            _automod_response(typed)
+            _automod_response(typed, dale_gifs=ident.dale_flavor)
             if cfg.automod_enabled and cfg.response_policy != "commands"
             else None
         )
         if automod is not None:
             if isinstance(automod, MediaResponse):
                 await _reply_automod_media(msg, automod)
+                kind = "media"
             elif isinstance(automod, DaleGif):
                 await dale.send_random(
                     rt.db, msg, automod.tag,
                     caption=automod.caption or None,
                     fallback=automod.fallback,
                 )
+                kind = "gif"
             else:
                 sent = await msg.reply(automod, disable_notification=True)
                 track(msg.chat.id, sent.message_id, automod)
+                kind = "text"
+            await _log_activity(
+                rt, msg.chat.id, "automod", f"{kind} trigger on {typed[:60]!r}",
+            )
             return
 
         # Ambient emoji reaction (rare, never on commands or our own intercepts).
@@ -770,6 +784,11 @@ def build_router(rt: Runtime) -> Router:
                 reacted = True
             except Exception as exc:
                 log.debug("Reaction failed: %s", exc)
+            if reacted:
+                await _log_activity(
+                    rt, msg.chat.id, "reaction", f"{emoji} on {text[:60]!r}",
+                    message_id=msg.message_id,
+                )
             if reacted and cfg.memory_enabled:
                 # A synthetic assistant turn so the reaction shows up in the
                 # bot's own history. message_id=None is the schema's sanctioned
@@ -833,7 +852,7 @@ def build_router(rt: Runtime) -> Router:
         incoming = IncomingMessage(
             text=typed,
             has_mention_of_bot=(
-                _has_bot_mention(msg, bot_username) or _mentions_pedro(typed)
+                _has_bot_mention(msg, bot_username) or _mentions_pedro(typed, ident)
             ),
             is_reply_to_bot=_is_reply_to_bot(msg, bot_id),
             is_command=False,
@@ -854,7 +873,7 @@ def build_router(rt: Runtime) -> Router:
                 rt, msg.chat.id,
                 speaker=display_name(msg.from_user) if msg.from_user else None,
                 text=typed, memory_enabled=cfg.memory_enabled,
-                user_id=from_user_id,
+                user_id=from_user_id, bot_name=ident.name,
             )
         ):
             incoming = replace(incoming, has_mention_of_bot=True)
@@ -866,9 +885,11 @@ def build_router(rt: Runtime) -> Router:
         # silence, not noise. Text only: since vision, stickers and photos
         # reach this point too, and a sticker volley rolling the dice on
         # every frame turned "occasional" into "constant" — and a GIF fired
-        # back at a GIF reads as a reply, not a stray.
+        # back at a GIF reads as a reply, not a stray. The library is GIFs
+        # of Dale, so another bot never rolls for one.
         if (
             typed
+            and ident.dale_flavor
             and cfg.automod_enabled
             and cfg.response_policy != "commands"
             and not incoming.has_mention_of_bot
@@ -889,6 +910,9 @@ def build_router(rt: Runtime) -> Router:
                     await maybe_summarize(
                         rt.memory, rt.openai, rt.settings, msg.chat.id,
                     )
+                await _log_activity(
+                    rt, msg.chat.id, "ambient_gif", f"random roll on {typed[:60]!r}",
+                )
                 return
 
         if not should_respond(
@@ -897,15 +921,19 @@ def build_router(rt: Runtime) -> Router:
         ):
             # "Taking credit": when a positive line is spotted, Pedro
             # occasionally inserts itself even when policy wouldn't reply.
-            # Skipped under the explicit commands-only opt-out.
+            # Skipped under the explicit commands-only opt-out, and for any
+            # bot that isn't Dale: the lines are his.
+            credit_taken = False
             if (
-                cfg.response_policy != "commands"
+                ident.dale_flavor
+                and cfg.response_policy != "commands"
                 and _POSITIVITY_RE.search(typed)
                 and random.random() < _CREDIT_PROBABILITY
             ):
                 line = random.choice(_CREDIT_LINES)
                 sent = await msg.answer(line, disable_notification=True)
                 track(msg.chat.id, sent.message_id, line)
+                credit_taken = True
                 if cfg.memory_enabled:
                     try:
                         await rt.memory.record_message(
@@ -920,6 +948,15 @@ def build_router(rt: Runtime) -> Router:
             # Trigger background summarization opportunistically even when we don't reply.
             if cfg.memory_enabled:
                 await maybe_summarize(rt.memory, rt.openai, rt.settings, msg.chat.id)
+            if credit_taken:
+                await _log_activity(
+                    rt, msg.chat.id, "credit_line", f"on {typed[:60]!r}",
+                )
+            else:
+                await _log_activity(
+                    rt, msg.chat.id, "no_reply",
+                    f"policy={cfg.response_policy} text={typed[:60]!r}",
+                )
             return
 
         # "dale send that pic of the grill" → hand back a picture from this
@@ -1006,6 +1043,16 @@ def build_router(rt: Runtime) -> Router:
                 member.name, len(samples), msg.chat.id,
             )
 
+        # His records: offered whenever the provider can run tools, except
+        # during an impersonation (that turn is somebody else's voice).
+        # Scoped by the CHAT, not the speaker — a group's tool set must
+        # stay byte-identical across speakers or its prompt cache rebuilds
+        # from scratch, and one group's records never leak into another.
+        tools_on = persona_override is None and rt.openai.supports_tools
+        owner_dm = tools_on and introspection.is_owner_dm(
+            msg.chat.id, msg.chat.type, rt.settings.owner_id,
+        )
+
         ctx = await build_context(
             store=rt.memory,
             settings=rt.settings,
@@ -1019,21 +1066,47 @@ def build_router(rt: Runtime) -> Router:
             extra_system=extra,
             memory_enabled=cfg.memory_enabled,
             persona_override=persona_override,
-            capabilities=capability_brief(cfg),
+            capabilities=capability_brief(
+                cfg, check_records=tools_on, all_chats=owner_dm,
+                dale_flavor=ident.dale_flavor,
+            ),
         )
         # 500 used to sit here — room for a small essay. The prompt now
         # carries its own judgment on when a reply should run long; this
         # is a backstop against a runaway generation, not the mechanism
         # doing the actual work, so it stays generous enough to never cut
         # off a genuine rant.
-        reply = await rt.openai.chat(
-            ctx.messages, max_tokens=300, chat_id=msg.chat.id,
-        )
+        if tools_on:
+            async def _run_tool(name: str, args: dict) -> tuple[str, bool]:
+                return await introspection.run_tool(
+                    rt, chat_id=msg.chat.id, owner_dm=owner_dm,
+                    name=name, args=args,
+                )
+
+            reply = await rt.openai.chat_with_tools(
+                ctx.messages,
+                tools=introspection.tools_for(owner_dm=owner_dm),
+                run_tool=_run_tool, max_tokens=300, chat_id=msg.chat.id,
+            )
+        else:
+            reply = await rt.openai.chat(
+                ctx.messages, max_tokens=300, chat_id=msg.chat.id,
+            )
         if not reply:
             return
 
         sent = await msg.answer(reply, disable_notification=True)
         track(msg.chat.id, sent.message_id, reply, replied_to_user_id=from_user_id)
+        if incoming.is_reply_to_bot:
+            reason = "reply-to"
+        elif incoming.has_mention_of_bot:
+            reason = "addressed"
+        else:
+            reason = "ambient-roll"
+        await _log_activity(
+            rt, msg.chat.id, "ai_reply", f"{reason}: {typed[:60]!r}",
+            message_id=sent.message_id,
+        )
 
         # Post-send: never let a DB hiccup crash the handler after the user
         # already saw the reply — log it and move on (else stored history

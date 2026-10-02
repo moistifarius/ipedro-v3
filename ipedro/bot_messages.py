@@ -11,7 +11,7 @@ this module only cares about tracking what the bot sent.
 
 from __future__ import annotations
 
-from ipedro import addressed
+from ipedro import addressed, hub
 
 import time
 from collections import deque
@@ -34,7 +34,7 @@ _recent_sends: dict[int, deque[TrackedMessage]] = {}
 
 def track(
     chat_id: int, message_id: int | None, text: str | None, *,
-    replied_to_user_id: int | None = None,
+    replied_to_user_id: int | None = None, hub_depth: int = 0,
 ) -> None:
     """Record that the bot just sent `message_id` to `chat_id`.
 
@@ -58,6 +58,13 @@ def track(
     # window either. Doing it at the main AI reply alone used to mean an
     # ambient bit's own "why?" follow-up went unanswered; that's fixed.
     addressed.note_bot_reply(chat_id, replied_to_user_id=replied_to_user_id)
+    # …and the one place every bot's group lines pass through, so it's
+    # where the other bots get to hear them (ipedro/hub.py). `hub_depth`
+    # is set only when this line answered another bot.
+    hub.publish_soon(
+        chat_id, message_id, text,
+        reply_to_user_id=replied_to_user_id, depth=hub_depth,
+    )
     if message_id is None:
         return
     snippet = (text or "")[:60].replace("\n", " ")

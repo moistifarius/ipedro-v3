@@ -104,8 +104,9 @@ def _rt_with(
     return SimpleNamespace(
         settings=settings, bot=bot, db=db,
         chats=chats, users=users, duckhunt=duckhunt,
-        openai=SimpleNamespace(chat=AsyncMock(return_value="PASS: ok")),
+        openai=SimpleNamespace(chat=AsyncMock(return_value="PASS: ok"), supports_tools=False),
         memory=SimpleNamespace(),
+        activity=SimpleNamespace(log=AsyncMock()),
     )
 
 
