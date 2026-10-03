@@ -28,11 +28,13 @@ with its own memory. Make the account in @BotFather (and turn its Group
 Privacy off), then DM Dale:
 
     /newbot 123456789:AAH... Hank, hank hill
-    You are Hank Hill. You sell propane and propane accessories.
+    sells propane, can't stand Luke's crypto talk
 
 The first line is the token, its name, and any other names it answers
-to; the lines after are its persona. Dale deletes the message (it holds
-the token) and registers the bot. The `bots` service in
+to; the lines after are a short description. Dale writes its persona
+from that and from what the bots remember about whoever and whatever it
+mentions, deletes the message (it holds the token), and registers the
+bot. The `bots` service in
 `docker/docker-compose.yml` (`python -m ipedro.supervisor`) then creates
 its database (`ipedro_bot_<id>` on the same Postgres) and runs it.
 `/bots` shows what's running; `/bot_stop`, `/bot_start` and

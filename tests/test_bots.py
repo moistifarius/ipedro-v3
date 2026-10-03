@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from ipedro import bots, identity, supervisor
+from ipedro import bots, identity, persona_gen, supervisor
 from ipedro.handlers import bots as bots_h
 
 TOKEN = "7123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw1"
@@ -40,18 +40,18 @@ def _record(row: bots.BotRow) -> dict:
 
 # ── parsing /newbot ──────────────────────────────────────────────────────────
 
-def test_parse_newbot_reads_token_names_and_persona():
+def test_parse_newbot_reads_token_names_and_description():
     req = bots.parse_newbot(
-        f"/newbot {TOKEN} Hank, Hank Hill, hank\nYou are Hank Hill.\nPropane."
+        f"/newbot {TOKEN} Hank, Hank Hill, hank\nsells propane,\n  hates Luke's crypto talk"
     )
     assert req.token == TOKEN
     assert req.name == "Hank"
     assert req.aliases == "hank, hank hill"
-    assert req.persona == "You are Hank Hill.\nPropane."
+    assert req.description == "sells propane, hates Luke's crypto talk"
 
 
-def test_parse_newbot_without_a_persona():
-    assert bots.parse_newbot(f"/newbot {TOKEN} Hank").persona is None
+def test_parse_newbot_without_a_description():
+    assert bots.parse_newbot(f"/newbot {TOKEN} Hank").description is None
 
 
 @pytest.mark.parametrize("text", [
@@ -156,6 +156,7 @@ async def test_register_returns_none_when_the_bot_is_already_there():
     req = bots.parse_newbot(f"/newbot {TOKEN} Hank")
     assert await bots.register(
         db, req, telegram_id=1, username="HankBot", created_by=OWNER,
+        persona="You are Hank.",
     ) is None
     sql = db.fetchrow.await_args.args[0]
     assert "WHERE bot_registry.status = 'removed'" in sql
@@ -427,7 +428,7 @@ def _said(msg) -> list[str]:
 def cmds(monkeypatch):
     """The bots router against a fake registry; returns its handlers."""
     state = SimpleNamespace(
-        registered=[], status=[], rows=[_row()],
+        registered=[], status=[], rows=[_row()], personas=[], built=[],
         me=SimpleNamespace(id=7123456789, username="HankBot",
                            can_read_all_group_messages=True),
         heartbeat=datetime.now(timezone.utc),
@@ -440,7 +441,17 @@ def cmds(monkeypatch):
 
     async def register(db, req, **kw):
         state.registered.append((req, kw))
-        return _row(name=req.name, aliases=req.aliases, persona=req.persona)
+        return _row(name=req.name, aliases=req.aliases, persona=kw["persona"])
+
+    async def set_persona(db, bot_id, persona, description):
+        state.personas.append((bot_id, persona, description))
+
+    async def build_persona(rt, *, name, aliases, description):
+        state.built.append((name, aliases, description))
+        return persona_gen.PersonaDraft(
+            f"You are {name}, written from a description.", {"Luke": 3, "crypto": 0},
+            True,
+        )
 
     async def resolve(db, key):
         k = key.strip().lstrip("#@").lower()
@@ -458,8 +469,9 @@ def cmds(monkeypatch):
 
     monkeypatch.setattr(bots_h, "get_me", AsyncMock(side_effect=get_me))
     monkeypatch.setattr(bots, "register", register)
-    monkeypatch.setattr(bots, "find_by_telegram_id",
-                        AsyncMock(return_value=_row(status="stopped")))
+    monkeypatch.setattr(bots, "find_by_telegram_id", AsyncMock(return_value=None))
+    monkeypatch.setattr(bots, "set_persona", set_persona)
+    monkeypatch.setattr(persona_gen, "build_persona", build_persona)
     monkeypatch.setattr(bots, "resolve", resolve)
     monkeypatch.setattr(bots, "set_status", set_status)
     monkeypatch.setattr(bots, "list_bots", list_bots)
@@ -480,20 +492,36 @@ def cmds(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_newbot_registers_and_never_echoes_the_token(cmds):
-    msg = _msg(f"/newbot {TOKEN} Hank, hank hill\nYou are Hank Hill.")
+    msg = _msg(f"/newbot {TOKEN} Hank, hank hill\nsells propane, hates Luke")
     await cmds.h["newbot"](msg)
     msg.delete.assert_awaited_once()                 # the token is gone first
+    assert cmds.built == [("Hank", "hank, hank hill", "sells propane, hates Luke")]
     req, kw = cmds.registered[0]
-    assert (req.name, req.aliases, req.persona) == (
-        "Hank", "hank, hank hill", "You are Hank Hill.",
+    assert (req.name, req.aliases, req.description) == (
+        "Hank", "hank, hank hill", "sells propane, hates Luke",
     )
     assert kw == {"telegram_id": 7123456789, "username": "HankBot",
-                  "created_by": OWNER}
+                  "created_by": OWNER,
+                  "persona": "You are Hank, written from a description."}
     said = _said(msg)
     msg.reply.assert_not_awaited()                   # its message is deleted
-    assert "Added Hank (@HankBot) as bot #3" in said[0]
+    assert said[0].startswith("Writing Hank's persona")   # it takes a moment
+    final = said[-1]
+    assert "Added Hank (@HankBot) as bot #3" in final
+    assert "You are Hank, written from a description." in final
+    assert "Drew on what the chats remember about: Luke (3)." in final
+    assert "/bot_persona #3" in final
     assert all(TOKEN not in s for s in said)
     assert TOKEN not in str(cmds.rt.command_log.add.await_args)
+
+
+@pytest.mark.asyncio
+async def test_a_removed_bot_comes_back_with_a_fresh_persona(cmds, monkeypatch):
+    monkeypatch.setattr(bots, "find_by_telegram_id",
+                        AsyncMock(return_value=_row(status="removed")))
+    msg = _msg(f"/newbot {TOKEN} Hank\nback again")
+    await cmds.h["newbot"](msg)
+    assert len(cmds.registered) == 1 and cmds.built
 
 
 @pytest.mark.asyncio
@@ -501,7 +529,7 @@ async def test_newbot_warns_when_group_privacy_is_on(cmds):
     cmds.me.can_read_all_group_messages = False
     msg = _msg(f"/newbot {TOKEN} Hank")
     await cmds.h["newbot"](msg)
-    assert "Group Privacy is ON" in _said(msg)[0]
+    assert "Group Privacy is ON" in _said(msg)[-1]
 
 
 @pytest.mark.asyncio
@@ -509,7 +537,7 @@ async def test_newbot_says_so_when_the_supervisor_isnt_running(cmds):
     cmds.heartbeat = datetime.now(timezone.utc) - timedelta(minutes=10)
     msg = _msg(f"/newbot {TOKEN} Hank")
     await cmds.h["newbot"](msg)
-    assert "supervisor isn't running" in _said(msg)[0]
+    assert "supervisor isn't running" in _said(msg)[-1]
 
 
 @pytest.mark.asyncio
@@ -539,7 +567,7 @@ async def test_a_token_that_couldnt_be_deleted_gets_a_warning(cmds):
     msg = _msg(f"/newbot {TOKEN} Hank")
     msg.delete = AsyncMock(side_effect=RuntimeError("can't"))
     await cmds.h["newbot"](msg)
-    assert "couldn't delete your message" in _said(msg)[0]
+    assert "couldn't delete your message" in _said(msg)[-1]
 
 
 @pytest.mark.asyncio
@@ -563,10 +591,42 @@ async def test_newbot_with_a_token_telegram_rejects(cmds):
 
 @pytest.mark.asyncio
 async def test_newbot_wont_replace_a_registered_bot(cmds, monkeypatch):
-    monkeypatch.setattr(bots, "register", AsyncMock(return_value=None))
-    msg = _msg(f"/newbot {TOKEN} Hank")
+    monkeypatch.setattr(bots, "find_by_telegram_id",
+                        AsyncMock(return_value=_row(status="stopped")))
+    msg = _msg(f"/newbot {TOKEN} Hank\nsomeone new")
     await cmds.h["newbot"](msg)
     assert "already bot #3 (stopped)" in _said(msg)[0]
+    assert cmds.built == [] and cmds.registered == []   # no persona written for nothing
+
+
+@pytest.mark.asyncio
+async def test_bot_persona_shows_the_current_one(cmds):
+    cmds.rows = [_row(description="sells propane")]
+    msg = _msg("/bot_persona hank")
+    await cmds.h["persona_cmd"](msg)
+    text = _said(msg)[0]
+    assert text.startswith("#3 Hank, described as: sells propane")
+    assert "You are Hank Hill." in text
+    assert cmds.built == []
+
+
+@pytest.mark.asyncio
+async def test_bot_persona_rewrites_it_from_a_new_description(cmds):
+    msg = _msg("/bot_persona #3 a   grumpy propane guy\nwho loves Luke")
+    await cmds.h["persona_cmd"](msg)
+    assert cmds.built == [("Hank", "hank, hank hill", "a grumpy propane guy who loves Luke")]
+    assert cmds.personas == [(3, "You are Hank, written from a description.",
+                              "a grumpy propane guy who loves Luke")]
+    final = _said(msg)[-1]
+    assert "Hank's new persona" in final and "restarts with it" in final
+
+
+@pytest.mark.asyncio
+async def test_bot_persona_needs_one_bot(cmds):
+    msg = _msg("/bot_persona bobby a new one")
+    await cmds.h["persona_cmd"](msg)
+    assert "No single bot called 'bobby'" in _said(msg)[0]
+    assert cmds.personas == []
 
 
 @pytest.mark.asyncio
@@ -616,7 +676,9 @@ async def test_an_unknown_bot_is_named_back(cmds):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("handler", ["list_cmd", "stop_cmd", "start_cmd", "remove_cmd"])
+@pytest.mark.parametrize("handler", [
+    "list_cmd", "stop_cmd", "start_cmd", "remove_cmd", "persona_cmd",
+])
 async def test_management_is_owner_only(cmds, handler):
     msg = _msg("/bots hank", user_id=999)
     await cmds.h[handler](msg)

@@ -375,6 +375,10 @@ COMMANDS: tuple[Command, ...] = (
             "/newbot <token> <Name>[, aliases] (persona on later lines)",
             "Owner only, in DM: add another bot — its own Telegram "
             "account, process and memory, run by the supervisor."),
+    Command("bot_persona",  "ai_admin", "/bot_persona",
+            "/bot_persona <#n or name> [new description]",
+            "Owner only, in DM: show another bot's persona, or rewrite it "
+            "from a new description and the chats' memory."),
     Command("bots",         "ai_admin", "/bots",
             "/bots · /bot_stop|/bot_start|/bot_remove <#n or name>",
             "Owner only, in DM: list the other bots and whether they're "
@@ -400,6 +404,10 @@ COMMANDS: tuple[Command, ...] = (
             "/cmdlog",
             "Command audit log from the DB.",
             action="mgm:debug:cmdlog"),
+    Command("debug_activity", "debug", "/activity",
+            "/activity [N] [chat_id] [event_type]",
+            "Why the bot did or didn't answer: every reply, deliberate "
+            "silence, canned line, GIF and reaction, with its reason."),
     Command("debug_toggles","debug", "/debug_toggle",
             "/debug_toggle [name] [on|off]",
             "Admin-scoped duckhunt cheats: always_hit, always_miss, "
