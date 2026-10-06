@@ -36,7 +36,9 @@ from ipedro.logging_setup import configure_logging
 from ipedro.celebrations import run_celebrations_loop
 from ipedro.comic import run_comic_loop
 from ipedro.kv import kv_get
+from ipedro.identity import from_settings as identity_from_settings
 from ipedro.identity import starting_persona
+from ipedro.plain_flavor import PlainFlavorMiddleware
 from ipedro.personas import set_default_prompt, set_master_prompt_override
 from ipedro.memory.store import MemoryStore
 from ipedro.openai_client import OpenAIClient
@@ -49,12 +51,21 @@ from ipedro.silenced_chats import load_all as load_silenced_chats
 log = logging.getLogger(__name__)
 
 
+def install_flavor(bot: Bot, settings: Settings) -> None:
+    """A bot that isn't Dale never says his catchphrases, wherever the
+    canned line that holds one lives (see ipedro/plain_flavor.py)."""
+    if not identity_from_settings(settings).dale_flavor:
+        bot.session.middleware(PlainFlavorMiddleware())
+
+
 async def build_runtime(settings: Settings) -> Runtime:
     bot = Bot(
         token=settings.telegram_bot_token,
         default=DefaultBotProperties(parse_mode=None),
     )
-    db = await Database.connect(settings.database_url)
+    install_flavor(bot, settings)
+
+    db = await Database.connect(settings.database_url, max_size=settings.db_pool_max)
     set_db(db)
     await apply_schema(db, settings.openai_embedding_dim)
     pgvector_available = await has_pgvector(db)
@@ -235,6 +246,14 @@ async def run() -> None:
             dp.start_polling(
                 rt.bot,
                 allowed_updates=dp.resolve_used_update_types(),
+                # Our own SIGINT/SIGTERM handlers above set `stop`. aiogram's
+                # default (handle_signals=True) replaces them with its own,
+                # which stops polling behind our back: `stop` never fired,
+                # the stop_polling() below then raised "Polling is not
+                # started" on every `docker stop`, and a polling task that
+                # died for a real reason (a revoked token) was reported as
+                # that instead.
+                handle_signals=False,
             ),
             name="aiogram-polling",
         )
@@ -245,12 +264,14 @@ async def run() -> None:
             return_when=asyncio.FIRST_COMPLETED,
         )
         stop.set()
-        await dp.stop_polling()
         for t in done:
             if not t.cancelled() and t.exception() is not None:
                 log.error(
                     "Task %r exited with error: %r", t.get_name(), t.exception(),
                 )
+        if not polling.done():
+            await dp.stop_polling()
+        await _drain_handlers(dp)
     finally:
         stop.set()
         if stop_waiter is not None:
@@ -271,6 +292,23 @@ async def run() -> None:
             pass
         await rt.db.close()
         log.info("Shutdown complete.")
+
+
+async def _drain_handlers(dp: Dispatcher, timeout: float = 20.0) -> None:
+    """Let the handlers already running finish before the bot session and
+    the database go away under them. aiogram stops taking updates on
+    stop_polling but doesn't wait for the ones in flight, and Telegram has
+    already moved the offset past them, so a reply cut off here is lost for
+    good. Bounded: a stuck handler can't hold up shutdown."""
+    pending = {t for t in getattr(dp, "_handle_update_tasks", ()) if not t.done()}
+    if not pending:
+        return
+    log.info("Waiting up to %.0fs for %d in-flight handler(s)…", timeout, len(pending))
+    _, still = await asyncio.wait(pending, timeout=timeout)
+    for t in still:
+        t.cancel()
+    if still:
+        log.warning("Cancelled %d handler(s) that didn't finish in time.", len(still))
 
 
 def main() -> None:

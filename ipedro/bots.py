@@ -34,6 +34,7 @@ _DB_NAME_RE = re.compile(r"^ipedro_bot_\d+$")
 _NAME_MAX = 64
 
 HEARTBEAT_KEY = "supervisor_heartbeat"
+CHILD_DB_POOL_MAX = 4
 
 # What a bot must never inherit from the supervisor's environment, which is
 # Dale's: his token and database (set per bot below), his identity (ditto),
@@ -169,6 +170,9 @@ def child_env(
         "BOT_ALIASES": row.aliases,
         "BOT_FLAVOR": "plain",
         "MANAGES_BOTS": "false",
+        # Small pools: each bot adds a pool, a hub connection and a listener
+        # to one Postgres (default max_connections 100).
+        "DB_POOL_MAX": str(CHILD_DB_POOL_MAX),
         # Dale's own database is the hub where the bots hear each other.
         "HUB_DATABASE_URL": base_database_url,
     })

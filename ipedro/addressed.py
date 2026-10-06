@@ -101,6 +101,19 @@ def in_conversation(chat_id: int, *, now: float | None = None) -> bool:
     )
 
 
+def lines_since_reply(chat_id: int) -> int:
+    """How many lines have gone by since he last spoke, counting the one
+    being looked at: 1 means it is the very next line in the chat."""
+    w = _windows.get(chat_id)
+    return w.since_reply if w is not None else 0
+
+
+def _is_next_line(chat_id: int) -> bool:
+    """Is this message the very next one after his reply? Callers that note
+    the incoming message first (chat.py does) see 1; ones that don't see 0."""
+    return lines_since_reply(chat_id) <= 1
+
+
 def is_his_turn(chat_id: int, user_id: int | None) -> bool:
     """He just personally replied to THIS person — it's their turn.
 
@@ -171,8 +184,15 @@ _ROOM_QUESTION_RE = re.compile(
 _AT_SOMEONE_RE = re.compile(r"^\s*@\w+")
 
 
-def quick_verdict(text: str, *, in_conversation: bool) -> bool | None:
+def quick_verdict(
+    text: str, *, in_conversation: bool, next_line: bool = True,
+) -> bool | None:
     """True / False when the text settles it, None when a model should look.
+
+    ``next_line``: this message came straight after his reply, with nobody
+    in between. Only then is a bare "nah" / "so" / "why" certainly a
+    reaction to HIM; a few lines later it may be aimed at whoever spoke in
+    between, so it goes to the classifier, which can see the lines.
 
     Every wrong True is the bot butting in, so nothing here ever guesses
     True except a crisp follow-up opener. Every None costs a classifier
@@ -187,7 +207,7 @@ def quick_verdict(text: str, *, in_conversation: bool) -> bool | None:
     if _AT_SOMEONE_RE.match(text):
         return False
     if in_conversation:
-        if _FOLLOW_UP_RE.match(text):
+        if next_line and _FOLLOW_UP_RE.match(text):
             return True
         return None
     # Quiet: only an explicit reference to him, or a question plainly put
@@ -244,9 +264,18 @@ async def wants_reply(
 ) -> bool:
     """Does this un-named, un-replied message want the bot to answer?"""
     stripped = (text or "").strip()
-    if stripped and not _AT_SOMEONE_RE.match(stripped) and is_his_turn(chat_id, user_id):
+    next_line = _is_next_line(chat_id)
+    # His turn, but only while it is still the next line: later than that,
+    # whoever he answered may be talking to someone else, and re-arming on
+    # every reply made this a chain that answered everything they typed.
+    if (
+        stripped and next_line and not _AT_SOMEONE_RE.match(stripped)
+        and is_his_turn(chat_id, user_id)
+    ):
         return True
-    verdict = quick_verdict(text, in_conversation=in_conversation(chat_id))
+    verdict = quick_verdict(
+        text, in_conversation=in_conversation(chat_id), next_line=next_line,
+    )
     if verdict is not None:
         return verdict
     recent: list[tuple[str, str]] = []

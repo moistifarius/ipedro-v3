@@ -120,3 +120,29 @@ def starting_persona(settings) -> str | None:
         return persona
     ident = from_settings(settings)
     return None if ident.dale_flavor else f"You are {ident.name}."
+
+
+# ── keeping Dale's catchphrases out of other bots' mouths ────────────────────
+#
+# Dale's canned lines open with "Sh-sha." and drop "Pocket sand!" all over
+# duckhunt, the meme hunt, /onthisday and a few replies. A bot that isn't
+# Dale must not say them, and the lines live in a dozen modules. Rather than
+# a second pool of lines at every site, plain bots run their outgoing text
+# through plainify (ipedro/plain_flavor.py installs it on the bot's session),
+# which takes the catchphrase out and leaves the sentence.
+
+_DALE_ISMS_RE = re.compile(
+    # "Sh-sha. " / "sh-sha! " anywhere in a line
+    r"\bsh+-?sha+\b[.!,]?\s*"
+    # "Pocket sand! " plus its aside: "...sorry, reflex. "
+    r"|\bpocket\s+sand!\s*(?:\.\.\.[^.!?\n]*[.!?]\s*)?",
+    re.IGNORECASE,
+)
+
+
+def plainify(text: str) -> str:
+    """`text` without Dale's catchphrases. Never returns an empty string:
+    a line that was nothing but the catchphrase comes back unchanged
+    rather than as a blank message."""
+    out = _DALE_ISMS_RE.sub("", text).strip()
+    return out if out else text

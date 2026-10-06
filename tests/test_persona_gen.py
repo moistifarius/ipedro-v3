@@ -184,3 +184,14 @@ async def test_a_failing_lookup_costs_only_that_lookup(other_bots):
     )
     assert draft.generated
     assert draft.found == {"Luke": 1}                        # Peggy's still counted
+
+
+@pytest.mark.asyncio
+async def test_nothing_said_in_a_private_chat_reaches_a_persona():
+    """The new bot speaks from this text in groups. A DM is one person
+    talking to one bot: every lookup is limited to group chats."""
+    db = FakeMemory(people=[{"user_id": 7, "name": "Luke"}])
+    await persona_gen.notes_from(db, "Luke", [0.1], vector=True)
+    lookups = [sql for sql, _ in db.queries if "FROM users" not in sql]
+    assert len(lookups) == 3
+    assert all("chat_id < 0" in sql for sql in lookups), lookups

@@ -69,6 +69,11 @@ class Settings(BaseSettings):
     # supervisor starts every other bot with it off, since their DMs
     # aren't where the registry lives.
     manages_bots: bool = True
+    # Largest pool of Postgres connections this process may hold. Every bot
+    # (Dale and each /newbot bot) holds its own pool plus two for the hub,
+    # against one server whose max_connections defaults to 100; the
+    # supervisor starts the other bots with a small one.
+    db_pool_max: int = 10
     # Where the bots hear each other (ipedro/hub.py): Dale's database. Unset
     # means this bot's own DATABASE_URL, which is right for Dale; the
     # supervisor points every other bot at Dale's.

@@ -688,3 +688,10 @@ async def test_management_is_owner_only(cmds, handler):
     await cmds.h[handler](group)
     assert _said(group) == []
     assert cmds.status == []
+
+
+def test_child_bots_get_a_small_connection_pool():
+    """Every bot adds a pool, a hub connection and a listener to one
+    Postgres (default max_connections 100)."""
+    env = bots.child_env({"DB_POOL_MAX": "50"}, _row(), "postgresql://u:p@h/ipedro")
+    assert env["DB_POOL_MAX"] == str(bots.CHILD_DB_POOL_MAX) == "4"

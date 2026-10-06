@@ -93,7 +93,11 @@ def _clip(text: str) -> str:
 async def notes_from(
     db, subject: str, embedding: list[float] | None, *, vector: bool,
 ) -> list[str]:
-    """What one bot's memory holds about `subject`, most telling first."""
+    """What one bot's memory holds about `subject`, most telling first.
+
+    Group chats only (a negative chat id). A private chat is one person
+    talking to a bot, and the new bot will speak from this text in groups:
+    nothing said in a DM may end up in its persona."""
     notes: list[str] = []
     exact = _escape_like(subject)
     people = await db.fetch(
@@ -109,14 +113,14 @@ async def notes_from(
     )
     for person in people:
         rows = await db.fetch(
-            "SELECT fact FROM facts WHERE user_id = $1 "
+            "SELECT fact FROM facts WHERE user_id = $1 AND chat_id < 0 "
             "ORDER BY created_at DESC LIMIT $2",
             person["user_id"], _PER_SUBJECT_PER_DB,
         )
         notes += [f"(about {person['name']}) {_clip(r['fact'])}" for r in rows]
     rows = await db.fetch(
         "SELECT fact FROM facts WHERE fact ILIKE $1 ESCAPE '!' "
-        "ORDER BY created_at DESC LIMIT $2",
+        "AND chat_id < 0 ORDER BY created_at DESC LIMIT $2",
         f"%{exact}%", _PER_SUBJECT_PER_DB,
     )
     notes += [_clip(r["fact"]) for r in rows]
@@ -128,7 +132,7 @@ async def notes_from(
               FROM embeddings e
               LEFT JOIN messages m ON e.ref_kind = 'message' AND m.id = e.ref_id
               LEFT JOIN users u ON u.user_id = m.user_id
-             WHERE e.embedding IS NOT NULL
+             WHERE e.embedding IS NOT NULL AND e.chat_id < 0
              ORDER BY e.embedding <=> $1
              LIMIT $2
             """,

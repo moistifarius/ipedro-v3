@@ -196,3 +196,20 @@ async def test_build_uses_fallback_header_when_ai_unavailable():
     assert result is not None
     # A non-empty fallback header still ships.
     assert result.header.strip()
+
+
+@pytest.mark.asyncio
+async def test_the_selection_leaves_out_bots_and_the_bots_own_picture_notes():
+    """'[photo: …]' lines are machine descriptions filed under the human's
+    id, and they're long, so length ordering made them the 'quotes'. Other
+    bots' lines (relayed by the hub) aren't anyone's words either."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from datetime import date, timezone
+    from ipedro.on_this_day import _fetch_day_messages as _fetch_day_quotes
+
+    db = SimpleNamespace(fetch=AsyncMock(return_value=[]))
+    await _fetch_day_quotes(db, -1, date(2026, 5, 1), timezone.utc)
+    sql = db.fetch.await_args.args[0]
+    assert "NOT IN ('/', '[')" in sql
+    assert "u.is_bot IS NOT TRUE" in sql

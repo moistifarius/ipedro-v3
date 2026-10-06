@@ -565,3 +565,44 @@ async def test_a_follow_up_after_an_automod_bit_gets_answered(monkeypatch):
     follow_up.answer = AsyncMock(return_value=SimpleNamespace(message_id=9))
     await handler(follow_up)
     rt.openai.chat.assert_awaited_once()            # …and answers the follow-up
+
+
+# ── only the very next line is certainly for him ────────────────────────────
+
+def test_an_opener_is_a_free_yes_only_on_the_very_next_line():
+    """'nah' / 'so' / 'exactly' right after he spoke is a reaction to him.
+    A few lines later it may be aimed at whoever talked in between, so the
+    classifier (which can read the lines) gets it instead of a blind yes."""
+    assert addressed.quick_verdict("nah", in_conversation=True, next_line=True) is True
+    assert addressed.quick_verdict("nah", in_conversation=True, next_line=False) is None
+    assert addressed.quick_verdict("why?", in_conversation=True, next_line=False) is None
+    # and being outside the window is still a flat no, whatever the line
+    assert addressed.quick_verdict("nah", in_conversation=False, next_line=True) is False
+
+
+@pytest.mark.asyncio
+async def test_his_turn_expires_once_someone_else_has_spoken():
+    """He answered Matt; Matt's NEXT line is for him. Matt's line after
+    two others have spoken might be for them, and re-arming on every
+    reply turned this into a chain that answered everything Matt typed."""
+    classifier = AsyncMock(return_value="NO")
+    rt = SimpleNamespace(
+        openai=SimpleNamespace(cheap_completion=classifier),
+        memory=SimpleNamespace(recent_messages=AsyncMock(return_value=[])),
+    )
+    addressed.note_bot_reply(CHAT, replied_to_user_id=7)
+    addressed.note_user_message(CHAT)            # Matt's very next line
+    assert await addressed.wants_reply(
+        rt, CHAT, speaker="Matt", text="the weather is fine though",
+        memory_enabled=False, user_id=7,
+    ) is True
+    classifier.assert_not_awaited()              # certain, free
+
+    addressed.note_bot_reply(CHAT, replied_to_user_id=7)
+    addressed.note_user_message(CHAT)            # Luke talks
+    addressed.note_user_message(CHAT)            # Matt again, a line later
+    await addressed.wants_reply(
+        rt, CHAT, speaker="Matt", text="the weather is fine though",
+        memory_enabled=False, user_id=7,
+    )
+    classifier.assert_awaited_once()             # no longer a blind yes

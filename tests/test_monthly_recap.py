@@ -264,3 +264,24 @@ async def test_loop_does_not_stamp_on_transient_send_failure():
     await mr._maybe_post(bot, db, _openai(), settings,
                          now=datetime(2026, 8, 2, 10, 0, tzinfo=settings.tzinfo))
     assert not db.stamped        # retries next tick
+
+
+@pytest.mark.asyncio
+async def test_other_bots_are_not_counted_as_people_or_quoted():
+    """Hub-relayed lines from other bots are stored as role='user' under the
+    bot's id; they'd show up as members, top yapper and 'exactly who said
+    it' in the recap."""
+    seen = []
+
+    class _DB(_RecapFakeDB):
+        async def fetch(self, query, *args):
+            seen.append(query)
+            return await super().fetch(query, *args)
+
+    db = _DB(stats_rows=[{"name": "Matt", "n": 3}], quotes_count=0, saved=[],
+             pool=[("Matt", "hello there everyone")])
+    await _build(db, _openai())
+    stats_sql = next(q for q in seen if "GROUP BY m.user_id" in q)
+    pool_sql = next(q for q in seen if "WITH month AS" in q)
+    assert "u.is_bot IS NOT TRUE" in stats_sql
+    assert "u.is_bot IS NOT TRUE" in pool_sql

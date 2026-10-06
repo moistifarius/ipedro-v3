@@ -15,7 +15,8 @@ from ipedro.memory import context_builder
 HANK = identity.from_settings(SimpleNamespace(
     bot_name="Hank", bot_aliases="hank, hank hill", bot_flavor="plain",
 ))
-HANK_ID, DALE_ID, CHAT = 7001, 6001, -1001
+HANK_ID, DALE_ID, CHAT = 7001, 6001, -1001234567890   # a supergroup
+BASIC = -4242                                         # a basic group
 
 
 def _post(**over) -> hub.Post:
@@ -305,3 +306,135 @@ async def test_a_bad_post_doesnt_kill_the_listener():
 
     await asyncio.wait_for(h.listen("dsn", on_post, stop, connect=connect), 5)
     assert seen == [1, 2]
+
+
+# ── basic groups: another bot's message id is from ITS sequence ─────────────
+
+def test_only_supergroups_and_channels_share_message_ids():
+    assert hub.shares_message_ids(-1001234567890)
+    assert hub.shares_message_ids(-1009999999999)
+    assert not hub.shares_message_ids(-4242)
+    assert not hub.shares_message_ids(-999999999999)
+
+
+@pytest.mark.asyncio
+async def test_in_a_basic_group_the_other_bots_id_is_not_used_as_a_key_or_quoted(heard):
+    """Its message_id would collide with one of ours: the messages table's
+    dedupe kept the old row and the embedding upsert overwrote the old
+    message's embedding with the other bot's text."""
+    await heard.hear(_post(chat_id=BASIC, depth=1))
+    recorded = heard.rt.memory.record_message.await_args_list
+    assert recorded[0].kwargs["message_id"] is None
+    send = heard.rt.bot.send_message.await_args
+    assert "reply_parameters" not in send.kwargs      # it would quote the wrong message
+
+
+# ── the chat's own rule decides ──────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_a_reply_only_chat_does_not_answer_being_named(heard):
+    heard.cfg.response_policy = "reply"
+    await heard.hear(_post())                                   # named, not a reply
+    heard.rt.bot.send_message.assert_not_awaited()
+    await heard.hear(_post(id=2, message_id=43, text="no.", reply_to_user_id=HANK_ID))
+    heard.rt.bot.send_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_chat_it_was_removed_from_is_not_a_crash(heard):
+    from aiogram.exceptions import TelegramForbiddenError
+    heard.rt.bot.send_message = AsyncMock(side_effect=TelegramForbiddenError(
+        method=SimpleNamespace(), message="Forbidden: bot was kicked from the group chat"))
+    await heard.hear(_post())                                   # must not raise
+    assert heard.tracked == []
+
+
+# ── the listener's failure modes ─────────────────────────────────────────────
+
+class _FailingListen(FakeConn):
+    async def add_listener(self, channel, cb):
+        raise OSError("LISTEN refused")
+
+
+@pytest.mark.asyncio
+async def test_a_failing_listen_reconnects_instead_of_ending_the_hub(monkeypatch):
+    """add_listener sat outside the try, so one failure there ended the
+    hub for the life of the process and leaked the connection."""
+    monkeypatch.setattr(hub, "_sleep", AsyncMock())
+    h = _hub()
+    h.fetch = AsyncMock(return_value=_post())
+    stop = asyncio.Event()
+    conns = []
+
+    async def connect(dsn):
+        conn = _FailingListen([]) if not conns else FakeConn(["1"])
+        conns.append(conn)
+        return conn
+
+    async def on_post(post):
+        stop.set()
+
+    await asyncio.wait_for(h.listen("dsn", on_post, stop, connect=connect), 5)
+    assert len(conns) == 2
+    conns[0].close.assert_awaited_once()                       # not leaked
+
+
+@pytest.mark.asyncio
+async def test_a_slow_reply_does_not_hold_up_the_next_post():
+    """handle_post is several seconds of model call. Awaited inline it
+    froze delivery of every other post and the keepalive."""
+    h = _hub()
+    posts = {"1": _post(id=1), "2": _post(id=2, message_id=43)}
+    h.fetch = AsyncMock(side_effect=lambda pid: posts[str(pid)])
+    stop = asyncio.Event()
+    gate = asyncio.Event()
+    order = []
+
+    async def on_post(post):
+        if post.id == 1:
+            await gate.wait()                  # the first one is slow
+        order.append(post.id)
+        if post.id == 2:
+            gate.set()
+            stop.set()
+
+    async def connect(dsn):
+        return FakeConn(["1", "2"])
+
+    await asyncio.wait_for(h.listen("dsn", on_post, stop, connect=connect), 5)
+    assert order[0] == 2                       # 2 was not stuck behind 1
+
+
+@pytest.mark.asyncio
+async def test_run_keeps_trying_when_startup_fails_once(monkeypatch):
+    """One hiccup at startup left the bot deaf and mute on the hub until
+    its next restart, with everything else running fine."""
+    from ipedro.db import pool
+    monkeypatch.setattr(hub, "_sleep", AsyncMock())
+    attempts = []
+
+    class _DB:
+        async def close(self):
+            pass
+
+    async def connect(dsn, **kw):
+        attempts.append(kw)
+        if len(attempts) == 1:
+            raise OSError("postgres is still starting")
+        return _DB()
+
+    monkeypatch.setattr(pool.Database, "connect", staticmethod(connect))
+    stop = asyncio.Event()
+
+    async def listen(self, dsn, on_post, stop_, **kw):
+        stop_.set()
+
+    monkeypatch.setattr(hub.Hub, "listen", listen)
+    rt = SimpleNamespace(bot=SimpleNamespace(
+        me=AsyncMock(return_value=SimpleNamespace(id=HANK_ID, username="HankBot"))))
+    settings = SimpleNamespace(database_url="postgresql://x/y", hub_database_url=None,
+                               bot_name="Hank", bot_aliases="hank", bot_flavor="plain",
+                               manages_bots=False)
+    await asyncio.wait_for(hub.run(rt, settings, stop), 5)
+    assert len(attempts) == 2
+    assert attempts[-1]["max_size"] == 1           # one pooled connection

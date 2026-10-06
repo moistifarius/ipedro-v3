@@ -95,6 +95,7 @@ async def _fetch_stats(db: Database, chat_id: int, start_utc, end_utc) -> RecapS
           LEFT JOIN users u ON u.user_id = m.user_id
          WHERE m.chat_id = $1 AND m.role = 'user'
            AND m.created_at >= $2 AND m.created_at < $3
+           AND u.is_bot IS NOT TRUE
          GROUP BY m.user_id, u.first_name, u.last_name, u.username
          ORDER BY n DESC
         """,
@@ -143,6 +144,7 @@ async def _fetch_recap_pool(db: Database, chat_id: int, start_utc, end_utc):
                AND m.created_at >= $2 AND m.created_at < $3
                AND char_length(TRIM(m.content)) >= $4
                AND LEFT(TRIM(m.content), 1) NOT IN ('/', '[')
+               AND u.is_bot IS NOT TRUE
         )
         SELECT name, text FROM month
          WHERE (rn - 1) % GREATEST(CEIL(total::numeric / $5::int)::int, 1) = 0
