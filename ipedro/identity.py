@@ -30,6 +30,12 @@ class Identity:
                                     # other detectors (insults) to embed
     rebuke_phrases: frozenset[str]  # whole messages that delete its reply
     dale_flavor: bool               # Dale's catchphrases, GIFs, /start blurb
+    # Whether the generic word "bot" ("bot, settle this", "bad bot", "the
+    # bot is broken") is an address to THIS bot. With several bots in one
+    # group it can only mean all of them, so only the bot that runs the
+    # others (settings.manages_bots, Dale) answers to it; the rest answer to
+    # their own names and nothing a stranger would have to guess.
+    answers_to_bot_word: bool = True
 
 
 # Dale's names, as they've always been: the current persona (who goes by
@@ -81,7 +87,10 @@ def _alias_pattern(alias: str) -> str:
 
 
 @lru_cache(maxsize=16)
-def _build(name: str, aliases: tuple[str, ...], dale_flavor: bool) -> Identity:
+def _build(
+    name: str, aliases: tuple[str, ...], dale_flavor: bool,
+    answers_to_bot_word: bool = True,
+) -> Identity:
     names_pattern = "|".join(_alias_pattern(a) for a in aliases)
     return Identity(
         name=name,
@@ -91,8 +100,12 @@ def _build(name: str, aliases: tuple[str, ...], dale_flavor: bool) -> Identity:
         # character on the far side and never match.
         name_re=re.compile(rf"(?<!\w)(?:{names_pattern})(?!\w)", re.IGNORECASE),
         names_pattern=names_pattern,
-        rebuke_phrases=frozenset({"bad bot"} | {f"bad {a}" for a in aliases}),
+        rebuke_phrases=frozenset(
+            ({"bad bot"} if answers_to_bot_word else set())
+            | {f"bad {a}" for a in aliases}
+        ),
         dale_flavor=dale_flavor,
+        answers_to_bot_word=answers_to_bot_word,
     )
 
 
@@ -106,9 +119,10 @@ def from_settings(settings) -> Identity:
     aliases = tuple(dict.fromkeys(
         a.strip().lower() for a in raw.split(",") if a.strip()
     ))
-    if not aliases and name == "Dale" and flavor == "dale":
+    bot_word = bool(getattr(settings, "manages_bots", True))
+    if not aliases and name == "Dale" and flavor == "dale" and bot_word:
         return DALE
-    return _build(name, aliases or (name.lower(),), flavor == "dale")
+    return _build(name, aliases or (name.lower(),), flavor == "dale", bot_word)
 
 
 def starting_persona(settings) -> str | None:

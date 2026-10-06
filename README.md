@@ -62,7 +62,7 @@ See [`docs/UNRAID.md`](docs/UNRAID.md). TL;DR:
 ```bash
 cp .env.example .env
 # fill in TELEGRAM_BOT_TOKEN, OPENAI_API_KEY, etc.
-cd docker && docker compose up -d --build
+cd docker && docker compose --env-file ../.env up -d --build   # keep the flag
 ```
 
 ## Commands

@@ -419,3 +419,45 @@ async def test_leaderboard_empty_and_ranked():
     body = ranked.reply.await_args.args[0]
     assert body.index("Luke") < body.index("Matt")
     assert "Other" not in body            # scoped to this quiz
+
+
+# ── the background warm-up is tracked, and says so when it can't start ───────
+
+# The module's autouse fixture stubs _kick_warmup out; these want the real one.
+_REAL_KICK = engine._kick_warmup
+
+
+@pytest.mark.asyncio
+async def test_a_warmup_that_dies_is_logged_not_forgotten(monkeypatch, caplog):
+    import asyncio
+    import logging
+
+    async def boom(rt, quizzes):
+        raise RuntimeError("db went away")
+
+    monkeypatch.setattr(engine, "_warm_item_images", boom)
+    with caplog.at_level(logging.ERROR, logger=engine.log.name):
+        assert _REAL_KICK(_rt(_FakeDB()), registry.all_quizzes()) is True
+        assert len(engine._warmup_tasks) == 1            # held while it runs
+        await asyncio.sleep(0.05)
+    assert not engine._warmup_tasks                      # and let go afterwards
+    assert any("warm-up died" in r.getMessage() and "db went away" in str(r.exc_info)
+               for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_second_warmup_is_not_queued_while_one_runs():
+    async with engine._warmup_lock:
+        assert _REAL_KICK(_rt(_FakeDB()), registry.all_quizzes()) is False
+
+
+@pytest.mark.asyncio
+async def test_the_admin_is_told_when_a_warmup_was_not_queued(monkeypatch):
+    db = _FakeDB()
+    monkeypatch.setattr(engine, "_kick_warmup", lambda rt, quizzes: False)
+    rt = _rt(db, admin=frozenset({7}))
+    msg = _msg(7, 7, "/quiz_warmup force")
+    msg.chat.type = "private"
+    await engine.warmup_command(rt, msg)
+    reply = msg.reply.await_args.args[0]
+    assert "already running" in reply and "Fetching any missing" not in reply

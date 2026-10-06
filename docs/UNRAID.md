@@ -26,8 +26,10 @@ contents of this repo there (or clone it).
 └── .env          <-- you create this from .env.example
 ```
 
-`POSTGRES_*` and `DATABASE_URL` in `.env` should refer to the compose service
-name `postgres`. The example `.env.example` already does the right thing.
+`.env.example` lists every setting. Under Compose, `DATABASE_URL` is
+overridden to point at the `postgres` service and is built from the
+`POSTGRES_*` values, so what you put for it in `.env` only matters for runs
+outside Docker.
 
 Postgres data is stored in a **host bind-mount** at
 `/mnt/user/appdata/ipedro/pgdata` (override with `PGDATA_HOST_PATH` in
@@ -44,8 +46,25 @@ cd /mnt/user/appdata/ipedro
 cp .env.example .env
 $EDITOR .env                       # set tokens, etc.
 cd docker
-docker compose up -d --build
+docker compose --env-file ../.env up -d --build
 ```
+
+**Keep the `--env-file ../.env`.** The compose file's `env_file:` hands `.env`
+to the containers, but the `${POSTGRES_PASSWORD}`, `${PGDATA_HOST_PATH}` ...
+substitutions inside `docker-compose.yml` are resolved by Compose itself,
+which only reads a `.env` sitting next to the compose file. Without the flag
+they silently fall back to their defaults and whatever you set is ignored,
+including where Postgres keeps its data. Use the flag on every `up`, `down`
+and `build`, or run `ln -s ../.env .env` once inside `docker/` and plain
+`docker compose` is right from then on.
+
+> **Already running without the flag?** Then your database was created with
+> the defaults (user and password `ipedro`, data under
+> `/mnt/user/appdata/ipedro/pgdata`), whatever `.env` said. Adding the flag
+> starts honouring `.env`: the bot would try a new `POSTGRES_PASSWORD`
+> against a database that still has the old one. Either delete the
+> `POSTGRES_*` / `PGDATA_HOST_PATH` lines from `.env`, or first make the
+> database match them (`ALTER USER ipedro PASSWORD '...'`, move the data).
 
 The Postgres database lives in a host bind-mount under appdata
 (`/mnt/user/appdata/ipedro/pgdata`) so the data survives container/image
@@ -61,7 +80,7 @@ Postgres will initialize an empty database at the new path:
 ```bash
 cd /mnt/user/appdata/ipedro/docker
 ../scripts/migrate_pgdata_to_appdata.sh        # copies; old volume left intact
-docker compose up -d
+docker compose --env-file ../.env up -d
 ```
 
 The script copies (never moves) read-only from the old volume, so you can
@@ -85,8 +104,8 @@ In the Unraid UI you can also click the container's log button.
 ```bash
 git pull
 cd docker
-docker compose build --pull
-docker compose up -d
+docker compose --env-file ../.env build --pull
+docker compose --env-file ../.env up -d
 ```
 
 The schema is applied at startup; new schema versions are idempotent.

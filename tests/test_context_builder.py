@@ -708,3 +708,45 @@ async def test_the_style_reminder_stands_down_for_impersonation_too():
         persona_override="IMPERSONATION MODE: you are Luke.",
     )
     assert "Rhythm check" not in _system_text(built)
+
+
+# ── what the token budget leaves out is said out loud ────────────────────────
+
+@pytest.mark.asyncio
+async def test_a_persona_bigger_than_the_budget_is_warned_about_once(caplog):
+    """The budget drops what doesn't fit, and the persona is the first thing in
+    line. A bot that quietly answers with no persona at all is the worst way
+    to find that out, so the log says so, once per chat rather than per reply."""
+    import logging
+
+    s = _settings()
+    s.context_max_tokens = 200
+    big = "You are a very elaborate character. " * 100
+
+    async def go(chat_id):
+        return await build_context(
+            store=FakeStore(recent=[_msg("hi")]), settings=s, chat_id=chat_id,
+            persona="dude", persona_custom=big, latest_user_text="hi",
+        )
+
+    with caplog.at_level(logging.WARNING, logger="ipedro.memory.context_builder"):
+        built = await go(1)
+        await go(1)
+        await go(2)
+
+    assert big not in "\n".join(m["content"] for m in built.messages)
+    warned = [r.getMessage() for r in caplog.records if "persona" in r.getMessage()]
+    assert len(warned) == 2, warned                       # chat 1 once, chat 2 once
+    assert "chat 1" in warned[0] and "CONTEXT_MAX_TOKENS" in warned[0]
+
+
+@pytest.mark.asyncio
+async def test_nothing_is_warned_when_everything_fits(caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="ipedro.memory.context_builder"):
+        await build_context(
+            store=FakeStore(recent=[_msg("hi")]), settings=_settings(), chat_id=1,
+            persona="dude", persona_custom=None, latest_user_text="hi",
+        )
+    assert not caplog.records

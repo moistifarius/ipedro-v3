@@ -17,9 +17,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from ipedro import automod_media
-from ipedro.handlers.automod import (
-    _AUTOMOD_TRIGGERS, _KYS_LINES, MediaResponse, _automod_response,
-)
+from ipedro.automod_types import MediaResponse
+from ipedro.handlers.automod import _automod_response
+from ipedro.handlers.automod_bits import _AUTOMOD_TRIGGERS, _KYS_LINES
 
 
 # ── the kys deflection ───────────────────────────────────────────────────────
@@ -82,3 +82,94 @@ async def test_an_unlisted_host_is_never_fetched(monkeypatch, url):
     m = MediaResponse(kind="photo", url=url, caption="c", fallback="f")
     assert await automod_media.fetch_automod_media(m) is None
     client.assert_not_called()
+
+
+# ── the no-ReDoS house rule, enforced ────────────────────────────────────────
+#
+# automod.py promises "no nested quantifiers, so no catastrophic
+# backtracking" and its docstring said a test enforced it; none did. Every
+# pattern here runs on the event loop against whatever a member types, and
+# the file is content an /evolve change can merge unreviewed, so the rule
+# lives HERE, in a file that never auto-merges.
+
+def _unbounded_repeat_inside(sub) -> bool:
+    """Does this parsed sub-pattern contain an unbounded repeat?"""
+    from re import _constants as c
+
+    for op, av in sub:
+        if op in (c.MAX_REPEAT, c.MIN_REPEAT):
+            _, hi, body = av
+            if hi == c.MAXREPEAT or _unbounded_repeat_inside(body):
+                return True
+        elif op is c.SUBPATTERN:
+            if _unbounded_repeat_inside(av[-1]):
+                return True
+        elif op is c.BRANCH:
+            if any(_unbounded_repeat_inside(b) for b in av[1]):
+                return True
+        elif op in (c.ASSERT, c.ASSERT_NOT):
+            if _unbounded_repeat_inside(av[1]):
+                return True
+    return False
+
+
+def _nested_unbounded(sub) -> bool:
+    """An unbounded repeat whose body holds another unbounded repeat:
+    (a+)+, (a|b*)*, (?:x*y)+ ... the shapes that backtrack exponentially."""
+    from re import _constants as c
+
+    for op, av in sub:
+        if op in (c.MAX_REPEAT, c.MIN_REPEAT):
+            _, hi, body = av
+            if hi == c.MAXREPEAT and _unbounded_repeat_inside(body):
+                return True
+            if _nested_unbounded(body):
+                return True
+        elif op is c.SUBPATTERN:
+            if _nested_unbounded(av[-1]):
+                return True
+        elif op is c.BRANCH:
+            if any(_nested_unbounded(b) for b in av[1]):
+                return True
+        elif op in (c.ASSERT, c.ASSERT_NOT):
+            if _nested_unbounded(av[1]):
+                return True
+    return False
+
+
+def test_the_checker_itself_catches_the_classic_shapes():
+    import re as _re
+    for bad in (r"(a+)+b", r"(a*)*", r"(?:a|b+)+", r"(\w+\s*)+$", r"(?:x*y)+"):
+        assert _nested_unbounded(_re._parser.parse(bad)), bad
+    for ok in (r"a+b+", r"(?:foo|bar)+", r"\bbased\b", r"x{1,5}y*", r"(?:ab){1,4}c+"):
+        assert not _nested_unbounded(_re._parser.parse(ok)), ok
+
+
+def test_no_automod_pattern_has_a_nested_unbounded_repeat():
+    import re as _re
+    from ipedro.handlers.automod_bits import _AUTOMOD_TRIGGERS
+
+    offenders = [
+        p.pattern for p, _ in _AUTOMOD_TRIGGERS
+        if _nested_unbounded(_re._parser.parse(p.pattern, p.flags))
+    ]
+    assert not offenders, offenders
+
+
+def test_every_pattern_finishes_fast_on_hostile_input():
+    """Belt and braces: a 4096-character message of the worst shapes."""
+    import time
+    from ipedro.handlers.automod_bits import _AUTOMOD_TRIGGERS
+
+    attacks = ["a" * 4096, "a " * 2048, "!" * 4096, "sh" * 2048 + "a", " " * 4096,
+               "ratio" * 800, "l + " * 1000]
+    start = time.perf_counter()
+    for pattern, _ in _AUTOMOD_TRIGGERS:
+        for text in attacks:
+            pattern.search(text)
+    assert time.perf_counter() - start < 2.0
+
+
+def test_only_the_start_of_a_long_message_is_scanned():
+    from ipedro.handlers import chat
+    assert chat._AUTOMOD_MAX_CHARS <= 1000

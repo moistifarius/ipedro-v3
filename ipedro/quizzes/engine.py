@@ -134,15 +134,34 @@ async def _get_item_image(rt: Runtime, quiz: Quiz, key: str) -> bytes | None:
     return bytes(png) if png is not None else None
 
 
-def _kick_warmup(rt: Runtime, quizzes: list[Quiz]) -> None:
-    """Spawn ONE background task that warms all given quizzes in order."""
+# Held so the task isn't garbage-collected mid-flight, and so a failure in it
+# is logged by us instead of surfacing as asyncio's "Task exception was never
+# retrieved" whenever the object happens to be collected.
+_warmup_tasks: set[asyncio.Task] = set()
+
+
+def _warmup_finished(task: asyncio.Task) -> None:
+    _warmup_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.error("Quiz image warm-up died: %s", exc, exc_info=exc)
+
+
+def _kick_warmup(rt: Runtime, quizzes: list[Quiz]) -> bool:
+    """Spawn ONE background task that warms all given quizzes in order.
+    False when nothing was queued because a warm-up is already running."""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        return
+        return False
     if _warmup_lock.locked():
-        return
-    loop.create_task(_warm_item_images(rt, quizzes))
+        return False
+    task = loop.create_task(_warm_item_images(rt, quizzes))
+    _warmup_tasks.add(task)
+    task.add_done_callback(_warmup_finished)
+    return True
 
 
 async def _warm_item_images(rt: Runtime, quizzes: list[Quiz]) -> None:
@@ -510,11 +529,21 @@ async def warmup_command(rt: Runtime, msg: Message) -> None:
     for quiz in quizzes:
         n = await images_cached_count(rt, quiz)
         parts.append(f"{quiz.emoji} {quiz.title}: {n}/{quiz.n_items}")
-    _kick_warmup(rt, quizzes)
-    await msg.reply(
-        ("🖼 Cache purged, re-fetching everything:\n" if force
-         else "🖼 Cached illustrations:\n") + "\n".join(parts) +
-        "\n\nFetching any missing from the web in the background — re-run to "
-        "check, or send /quiz_warmup force to purge the cache and re-fetch.",
-        disable_notification=True,
-    )
+    started = _kick_warmup(rt, quizzes)
+    if started is False:        # (a monkeypatched kick returns None: not "busy")
+        tail = (
+            "\n\nA warm-up is already running, so nothing new was queued. "
+            "Re-run when it has finished."
+        )
+    else:
+        tail = (
+            "\n\nFetching any missing from the web in the background — re-run to "
+            "check, or send /quiz_warmup force to purge the cache and re-fetch."
+        )
+    if not force:
+        head = "🖼 Cached illustrations:\n"
+    elif started is False:
+        head = "🖼 Cache purged, but a warm-up was already busy:\n"
+    else:
+        head = "🖼 Cache purged, re-fetching everything:\n"
+    await msg.reply(head + "\n".join(parts) + tail, disable_notification=True)

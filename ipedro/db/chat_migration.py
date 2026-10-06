@@ -82,7 +82,19 @@ async def migrate_chat(db: Database, old_id: int, new_id: int) -> dict[str, int]
                 # processed). Skip exactly those rows — the new-id data
                 # wins — instead of letting one collision abort the whole
                 # migration and orphan everything.
-                collision = await _collision_predicate(conn, table)
+                collision, one_row_per_chat = await _collision_predicate(conn, table)
+                if one_row_per_chat:
+                    # chat_config, chat_state: ONE row per chat, keyed by
+                    # chat_id alone. "New-id data wins" is wrong here: the
+                    # first message in the supergroup (concurrent with this
+                    # migration) makes a DEFAULT row at the new id, and
+                    # letting it win replaced the group's real settings
+                    # with defaults. The old row is the real one.
+                    await conn.execute(
+                        f"DELETE FROM {table} WHERE chat_id = $1 AND EXISTS "
+                        f"(SELECT 1 FROM {table} o WHERE o.chat_id = $2)",
+                        new_id, old_id,
+                    )
                 if collision:
                     status = await conn.execute(
                         f"UPDATE {table} SET chat_id = $1 "
@@ -137,13 +149,15 @@ async def migrate_chat(db: Database, old_id: int, new_id: int) -> dict[str, int]
     return moved
 
 
-async def _collision_predicate(conn, table: str) -> str | None:
-    """SQL predicate marking old-id rows whose identity already exists at the
-    new id ($1), built from every PK/UNIQUE constraint that includes chat_id.
+async def _collision_predicate(conn, table: str) -> tuple[str | None, bool]:
+    """(predicate, one_row_per_chat).
 
-    Returns None when the table has no such constraint (nothing can collide).
-    Column names come from our own catalog and are validated before being
-    formatted into SQL.
+    The predicate marks old-id rows whose identity already exists at the
+    new id ($1), built from every PK/UNIQUE constraint that includes
+    chat_id; None when the table has no such constraint (nothing can
+    collide). ``one_row_per_chat`` is True when chat_id ALONE is a key (a
+    settings-style table). Column names come from our own catalog and are
+    validated before being formatted into SQL.
     """
     rows = await conn.fetch(
         """
@@ -162,10 +176,13 @@ async def _collision_predicate(conn, table: str) -> str | None:
         table,
     )
     predicates: list[str] = []
+    one_row_per_chat = False
     for r in rows:
         cols = list(r["cols"])
         if "chat_id" not in cols:
             continue
+        if cols == ["chat_id"]:
+            one_row_per_chat = True
         others = [c for c in cols if c != "chat_id"]
         if any(not _SAFE_IDENT.match(c) for c in others):
             raise RuntimeError(
@@ -181,4 +198,4 @@ async def _collision_predicate(conn, table: str) -> str | None:
             f"EXISTS (SELECT 1 FROM {table} t2 "
             f"WHERE t2.chat_id = $1 AND {match})"
         )
-    return " OR ".join(predicates) if predicates else None
+    return (" OR ".join(predicates) if predicates else None), one_row_per_chat

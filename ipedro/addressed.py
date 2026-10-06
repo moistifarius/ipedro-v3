@@ -186,6 +186,7 @@ _AT_SOMEONE_RE = re.compile(r"^\s*@\w+")
 
 def quick_verdict(
     text: str, *, in_conversation: bool, next_line: bool = True,
+    bot_word: bool = True,
 ) -> bool | None:
     """True / False when the text settles it, None when a model should look.
 
@@ -193,6 +194,10 @@ def quick_verdict(
     in between. Only then is a bare "nah" / "so" / "why" certainly a
     reaction to HIM; a few lines later it may be aimed at whoever spoke in
     between, so it goes to the classifier, which can see the lines.
+
+    ``bot_word``: "the bot" is an explicit reference to THIS bot. False for
+    a bot that shares its groups with others (see Identity.answers_to_bot_word),
+    where "the bot" could be any of them.
 
     Every wrong True is the bot butting in, so nothing here ever guesses
     True except a crisp follow-up opener. Every None costs a classifier
@@ -212,7 +217,7 @@ def quick_verdict(
         return None
     # Quiet: only an explicit reference to him, or a question plainly put
     # to the room, is worth the price of a look.
-    if _BOT_NOUN_RE.search(text) or _ROOM_QUESTION_RE.search(text):
+    if (bot_word and _BOT_NOUN_RE.search(text)) or _ROOM_QUESTION_RE.search(text):
         return None
     return False
 
@@ -260,7 +265,7 @@ async def classify(
 
 async def wants_reply(
     rt, chat_id: int, *, speaker: str | None, text: str, memory_enabled: bool,
-    user_id: int | None = None, bot_name: str = BOT_NAME,
+    user_id: int | None = None, bot_name: str = BOT_NAME, bot_word: bool = True,
 ) -> bool:
     """Does this un-named, un-replied message want the bot to answer?"""
     stripped = (text or "").strip()
@@ -275,6 +280,7 @@ async def wants_reply(
         return True
     verdict = quick_verdict(
         text, in_conversation=in_conversation(chat_id), next_line=next_line,
+        bot_word=bot_word,
     )
     if verdict is not None:
         return verdict

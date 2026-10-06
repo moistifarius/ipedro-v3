@@ -12,7 +12,7 @@ For Unraid-specific instructions see [`UNRAID.md`](UNRAID.md).
 | `DATABASE_URL` | yes | `postgresql://user:pass@host:port/db` |
 | `ADMIN_USER_IDS` | no | `315660812` is always implicitly included |
 | `TEXT_PROVIDER` | no | `claude` (default when Anthropic key present) or `openai`. Persisted at runtime via `/ai_provider`. |
-| `CLAUDE_TEXT_MODEL` | no | Default `claude-sonnet-4-6`. Runtime-tunable via `/ai_model`. |
+| `CLAUDE_TEXT_MODEL` | no | Default `claude-sonnet-5`. Runtime-tunable via `/ai_model`. |
 | `OPENAI_TEXT_MODEL` | no | Default `gpt-4o-mini`. Runtime-tunable via `/ai_model`. |
 | `OPENAI_*_MODEL` | no | Image / embedding / transcription model overrides |
 | `EVOLVE_GITHUB_TOKEN` | no | Fine-grained PAT, this repo only, Issues read/write and nothing else. Lets the owner's `/evolve` file change requests. Unset → `/evolve` says what's missing. |

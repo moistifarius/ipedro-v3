@@ -150,10 +150,17 @@ _window_anchor: dict[int, int] = {}
 _anchor_prev_created_at: dict[int, datetime] = {}
 
 
+# Stable blocks the token budget refused, as (chat_id, label): a chat whose
+# persona is bigger than CONTEXT_MAX_TOKENS would otherwise log on every
+# single reply. One warning per process is enough to find it.
+_eviction_warned: set[tuple[int, str]] = set()
+
+
 def reset_windows() -> None:
-    """Forget every anchor (tests)."""
+    """Forget every anchor and every warning already given (tests)."""
     _window_anchor.clear()
     _anchor_prev_created_at.clear()
+    _eviction_warned.clear()
 
 
 def _anchored_window(recent: list[StoredMessage], chat_id: int, n: int) -> list[StoredMessage]:
@@ -321,10 +328,19 @@ async def build_context(
     used = 0
     now = _aware(now) or datetime.now(timezone.utc)
 
-    def _add(msg: dict[str, Any]) -> bool:
+    def _add(msg: dict[str, Any], *, label: str | None = None) -> bool:
         nonlocal used
         cost = count_tokens(msg.get("content", ""))
         if used + cost > budget:
+            if label and (chat_id, label) not in _eviction_warned:
+                _eviction_warned.add((chat_id, label))
+                log.warning(
+                    "Left the %s out of the prompt for chat %s: it is %d tokens "
+                    "and only %d of the %d-token context budget "
+                    "(CONTEXT_MAX_TOKENS) were free. The bot answers without it "
+                    "until the budget is raised or it is shortened.",
+                    label, chat_id, cost, max(budget - used, 0), budget,
+                )
             return False
         messages.append(msg)
         used += cost
@@ -344,21 +360,26 @@ async def build_context(
     # invalidator: every minute it changes and the whole prefix behind it
     # is re-billed at full price.
     stable: list[str] = []
+    labels: list[str] = []          # what each stable block is, for the log
+
+    def _stable(label: str, text: str) -> None:
+        labels.append(label)
+        stable.append(text)
 
     # Persona — an explicit override (e.g. impersonation mode) replaces the
     # resolved persona for this turn.
-    stable.append(persona_override or resolve_persona(persona, persona_custom))
+    _stable("persona", persona_override or resolve_persona(persona, persona_custom))
     # The user-name labeling convention, so the model can tell speakers
     # apart and address people properly.
-    stable.append(_NAME_PREFIX_SYSTEM)
+    _stable("speaker-name rules", _NAME_PREFIX_SYSTEM)
     # What the bot can and can't do, so it never denies an ability it has or
     # promises one it hasn't. An impersonation turn is somebody else's
     # voice, so it gets neither this nor the rhythm rule.
     if capabilities and not persona_override:
-        stable.append(capabilities)
+        _stable("capabilities list", capabilities)
     if not persona_override:
-        stable.append(_STYLE_SYSTEM)
-    stable.append(_CLOCK_SYSTEM)
+        _stable("style rules", _STYLE_SYSTEM)
+    _stable("clock rules", _CLOCK_SYSTEM)
 
     # Summary and facts change only when the summarizer runs (every ~80
     # messages), so they belong inside the cached prefix rather than after
@@ -369,17 +390,17 @@ async def build_context(
     if memory_enabled:
         summary = await store.latest_summary(chat_id)
         if summary:
-            stable.append(
+            _stable("conversation summary", (
                 f"{_NOTES_FRAMING}\n\nConversation summary so far:\n"
                 f"{summary.summary}"
-            )
+            ))
 
         facts = await store.list_facts(chat_id, limit=20)
         if facts:
-            stable.append(
+            _stable("durable facts", (
                 f"{_NOTES_FRAMING}\n\nKnown durable facts about this chat:\n"
                 + "\n".join(f"- {f.fact}" for f in facts)
-            )
+            ))
 
         # Semantic retrieval is keyed on THIS message, so it is volatile by
         # construction and is emitted below the breakpoint.
@@ -390,8 +411,8 @@ async def build_context(
             hits = [h for h in hits if h.get("similarity", 0) >= 0.25]
 
     stable_end = -1
-    for block in stable:
-        if _add({"role": "system", "content": block}):
+    for label, block in zip(labels, stable):
+        if _add({"role": "system", "content": block}, label=label):
             stable_end = len(messages) - 1
     if stable_end >= 0:
         # Mark the last block that actually survived the budget — marking one
@@ -401,11 +422,13 @@ async def build_context(
     # ── the volatile tail ───────────────────────────────────────────────
     # Everything from here changes per request. It sits after the
     # breakpoint, so it costs full price but invalidates nothing.
-    _add({"role": "system", "content": _format_now(now, settings.tzinfo)})
+    _add({"role": "system", "content": _format_now(now, settings.tzinfo)},
+         label="current time")
     if not persona_override:
         _add({"role": "system", "content": _STYLE_REMINDER})
     if extra_system:
-        _add({"role": "system", "content": extra_system})
+        _add({"role": "system", "content": extra_system},
+             label="per-request instructions")
     # Retrieval is embedded against the message being answered, so its top
     # hit is reliably that very message (similarity 1.0) — and the latest
     # summary and the top facts are embedded too, and already printed in

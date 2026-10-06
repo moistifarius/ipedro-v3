@@ -9,10 +9,12 @@ re-fire. Restart-safe.
 from __future__ import annotations
 
 import asyncio
+import calendar
 import logging
 from datetime import date, datetime
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
 from ipedro.bot_messages import track
 from ipedro.config import Settings
@@ -24,6 +26,10 @@ log = logging.getLogger(__name__)
 _TICK_SECONDS = 300  # 5 min
 
 
+def _feb29_is_today(today: date) -> bool:
+    """A Feb 29 birthday is observed on Feb 28 in a year with no Feb 29, so
+    it is celebrated every year rather than once in four."""
+    return today.month == 2 and today.day == 28 and not calendar.isleap(today.year)
 
 
 def _build_message(row: dict, name: str, today: date) -> str:
@@ -51,9 +57,10 @@ async def _due_today(db: Database, today: date) -> list[dict]:
         "       COALESCE(u.first_name, u.username) AS name "
         "  FROM chat_dates cd "
         "  LEFT JOIN users u ON u.user_id = cd.user_id "
-        " WHERE cd.month = $1 AND cd.day = $2 "
+        " WHERE ((cd.month = $1 AND cd.day = $2) "
+        "        OR ($4 AND cd.month = 2 AND cd.day = 29)) "
         "   AND (cd.last_celebrated IS NULL OR cd.last_celebrated < $3)",
-        today.month, today.day, today,
+        today.month, today.day, today, _feb29_is_today(today),
     )
     return [dict(r) for r in rows]
 
@@ -84,6 +91,13 @@ async def run_celebrations_loop(
                         disable_notification=is_silenced(chat_id),
                     )
                     track(chat_id, sent.message_id, text)
+                    await _stamp_celebrated(db, row["id"], today)
+                except (TelegramForbiddenError, TelegramBadRequest) as exc:
+                    # The chat refuses us (kicked, gone). Retrying every five
+                    # minutes all day can't change that; stamp it and move on.
+                    log.warning(
+                        "Celebration for chat %s undeliverable: %s", chat_id, exc,
+                    )
                     await _stamp_celebrated(db, row["id"], today)
                 except Exception as exc:
                     log.warning(

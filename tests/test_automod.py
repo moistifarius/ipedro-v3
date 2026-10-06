@@ -13,10 +13,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from ipedro.handlers.automod import (
+from ipedro.automod_types import DaleGif, MediaResponse
+from ipedro.handlers.automod import _automod_response
+from ipedro.handlers.automod_bits import (
     _ALL_YOUR_BASE, _AMONG_US_COPYPASTA, _AUTOMOD_TRIGGERS, _COPIUM_LINES,
     _GAY_COPYPASTA, _GNU_LINUX_PASTA, _HOLY_HELL_CHAIN, _JACKDAW_PASTA,
-    _L_RATIO_COPYPASTA, DaleGif, MediaResponse, _automod_response,
+    _L_RATIO_COPYPASTA,
 )
 
 

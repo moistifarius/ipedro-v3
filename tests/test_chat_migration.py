@@ -64,6 +64,17 @@ class _FakeConn:
             (old_id,) = args
             self.data.get("chats", {}).pop(old_id, None)
             return "DELETE 1"
+        if q.startswith("DELETE FROM") and "AND EXISTS" in q:
+            # the settings-table step: drop the NEW id's row, only if the
+            # old id has one to take its place
+            table = q.split()[2]
+            new_id, old_id = args
+            n = 0
+            if self.data.get(table, {}).get(old_id):
+                n = self.data[table].pop(new_id, 0)
+                if n:
+                    self.collisions[table] = 0   # nothing left to collide with
+            return f"DELETE {n}"
         if q.startswith("DELETE FROM"):
             table = q.split()[2]
             (old_id,) = args
@@ -244,3 +255,53 @@ async def test_handler_ignores_missing_or_equal_target(monkeypatch):
     await handler(SimpleNamespace(chat=SimpleNamespace(id=OLD),
                                   migrate_to_chat_id=OLD))
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_settings_row_at_the_new_id_never_beats_the_real_one():
+    """chat_config is one row per chat. The first message in the new
+    supergroup makes a DEFAULT row at the new id, concurrently with the
+    migration; with 'new id wins' the group's real settings were replaced
+    by defaults, which is exactly what this module exists to prevent."""
+    conn = _FakeConn(
+        tables=["chat_config", "chat_state"],
+        data={
+            "chat_config": {OLD: 1, NEW: 1},      # real settings, and a default
+            "chat_state": {OLD: 1, NEW: 1},
+            "chats": {OLD: 1},
+        },
+        constraints={"chat_config": [["chat_id"]], "chat_state": [["chat_id"]]},
+        collisions={"chat_config": 1, "chat_state": 1},
+    )
+    moved = await migrate_chat(_fake_db(conn), OLD, NEW)
+    # the default was removed and the real row moved in: nothing "dropped"
+    assert moved == {"chat_config": 1, "chat_state": 1}
+    assert conn.data["chat_config"] == {NEW: 1}
+    assert not any("dropped" in k for k in moved)
+
+
+@pytest.mark.asyncio
+async def test_a_chat_with_no_old_settings_keeps_the_new_ones():
+    conn = _FakeConn(
+        tables=["chat_config"],
+        data={"chat_config": {NEW: 1}, "chats": {OLD: 1}},
+        constraints={"chat_config": [["chat_id"]]},
+    )
+    moved = await migrate_chat(_fake_db(conn), OLD, NEW)
+    assert moved == {}
+    assert conn.data["chat_config"] == {NEW: 1}          # not deleted for nothing
+
+
+@pytest.mark.asyncio
+async def test_tables_with_a_composite_key_still_let_the_new_id_win():
+    """Messages and the like: a row already at the new id is real data that
+    arrived first, and the old duplicate is the one dropped."""
+    conn = _FakeConn(
+        tables=["messages"],
+        data={"messages": {OLD: 3, NEW: 2}, "chats": {OLD: 1}},
+        constraints={"messages": [["chat_id", "message_id"]]},
+        collisions={"messages": 2},
+    )
+    moved = await migrate_chat(_fake_db(conn), OLD, NEW)
+    assert moved["messages"] == 1
+    assert moved["messages (dropped duplicates)"] == 2

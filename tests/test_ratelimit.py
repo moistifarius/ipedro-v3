@@ -17,6 +17,7 @@ from aiogram.exceptions import TelegramForbiddenError
 
 from ipedro import ether, ratelimit
 from ipedro.handlers import ai as ai_h
+from ipedro.handlers import duckhunt as duck_h
 from ipedro.handlers import ether as ether_h
 from ipedro.handlers.common import over_limit
 
@@ -278,3 +279,72 @@ async def test_if_every_destination_refuses_it_gives_up_cleanly(monkeypatch):
     )
     assert res.mode == "no_audio"
     assert sorted(db.disabled) == [200, 300]
+
+
+@pytest.mark.asyncio
+async def test_spend_from_these_commands_is_attributed_to_the_chat():
+    """/aigen, /aitranslate, /catfact and /beneficiality logged their OpenAI
+    spend with chat_id NULL, so per-chat /cost under-reported the priciest."""
+    rt = _rt()
+    await _handler(ai_h, rt, "aigen")(_msg("/aigen a duck", chat_id=-777))
+    assert rt.openai.generate_image.await_args.kwargs["chat_id"] == -777
+
+
+# ── /duckhunt: a summon, bang, summon loop was a free score farm ─────────────
+
+def _duck_rt(*, active=False):
+    spawned = SimpleNamespace(id=1)
+    return SimpleNamespace(
+        settings=SimpleNamespace(
+            admin_ids=frozenset({ADMIN}), duckhunt_duck_lifetime_seconds=3600,
+            default_response_policy_group="mention", default_ambient_probability=0.0,
+            default_persona="dude", duckhunt_enabled_by_default=True,
+            share_photo_enabled_by_default=False,
+        ),
+        chats=SimpleNamespace(
+            get_config=AsyncMock(return_value=SimpleNamespace(duckhunt_enabled=True)),
+            upsert_chat=AsyncMock(),
+        ),
+        duckhunt=SimpleNamespace(
+            active_duck=AsyncMock(return_value=active), spawn_duck=AsyncMock(return_value=spawned)),
+        openai=SimpleNamespace(cheap_completion=AsyncMock(return_value="(o<  quack")),
+    )
+
+
+def _stub_duck_rendering(monkeypatch):
+    monkeypatch.setattr(duck_h, "get_or_create_chat_config",
+                        AsyncMock(return_value=SimpleNamespace(duckhunt_enabled=True)))
+    monkeypatch.setattr(duck_h, "build_quack_message_for", AsyncMock(return_value="quack"))
+
+
+def _duck_msg(user_id=MEMBER):
+    m = _msg("/duckhunt", user_id=user_id)
+    m.answer = AsyncMock()
+    m.chat.title = "t"
+    return m
+
+
+@pytest.mark.asyncio
+async def test_a_member_can_summon_six_ducks_an_hour_not_seven(monkeypatch):
+    _stub_duck_rendering(monkeypatch)
+    rt = _duck_rt()
+    handler = _handler(duck_h, rt, "duckhunt_cmd")
+    for _ in range(6):
+        await handler(_duck_msg())
+    assert rt.duckhunt.spawn_duck.await_count == 6
+    seventh = _duck_msg()
+    await handler(seventh)
+    assert rt.duckhunt.spawn_duck.await_count == 6                 # nothing spawned
+    assert "6 duck summons for the hour" in seventh.reply.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_a_summon_that_finds_a_duck_already_there_costs_nothing(monkeypatch):
+    _stub_duck_rendering(monkeypatch)
+    rt = _duck_rt(active=True)
+    handler = _handler(duck_h, rt, "duckhunt_cmd")
+    for _ in range(20):
+        await handler(_duck_msg())
+    rt.duckhunt.active_duck.return_value = False
+    await handler(_duck_msg())
+    rt.duckhunt.spawn_duck.assert_awaited_once()                   # slots were never used

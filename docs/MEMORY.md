@@ -39,7 +39,11 @@ respecting `CONTEXT_MAX_TOKENS`:
 5. The tail of the raw message log (up to `CONTEXT_RECENT_MESSAGES`).
 
 If the token budget runs out, the lowest-priority pieces (recent
-messages first) are dropped. Persona is always kept.
+messages first) are dropped. The persona goes in first, so it is the last
+to go, but it is not exempt: one larger than `CONTEXT_MAX_TOKENS` is left
+out and the bot answers without it. That is logged as a `WARNING` naming
+the block and the chat (once per chat per process), and `/chat_config
+persona ... setfile` and `/master_prompt` warn about it when you set it.
 
 ## Trade-offs and tuning
 

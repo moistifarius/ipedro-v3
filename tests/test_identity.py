@@ -17,7 +17,7 @@ import pytest
 from ipedro import addressed, identity, personas
 from ipedro import dale_gifs as dale
 from ipedro.capabilities import _REFLEXES, capability_brief
-from ipedro.handlers import automod, basics, chat
+from ipedro.handlers import automod, automod_bits, basics, chat
 from ipedro.memory.context_builder import BuiltContext
 from ipedro.user_flags import is_insult_to_bot
 from tests.test_addressed import _mention_rt
@@ -294,7 +294,7 @@ def test_skipping_dale_gifs_lets_a_later_trigger_answer():
     assert automod._automod_response("pocket sand", dale_gifs=False) is None
     assert (
         automod._automod_response("pocket sand and stonks", dale_gifs=False)
-        == automod._M_STONKS
+        == automod_bits._M_STONKS
     )
     assert automod._automod_response("based", dale_gifs=False) == (
         "Based? Based on what?"
@@ -459,3 +459,53 @@ def test_no_starting_persona_means_dale(fresh_personas, unset):
     personas.set_default_prompt("You are Hank Hill.")
     personas.set_default_prompt(unset)
     assert personas.current_master_prompt() == personas.DEFAULT_DALE_PROMPT
+
+
+# ── the generic word "bot" is not every bot's name ───────────────────────────
+
+def _settings_for(**kw):
+    return SimpleNamespace(bot_name="Hank", bot_aliases="hank, hank hill",
+                           bot_flavor="plain", bot_persona=None, **kw)
+
+
+def test_only_the_bot_that_runs_the_others_answers_to_the_word_bot():
+    """With Dale and Hank in one group, "bot, settle this" would otherwise
+    be answered by both, and "shut up bot" would earn the speaker a grudge
+    in each bot's own database."""
+    dale = identity.from_settings(SimpleNamespace())          # nothing set: Dale
+    hank_child = identity.from_settings(_settings_for(manages_bots=False))
+    hank_alone = identity.from_settings(_settings_for(manages_bots=True))
+    assert dale is identity.DALE and dale.answers_to_bot_word
+    assert hank_alone.answers_to_bot_word              # the only bot: "bot" is it
+    assert not hank_child.answers_to_bot_word
+    assert "bad bot" in dale.rebuke_phrases and "bad bot" in hank_alone.rebuke_phrases
+    assert "bad bot" not in hank_child.rebuke_phrases
+    assert "bad hank" in hank_child.rebuke_phrases     # its own name still works
+
+
+def test_a_child_bot_is_addressed_by_its_names_only():
+    hank = identity.from_settings(_settings_for(manages_bots=False))
+    dale = identity.DALE
+    for line in ("bot which one of you is right", "the chatbot is broken", "ok robot"):
+        assert chat._mentions_pedro(line, dale), line
+        assert not chat._mentions_pedro(line, hank), line
+    assert chat._mentions_pedro("hank which one of you is right", hank)
+    assert chat._mentions_pedro("what do you think hank hill", hank)
+
+
+def test_a_child_bot_holds_no_grudge_for_an_insult_to_bots_in_general():
+    from ipedro.user_flags import is_insult_to_bot
+
+    hank = identity.from_settings(_settings_for(manages_bots=False))
+    assert is_insult_to_bot("shut up bot", identity.DALE.names_pattern)
+    assert not is_insult_to_bot("shut up bot", hank.names_pattern, bot_word=False)
+    assert not is_insult_to_bot("you stupid bot", hank.names_pattern, bot_word=False)
+    assert is_insult_to_bot("shut up hank", hank.names_pattern, bot_word=False)
+
+
+def test_the_bot_noun_only_opens_the_classifier_for_the_bot_that_owns_it():
+    from ipedro.addressed import quick_verdict
+
+    line = "honestly the bot gets this wrong"
+    assert quick_verdict(line, in_conversation=False) is None          # worth a look
+    assert quick_verdict(line, in_conversation=False, bot_word=False) is False

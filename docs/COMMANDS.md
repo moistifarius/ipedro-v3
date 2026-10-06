@@ -369,10 +369,13 @@ bot. Silently ignored in groups.
 ### `/evolve <what you want changed>`
 Ask the bot to change its own code. Shows the exact GitHub issue first;
 tap **File it** and a GitHub Action turns it into a pull request. Your
-words go to the coding agent verbatim. The PR merges itself only if its
-tests pass and it touches nothing but content (prompts, personas, canned
-lines, the GIF seed list, tests); anything else waits for you. Needs
-`EVOLVE_GITHUB_TOKEN` on the bot host.
+words go to the coding agent verbatim. The PR merges itself only if the
+agent finished cleanly, its tests pass (and are at least as many as main's),
+and it touches nothing but content: the prompts, the automod bits, the GIF
+seed list (each checked to still be plain data) and new test files. Anything
+else, including any change to code, any deleted file and any edit to an
+existing test, waits for you. Needs `EVOLVE_GITHUB_TOKEN` on the bot host and
+the one-time GitHub setup at the top of `.github/workflows/dale-evolve.yml`.
 
 ### `/newbot <token> <Name>[, other names]` + a short description
 Add another bot: its own Telegram account (make it in @BotFather first,

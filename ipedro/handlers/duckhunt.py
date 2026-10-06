@@ -19,7 +19,7 @@ from ipedro.duckhunt.scoring import (
 )
 from ipedro.duckhunt.spawner import build_quack_message_for
 from ipedro.duckhunt.verdicts import parse_verdict
-from ipedro.handlers.common import display_name, get_or_create_chat_config
+from ipedro.handlers.common import display_name, get_or_create_chat_config, over_limit
 from ipedro.prompts import (
     DUCK_BEF_CHALLENGE_PROMPT, DUCK_BEF_DECIDE_PROMPT,
 )
@@ -367,6 +367,8 @@ def build_router(rt: Runtime) -> Router:
                 "There's already a duck around!",
                 disable_notification=True,
             )
+            return
+        if await over_limit(rt, msg, "duck"):
             return
         duck = await rt.duckhunt.spawn_duck(
             msg.chat.id, rt.settings.duckhunt_duck_lifetime_seconds,

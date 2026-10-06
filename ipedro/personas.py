@@ -10,18 +10,13 @@ current_master_prompt().
 
 from __future__ import annotations
 
-DEFAULT_DALE_PROMPT = (
-    "you are literally dale gribble. act like him and not like a retarded ai"
-)
+# The words are in prompts.py, which an /evolve change may edit unreviewed;
+# choosing between them is here, which it may not.
+from ipedro.prompts import DEFAULT_DALE_PROMPT, NEUTRAL_PROMPT
 
 # Legacy aliases so existing imports keep working without churn — the
 # CONTENT is Dale now; the variable names are just history.
 DEFAULT_DUDE_PROMPT = DEFAULT_DALE_PROMPT
-
-NEUTRAL_PROMPT = (
-    "You are a helpful, concise Telegram assistant. Be direct, accurate and "
-    "friendly. Avoid moralizing. Match the user's tone."
-)
 
 # Module-level cache; updated by set_master_prompt_override().
 _master_prompt_override: str | None = None

@@ -43,6 +43,15 @@ def _no_ambient_dice(monkeypatch):
     # test must not make the next test's message look like a follow-up.
     addressed.reset()
     context_builder.reset_windows()
+    # Name resolution for the public-URL guard (ipedro/net_safety.py): tests
+    # mustn't need a network, and the mock transports use made-up hosts. A
+    # test about the guard itself patches _resolve again.
+    from ipedro import net_safety
+
+    async def _public(host, port):
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(net_safety, "_resolve", _public)
     monkeypatch.setattr(chat, "_REACT_PROBABILITY", 0.0)
     monkeypatch.setattr(chat, "_DALE_GIF_PROBABILITY", 0.0)
     monkeypatch.setattr(chat, "_CREDIT_PROBABILITY", 0.0)

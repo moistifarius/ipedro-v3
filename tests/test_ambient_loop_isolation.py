@@ -114,3 +114,32 @@ async def test_daily_fortune_keeps_going_after_one_chat_fails(monkeypatch):
         settings=SimpleNamespace(tzinfo=__import__("datetime").timezone.utc),
     )
     assert calls == [1, 2, 3]                 # chat 3 was still attempted
+
+
+# ── confessions go to groups, never into somebody's DM ──────────────────────
+
+@pytest.mark.asyncio
+async def test_a_confession_is_only_ever_surfaced_into_a_group(monkeypatch):
+    """/confess is a DM command, so a private chat is one person. The
+    surfacer drew from every chat seen lately, DMs included, and marked the
+    confession surfaced: it landed in one stranger's DM and never reached a
+    group."""
+    from ipedro import ambient_loops as al
+
+    monkeypatch.setattr(al.random, "random", lambda: 0.0)
+    seen = []
+
+    async def fetchrow(query, *a):
+        return {"id": 1, "text": "i ate the last slice"}
+
+    async def fetch(query, *a):
+        seen.append(query)
+        return [{"chat_id": -100}]
+
+    db = SimpleNamespace(fetchrow=fetchrow, fetch=fetch, execute=AsyncMock())
+    bot = SimpleNamespace(send_message=AsyncMock(
+        return_value=SimpleNamespace(message_id=5)))
+    await al._maybe_surface_confession(bot, db)
+    assert "type IN ('group', 'supergroup')" in seen[0]
+    bot.send_message.assert_awaited_once()
+    assert bot.send_message.await_args.args[0] == -100

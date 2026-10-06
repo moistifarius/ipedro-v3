@@ -43,10 +43,11 @@ _COPULA = r"(?:you(?:'re|\s+are)?|ur|u\s*r|is|are)"
 
 
 @lru_cache(maxsize=16)
-def _insult_re(names_pattern: str) -> re.Pattern:
+def _insult_re(names_pattern: str, bot_word: bool = True) -> re.Pattern:
     # Lookarounds around the names, as in identity.py: an alias can end in
-    # punctuation, where \b would never match.
-    name = rf"(?<!\w)(?:(?:{names_pattern})|bot)(?!\w)"
+    # punctuation, where \b would never match. The generic word "bot" counts
+    # as a name only for a bot that answers to it (identity.answers_to_bot_word).
+    name = rf"(?<!\w)(?:(?:{names_pattern}){'|bot' if bot_word else ''})(?!\w)"
     # Dale's legacy "dude" / "duder" are also what people call each other:
     # "this movie is trash dude" is about the movie. So an insult right
     # BEFORE the name doesn't count when the name is just that word (the
@@ -66,8 +67,9 @@ def _insult_re(names_pattern: str) -> re.Pattern:
 
 def is_insult_to_bot(
     text: str | None, names_pattern: str = DALE.names_pattern,
+    bot_word: bool = True,
 ) -> bool:
-    return bool(text) and _insult_re(names_pattern).search(text) is not None
+    return bool(text) and _insult_re(names_pattern, bot_word).search(text) is not None
 
 
 async def set_flag(
@@ -129,10 +131,10 @@ async def list_flags(db: Database, chat_id: int) -> list[dict]:
 
 async def maybe_auto_grudge(
     db: Database, chat_id: int, user_id: int | None, text: str | None,
-    *, names_pattern: str = DALE.names_pattern,
+    *, names_pattern: str = DALE.names_pattern, bot_word: bool = True,
 ) -> bool:
     """If `text` insults the bot, add a 24h grudge against user_id. Returns True if set."""
-    if user_id is None or not is_insult_to_bot(text, names_pattern):
+    if user_id is None or not is_insult_to_bot(text, names_pattern, bot_word):
         return False
     await set_flag(db, chat_id, user_id, "grudge", ttl=GRUDGE_TTL)
     return True

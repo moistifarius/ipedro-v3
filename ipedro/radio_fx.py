@@ -68,7 +68,10 @@ _FFMPEG_TIMEOUT_SECONDS = 60
 # URLs. ``_ensure_live_pcm()`` walks them in order until one yields valid
 # PCM. Every layer fails open: no URL set → off, all URLs down → bundled
 # or synthetic.
-_LIVE_FETCH_DURATION_SECONDS = 30
+# A live stream delivers audio at 1x, so the clip asked for must fit well
+# inside the time allowed to fetch it (connect + that many seconds of
+# real-time audio). The clip is looped as a bed anyway, so 15 s is plenty.
+_LIVE_FETCH_DURATION_SECONDS = 15
 _LIVE_FETCH_TIMEOUT_SECONDS = 25
 _LIVE_CACHE_TTL_SECONDS = 6 * 3600  # 6h between refreshes
 # No defaults: live fetch is OFF unless the operator explicitly sets
@@ -100,7 +103,7 @@ _live_cache: tuple[np.ndarray, float, str] | None = None
 
 
 def _fetch_live_from_url(url: str) -> np.ndarray:
-    """Pull ~30 s from one streaming URL, decoded to mono float32 at SR.
+    """Pull a short clip from one streaming URL, decoded to mono float32 at SR.
 
     Dispatches on URL scheme:
       * ``kiwi://host:port?freq=...&mode=...`` → KiwiSDR WebSocket client
@@ -138,7 +141,15 @@ def _fetch_live_from_url(url: str) -> np.ndarray:
             capture_output=True, check=False,
             timeout=_LIVE_FETCH_TIMEOUT_SECONDS + 5,
         )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
+        # A real-time source that ran a little long still delivered audio:
+        # keep what arrived (whole float32 samples only) rather than waste it.
+        got = exc.stdout or b""
+        pcm = np.frombuffer(got[: len(got) - len(got) % 4], dtype=np.float32)
+        if pcm.size >= SR and float(np.max(np.abs(pcm))) >= 1e-4:
+            log.info("live shortwave fetch %s timed out; keeping the %.1fs "
+                     "it delivered", url, pcm.size / SR)
+            return pcm.copy()
         log.info("live shortwave fetch %s timed out", url)
         return np.zeros(0, dtype=np.float32)
     if proc.returncode != 0 or not proc.stdout:

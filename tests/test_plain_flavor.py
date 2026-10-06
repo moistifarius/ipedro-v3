@@ -29,7 +29,7 @@ CATCHPHRASE = re.compile(r"sh+-?sha+|pocket\s+sand", re.IGNORECASE)
 # (gated on dale_flavor in chat.py), his help text. Nothing here reaches a
 # plain bot.
 DALE_ONLY = {
-    "handlers/automod.py", "dale_gif_seeds.py", "identity.py", "personas.py",
+    "handlers/automod_bits.py", "dale_gif_seeds.py", "identity.py", "personas.py",
     "handlers/basics.py", "prompts.py", "dale_gifs.py", "handlers/dale.py",
 }
 

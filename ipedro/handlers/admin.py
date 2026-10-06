@@ -11,7 +11,8 @@ from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message,
 )
-from aiogram.exceptions import TelegramBadRequest
+import asyncpg
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 
 from ipedro.auth import is_admin_user
 from ipedro.bot_messages import (
@@ -823,8 +824,14 @@ def build_router(rt: Runtime) -> Router:
         try:
             await rt.bot.send_message(target, body, disable_notification=True)
             await msg.reply("Sent.", disable_notification=True)
-        except TelegramBadRequest as exc:
-            await msg.reply(f"Send failed: {exc.message}", disable_notification=True)
+        except TelegramAPIError as exc:
+            # Not just BadRequest: a chat the bot was kicked from, or a user
+            # who blocked it, is Forbidden, and a flood limit is RetryAfter.
+            # Either way the admin should hear that it did NOT go out.
+            await msg.reply(
+                f"Send failed: {getattr(exc, 'message', None) or exc}",
+                disable_notification=True,
+            )
 
     @r.message(Command("logs"))
     async def logs_cmd(msg: Message) -> None:
@@ -1149,14 +1156,25 @@ def build_router(rt: Runtime) -> Router:
             # so the wizard isn't an empty shell on first open. We don't have
             # a Message scoped to that chat here, so use settings directly.
             s = rt.settings
-            cfg = await rt.chats.upsert_default_config(
-                target_chat_id,
-                response_policy=s.default_response_policy_group,
-                ambient_probability=s.default_ambient_probability,
-                persona=s.default_persona,
-                duckhunt_enabled=s.duckhunt_enabled_by_default,
-                share_photo_enabled=s.share_photo_enabled_by_default,
-            )
+            try:
+                cfg = await rt.chats.upsert_default_config(
+                    target_chat_id,
+                    response_policy=s.default_response_policy_group,
+                    ambient_probability=s.default_ambient_probability,
+                    persona=s.default_persona,
+                    duckhunt_enabled=s.duckhunt_enabled_by_default,
+                    share_photo_enabled=s.share_photo_enabled_by_default,
+                )
+            except asyncpg.ForeignKeyViolationError:
+                # chat_config references chats: an id the bot has never seen
+                # (usually a typo) has no row to hang settings on.
+                if reply_to is not None:
+                    await reply_to.reply(
+                        "I've never seen that chat. /list_chat_ids shows the "
+                        "ones I know.",
+                        disable_notification=True,
+                    )
+                return
         body = _config_wizard_header(cfg, target_chat_id, is_dm_scoped=True)
         kb = _config_keyboard(cfg, target_chat_id=target_chat_id)
         if reply_to:
@@ -2688,6 +2706,12 @@ def build_router(rt: Runtime) -> Router:
             target, include_facts=include_facts,
         )
         parts = [f"{v} {k}" for k, v in counts.items()]
+        # There is no undo, so leave a trace of who did it, to what, and when.
+        await rt.command_log.add(
+            msg.chat.id, msg.from_user.id if msg.from_user else None,
+            "/memory_wipe",
+            f"chat={target} facts={include_facts} {', '.join(parts)}"[:500], True,
+        )
         await msg.reply(
             f"🧹 Wiped chat {target}'s conversation memory: "
             f"{', '.join(parts)}.\n"

@@ -54,11 +54,12 @@ def test_the_workflow_never_interpolates_issue_text_into_a_shell():
     but a run: script may only ever interpolate the issue NUMBER."""
     import yaml
 
-    steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["implement"]["steps"]
-    for step in steps:
-        script = step.get("run", "")
-        assert "github.event.issue.title" not in script, step.get("name")
-        assert "github.event.issue.body" not in script, step.get("name")
+    jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
+    for name, job in jobs.items():
+        for step in job["steps"]:
+            script = step.get("run", "")
+            assert "github.event.issue.title" not in script, (name, step.get("name"))
+            assert "github.event.issue.body" not in script, (name, step.get("name"))
 
 
 # ── filing ───────────────────────────────────────────────────────────────────

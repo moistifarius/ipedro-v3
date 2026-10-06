@@ -1,5 +1,5 @@
-# Pinned to the exact versions this bot was built and tested against
-# (503 tests green). Pinning matters here: with open `>=` ranges, a future
+# Pinned to the exact versions this bot was built and tested against (the
+# whole test suite green). Pinning matters here: with open `>=` ranges, a future
 # `docker compose build` could pull a breaking major of aiogram / anthropic
 # / openai / pydantic and the bot would fail to start with no maintainer
 # around to fix it. To upgrade deliberately: bump a pin, rebuild, run the

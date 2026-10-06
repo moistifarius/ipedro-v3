@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from ipedro.net_safety import PUBLIC_ONLY
 from ipedro.radio_fx import ffmpeg_available
 
 log = logging.getLogger(__name__)
@@ -963,10 +964,13 @@ async def download_media(
 async def _download_media(
     media: Media, *, timeout: float, user_agent: str | None,
 ) -> bytes | None:
+    # The media URL is a Reddit post's own link, i.e. whatever a member
+    # chose to post: public addresses only, on every redirect hop too.
     async with httpx.AsyncClient(
         headers={"User-Agent": user_agent or _USER_AGENT},
         timeout=timeout,
         follow_redirects=True,
+        event_hooks=PUBLIC_ONLY,
     ) as client:
         if media.kind == "video":
             video = await _download(client, media.url, _MAX_VIDEO_BYTES)

@@ -16,9 +16,10 @@ We mitigate both:
   * `max_inactive_connection_lifetime=60` recycles idle connections
     much faster than the default 300s, shrinking the race window.
   * Every helper (`execute`, `fetch`, `fetchrow`, `fetchval`) retries
-    once on `ConnectionDoesNotExistError` / `InterfaceError`. The
-    failed connection gets discarded by asyncpg and the retry acquires
-    a fresh one.
+    once when the connection turns out to be dead. The failed connection
+    gets discarded by asyncpg and the retry acquires a fresh one. See
+    `_safe_to_retry` for exactly when a retry is allowed: a statement that
+    may already have run is not replayed unless it's a plain read.
 
 This trades a tiny bit of connection churn for resilience against the
 "bot stops responding after sitting idle" symptom.
@@ -27,6 +28,7 @@ This trades a tiny bit of connection churn for resilience against the
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import asyncpg
@@ -35,12 +37,45 @@ log = logging.getLogger(__name__)
 
 
 # asyncpg exceptions that indicate the connection we got from the pool was
-# already dead. Always safe to retry once — we just drop the dead conn and
-# grab a fresh one.
+# dead. Whether retrying is SAFE depends on which one and on the statement:
+# see _safe_to_retry.
 _STALE_CONN_ERRORS: tuple[type[BaseException], ...] = (
     asyncpg.exceptions.ConnectionDoesNotExistError,
     asyncpg.exceptions.InterfaceError,
 )
+
+_WRITE_KEYWORD_RE = re.compile(
+    r"\b(?:INSERT|UPDATE|DELETE|MERGE|CALL|DO|CREATE|ALTER|DROP|TRUNCATE|"
+    r"NEXTVAL|SETVAL|PG_NOTIFY)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_read_only(query: str) -> bool:
+    """A plain SELECT (or a WITH that only selects): running it twice is
+    the same as running it once."""
+    q = query.lstrip().lstrip("(").lstrip()
+    head = q[:6].upper()
+    if not (head.startswith("SELECT") or head.startswith("WITH")):
+        return False
+    return not _WRITE_KEYWORD_RE.search(q) and " FOR UPDATE" not in q.upper()
+
+
+def _safe_to_retry(exc: BaseException, query: str) -> bool:
+    """May this statement be sent again after `exc`?
+
+    InterfaceError ("connection is closed", "pool is closing") is raised
+    BEFORE anything is sent, so a retry can't replay anything.
+    ConnectionDoesNotExistError is raised when the socket drops WHILE the
+    statement is in flight, and the server may already have committed it
+    (helpers autocommit). Replaying a write then applied it twice: karma
+    +2 for one reaction, a boss duck hit twice, a quote saved as #7 and #8,
+    a usage row counted twice. Reads can't be damaged, so those still retry;
+    a write that loses its connection mid-flight raises instead.
+    """
+    if isinstance(exc, asyncpg.exceptions.InterfaceError):
+        return True
+    return _is_read_only(query)
 
 
 async def _register_vector(conn: asyncpg.Connection) -> None:
@@ -78,53 +113,29 @@ class Database:
     async def close(self) -> None:
         await self._pool.close()
 
-    async def execute(self, query: str, *args: Any) -> str:
+    async def _run(self, op: str, query: str, args: tuple) -> Any:
         for attempt in range(2):
             try:
                 async with self._pool.acquire() as conn:
-                    return await conn.execute(query, *args)
+                    return await getattr(conn, op)(query, *args)
             except _STALE_CONN_ERRORS as exc:
-                if attempt == 0:
-                    log.warning("DB execute hit stale connection, retrying: %s", exc)
+                if attempt == 0 and _safe_to_retry(exc, query):
+                    log.warning("DB %s hit stale connection, retrying: %s", op, exc)
                     continue
                 raise
         raise RuntimeError("unreachable")
+
+    async def execute(self, query: str, *args: Any) -> str:
+        return await self._run("execute", query, args)
 
     async def fetch(self, query: str, *args: Any) -> list[asyncpg.Record]:
-        for attempt in range(2):
-            try:
-                async with self._pool.acquire() as conn:
-                    return await conn.fetch(query, *args)
-            except _STALE_CONN_ERRORS as exc:
-                if attempt == 0:
-                    log.warning("DB fetch hit stale connection, retrying: %s", exc)
-                    continue
-                raise
-        raise RuntimeError("unreachable")
+        return await self._run("fetch", query, args)
 
     async def fetchrow(self, query: str, *args: Any) -> asyncpg.Record | None:
-        for attempt in range(2):
-            try:
-                async with self._pool.acquire() as conn:
-                    return await conn.fetchrow(query, *args)
-            except _STALE_CONN_ERRORS as exc:
-                if attempt == 0:
-                    log.warning("DB fetchrow hit stale connection, retrying: %s", exc)
-                    continue
-                raise
-        raise RuntimeError("unreachable")
+        return await self._run("fetchrow", query, args)
 
     async def fetchval(self, query: str, *args: Any) -> Any:
-        for attempt in range(2):
-            try:
-                async with self._pool.acquire() as conn:
-                    return await conn.fetchval(query, *args)
-            except _STALE_CONN_ERRORS as exc:
-                if attempt == 0:
-                    log.warning("DB fetchval hit stale connection, retrying: %s", exc)
-                    continue
-                raise
-        raise RuntimeError("unreachable")
+        return await self._run("fetchval", query, args)
 
 
 _db_instance: Database | None = None

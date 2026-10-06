@@ -141,7 +141,7 @@ def build_router(rt: Runtime) -> Router:
         if await over_limit(rt, msg, "image"):
             return
         await msg.bot.send_chat_action(msg.chat.id, "upload_photo")
-        data = await rt.openai.generate_image(prompt)
+        data = await rt.openai.generate_image(prompt, chat_id=msg.chat.id)
         if not data:
             await msg.reply("Image generation failed.", disable_notification=True)
             return
@@ -165,13 +165,17 @@ def build_router(rt: Runtime) -> Router:
         file = await msg.bot.get_file(voice.file_id)
         buf = io.BytesIO()
         await msg.bot.download_file(file.file_path, destination=buf)
-        text = await rt.openai.translate_audio(buf, filename="voice.ogg")
+        text = await rt.openai.translate_audio(
+            buf, filename="voice.ogg", chat_id=msg.chat.id,
+        )
         await msg.reply(text or "Translation failed.", disable_notification=True)
 
     @r.message(Command("catfact"))
     async def catfact(msg: Message) -> None:
         await msg.bot.send_chat_action(msg.chat.id, "typing")
-        fact = await rt.openai.cheap_completion(CAT_FACT_PROMPT, max_tokens=120)
+        fact = await rt.openai.cheap_completion(
+            CAT_FACT_PROMPT, max_tokens=120, chat_id=msg.chat.id,
+        )
         await msg.reply(catify(fact or fallback_cat_fact()), disable_notification=True)
 
     @r.message(Command("beneficiality"))
@@ -184,6 +188,7 @@ def build_router(rt: Runtime) -> Router:
         conv = "\n".join(f"{m.role}: {m.content}" for m in recent)
         score = await rt.openai.cheap_completion(
             BENEFICIALITY_PROMPT.format(conversation=conv), max_tokens=10,
+            chat_id=msg.chat.id,
         )
         await msg.reply(
             f"Beneficiality score: {score or '?'}",

@@ -166,7 +166,7 @@ def _mentions_pedro(
         return False
     return (
         ident.name_re.search(text) is not None
-        or _BOT_WORD_RE.search(text) is not None
+        or (ident.answers_to_bot_word and _BOT_WORD_RE.search(text) is not None)
     )
 
 
@@ -352,6 +352,7 @@ async def _meme_subject(rt: Runtime, msg: Message, cfg, topic: str) -> str:
 
 
 _MEME_TOPIC_MAX_CHARS = 200
+_AUTOMOD_MAX_CHARS = 600
 
 
 async def _handle_meme_generate(rt: Runtime, msg: Message, cfg, topic: str) -> None:
@@ -688,7 +689,7 @@ def build_router(rt: Runtime) -> Router:
         # Auto-grudge: insults toward the bot earn a 24h snark flag.
         if await maybe_auto_grudge(
             rt.db, msg.chat.id, from_user_id, typed,
-            names_pattern=ident.names_pattern,
+            names_pattern=ident.names_pattern, bot_word=ident.answers_to_bot_word,
         ):
             log.info(
                 "Auto-grudge added: chat=%s user=%s text=%r",
@@ -764,8 +765,10 @@ def build_router(rt: Runtime) -> Router:
             or msg.chat.type == "private"
             or cfg.response_policy == "always"
         )
+        # Scan only the start of the message: the table is for short chatter,
+        # and every pattern runs on the event loop against member text.
         automod = (
-            _automod_response(typed, dale_gifs=ident.dale_flavor)
+            _automod_response(typed[:_AUTOMOD_MAX_CHARS], dale_gifs=ident.dale_flavor)
             if (
                 cfg.automod_enabled and cfg.response_policy != "commands"
                 and not aimed_at_him
@@ -903,6 +906,7 @@ def build_router(rt: Runtime) -> Router:
                 speaker=display_name(msg.from_user) if msg.from_user else None,
                 text=typed, memory_enabled=cfg.memory_enabled,
                 user_id=from_user_id, bot_name=ident.name,
+                bot_word=ident.answers_to_bot_word,
             )
         ):
             incoming = replace(incoming, has_mention_of_bot=True)

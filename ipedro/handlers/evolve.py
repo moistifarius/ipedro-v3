@@ -195,8 +195,9 @@ def build_router(rt: Runtime) -> Router:
         await _edit(
             cb,
             f"Request #{request_id} filed as issue #{number}:\n{url}\n\n"
-            "The build turns it into a pull request. Nothing merges "
-            "without you.",
+            "The build turns it into a pull request. A change to plain "
+            "content (what I say) can merge itself once the tests pass; "
+            "anything else waits for you.",
         )
         await rt.command_log.add(
             cb.message.chat.id, ctx.user_id, "/evolve",
