@@ -85,6 +85,10 @@ class Settings(BaseSettings):
     # should be a fine-grained PAT scoped to the one repo with Issues
     # read/write and NOTHING else: the bot only ever files issues, and the
     # code itself is written by the Action under its own credentials.
+    # Know what it is worth, though: the workflow starts an agent on any
+    # issue the owner's account opens with the bot's marker, so whoever
+    # holds this token can start one as the owner. (Anything but plain
+    # content still waits for the owner's review.)
     # Unset = /evolve explains what's missing instead of failing.
     evolve_github_token: str | None = None
     evolve_github_repo: str = "moistifarius/ipedro-v3"

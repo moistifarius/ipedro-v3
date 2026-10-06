@@ -73,8 +73,11 @@ connection, which would need a pinned resolver.
   who can read that table, or a backup of it, can act as those bots. The
   message that carries a token to `/newbot` is deleted on sight, and a token
   posted in a group is deleted and the owner is told.
-- Other bots inherit the model API keys (they use the same providers) but
-  not the owner's `EVOLVE_GITHUB_TOKEN`, their own database or Dale's.
+- Other bots inherit the model API keys (they use the same providers) and
+  `ADMIN_USER_IDS` (so Dale's bot admins are bot admins on every bot), but
+  not the owner's `EVOLVE_GITHUB_TOKEN`, and each has its own database.
+  Only Dale registers `/evolve` and `/newbot`; the owner tier exists on Dale
+  alone.
 - `agents.md`, kept for historical context, **previously contained real
   Telegram and OpenAI keys**. If you re-use this repository, treat those
   keys as compromised and rotate them. (Removing the file from the working

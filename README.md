@@ -85,7 +85,6 @@ a second message.
 | `/beneficiality` | Score whether the bot would butt in |
 | `/whatdid @user` | Confidently summarize what someone's been up to |
 | `/tldr [duration]` | Summarize the recent chat (default 24h) |
-| `/mood` | Bot's current mood + word of the day |
 | `/haiku` | Haiku about the recent chat |
 | `/this_or_that A \| B` | Bot picks, dramatically |
 | `/echo @user [topic]` | Mimic that user's style |

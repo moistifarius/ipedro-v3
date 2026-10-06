@@ -793,6 +793,17 @@ def build_router(rt: Runtime) -> Router:
             await _log_activity(
                 rt, msg.chat.id, "automod", f"{kind} trigger on {typed[:60]!r}",
             )
+            # Like the other exits that don't call the model: the message was
+            # recorded, so give summarization its turn (a long run of canned
+            # bits otherwise let a chat grow past its trigger unsummarized).
+            if cfg.memory_enabled:
+                try:
+                    await maybe_summarize(
+                        rt.memory, rt.openai, rt.settings, msg.chat.id,
+                    )
+                except Exception as exc:
+                    log.warning("summarize after automod failed in %s: %s",
+                                msg.chat.id, exc)
             return
 
         # Ambient emoji reaction (rare, never on commands or our own intercepts).

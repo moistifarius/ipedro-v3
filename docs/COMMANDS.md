@@ -56,14 +56,22 @@ Returns the current chat's id.
 ### `/chat_config [<field> <value>]`
 Without arguments, prints the current per-chat config. With arguments, sets
 one field. Editable by chat admins (creator/admin in groups) and by the
-bot's admin user. Fields:
+bot's admin user. Switches take `on` or `off` (also `yes`/`no`,
+`true`/`false`, `1`/`0`); anything else changes nothing and says so. Fields:
 
 | Field | Values |
 |---|---|
 | `policy` | `commands` \| `mention` \| `reply` \| `ambient` \| `always` |
 | `ambient` | `0.0`–`1.0` probability used by the `ambient` policy |
-| `persona` | `pedro` \| `neutral` \| any free-form name + custom prompt |
+| `persona` | `dude` (the master persona, `pedro` is the same) \| `neutral` \| any free-form name + custom prompt |
 | `duckhunt` | `on` / `off` |
+| `sharephoto` | `on` / `off` — Dale's occasional shared photo (Dale only) |
+| `comic` | `on` / `off` — the daily four-panel comic |
+| `fortune` | `on` / `off` — the daily fortune |
+| `monthlyrecap` | `on` / `off` — the month-in-review post |
+| `onthisday` | `on` / `off` — the daily look back |
+| `vision` | `on` / `off` — look at photos, stickers and GIFs |
+| `automod` | `on` / `off` — the canned copypasta / meme bits |
 | `voice` | `on` / `off` — transcribe inbound voice notes |
 | `memory` | `on` / `off` — store messages and build context from history |
 | `ether` | `on` / `off` — make this chat reachable as a destination for `/ether` radio transmissions sent from other ether-enabled chats. Off by default. Needs ≥ 2 chats opted in for a transmission to have anywhere to land. |

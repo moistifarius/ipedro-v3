@@ -53,6 +53,12 @@ handful of bots and runs out somewhere past a dozen; raise `max_connections`
 (`command: postgres -c max_connections=200` on the `postgres` service in the
 compose file) before adding many more.
 
+**Bot admins.** A bot started by the supervisor inherits Dale's environment
+apart from the few things set per bot (its token, database, name, persona,
+`MANAGES_BOTS`, and not `EVOLVE_GITHUB_TOKEN`). That includes `ADMIN_USER_IDS`,
+so Dale's bot admins are bot admins on every other bot too. The owner (the
+one id who can `/newbot` and `/evolve`) works only on Dale.
+
 **Who answers to "bot".** With several bots in a group, "bot, settle this"
 could only mean all of them. So only Dale (the deployment with
 `MANAGES_BOTS=true`) answers to the generic word "bot"; the others answer to
@@ -107,7 +113,9 @@ python -m scripts.migrate_legacy \
     --default-chat-id -1001273502662
 ```
 
-Only paths that actually exist are imported; the migrator is idempotent.
+Only paths that actually exist are imported. Run it **once**: only the chat-id
+import is repeatable. The duck-point import adds the file's counts again on
+every run, and the history import appends a second copy.
 
 ## Operational tips
 

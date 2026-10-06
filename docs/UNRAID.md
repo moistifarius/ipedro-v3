@@ -112,15 +112,25 @@ The schema is applied at startup; new schema versions are idempotent.
 
 ## Backup / restore
 
+Every bot has its own database on this server: Dale's is `ipedro`, and each
+bot added with `/newbot` has `ipedro_bot_<id>`. Dump the **whole server**, so
+the other bots' memory is in the backup too:
+
 ```bash
 # Backup
-docker compose exec postgres pg_dump -U ipedro ipedro \
+docker compose exec postgres pg_dumpall -U ipedro \
     | gzip > /mnt/user/backups/ipedro-$(date +%F).sql.gz
 
-# Restore
+# Restore (into a fresh, empty server)
 gunzip -c /mnt/user/backups/ipedro-YYYY-MM-DD.sql.gz \
-    | docker compose exec -T postgres psql -U ipedro -d ipedro
+    | docker compose exec -T postgres psql -U ipedro -d postgres
 ```
+
+(`pg_dump -U ipedro ipedro` alone saves only Dale: after a restore from it
+the supervisor would create the other bots' databases empty.) The registry in
+Dale's database holds the other bots' Telegram tokens in plaintext, so keep
+the backups where only you can read them. The Appdata Backup plugin copies
+the whole `pgdata` folder, which includes every database.
 
 ## Reddit memes (`/redditmeme`)
 

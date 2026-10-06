@@ -154,3 +154,26 @@ async def test_activity_log_failure_never_breaks_the_handler(monkeypatch):
     msg = _msg(text="thanks dale appreciate it")
     await _handler(rt)(msg)  # must not raise
     msg.reply.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_canned_bit_still_gives_summarization_its_turn(monkeypatch):
+    """The automod exit recorded the message and returned without it, unlike
+    every other exit that skips the model: a long run of canned bits let the
+    chat grow past its trigger unsummarized."""
+    summarized = AsyncMock()
+    monkeypatch.setattr(chat, "maybe_summarize", summarized)
+    rt = _rt()
+    rt.chats.get_config.return_value.memory_enabled = True
+    rt.memory.record_message = AsyncMock()
+    await _handler(rt)(_msg(text="thats gay"))
+    summarized.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_summarizer_failure_after_a_canned_bit_goes_unnoticed_by_the_chat(monkeypatch):
+    monkeypatch.setattr(chat, "maybe_summarize", AsyncMock(side_effect=RuntimeError("model down")))
+    rt = _rt()
+    rt.chats.get_config.return_value.memory_enabled = True
+    rt.memory.record_message = AsyncMock()
+    await _handler(rt)(_msg(text="thats gay"))          # must not raise

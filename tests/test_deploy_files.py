@@ -117,3 +117,15 @@ def test_ci_runs_the_tests_on_the_python_production_runs():
         if str(step.get("uses", "")).startswith("actions/setup-python")
     ]
     assert versions and set(versions) == {prod}, (versions, prod)
+
+
+def test_relative_links_in_the_docs_point_at_files_that_exist():
+    """The audit found docs that sent you to files that weren't there."""
+    docs = [ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md"))]
+    link = re.compile(r"\]\((?!https?://|mailto:|#)([^)#\s]+)(?:#[^)]*)?\)")
+    broken = []
+    for doc in docs:
+        for target in link.findall(doc.read_text()):
+            if not (doc.parent / target).exists():
+                broken.append(f"{doc.relative_to(ROOT)} -> {target}")
+    assert not broken, "\n".join(broken)

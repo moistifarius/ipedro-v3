@@ -5,7 +5,10 @@ Usage:
                                      --duckpoints ../iPedro/iPedro/data/duckpoint \
                                      --chat-history ../iPedro/iPedro/data/chat_history
 
-Only files that exist are imported. The migrator is idempotent.
+Only files that exist are imported. Run it ONCE: the chat-id import is an
+upsert and safe to repeat, but the duck-point import adds the file's counts
+again on every run, and the chat-history import appends another copy (its
+rows have no message id, so nothing deduplicates them).
 """
 
 from __future__ import annotations
