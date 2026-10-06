@@ -305,3 +305,61 @@ async def test_a_mangled_button_is_stale(store):
     await _handler(rt, "callback_query", "on_evolve")(cb)
     store.claim.assert_not_awaited()
     assert "Stale" in cb.answer.await_args.args[0]
+
+
+# ── a request can't be stranded in 'filing' ──────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_an_expired_tap_does_not_strand_the_request(store):
+    """cb.answer raising (a too-old callback query) sat unguarded between
+    the atomic claim and the filing, so the handler died with the request
+    'filing' forever and nothing filed."""
+    rt = _rt()
+    cb = _cb("evo:12:file")
+    cb.answer = AsyncMock(side_effect=RuntimeError("query is too old"))
+    await _handler(rt, "callback_query", "on_evolve")(cb)
+    store.file.assert_awaited_once()
+    store.filed.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_any_failure_after_the_claim_is_recorded_as_failed(store):
+    store.file.side_effect = KeyError("number")        # not a FilingError
+    rt = _rt()
+    cb = _cb("evo:12:file")
+    await _handler(rt, "callback_query", "on_evolve")(cb)
+    store.failed.assert_awaited_once()
+    assert store.failed.await_args.args[2] == "unexpected KeyError"
+    store.filed.assert_not_awaited()
+    assert "didn't file" in cb.message.edit_text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_if_recording_the_filed_issue_fails_the_owner_still_gets_the_link(store):
+    """The issue exists. A bookkeeping error must not hide it (a retry
+    would file it twice)."""
+    store.filed.side_effect = RuntimeError("db hiccup")
+    rt = _rt()
+    cb = _cb("evo:12:file")
+    await _handler(rt, "callback_query", "on_evolve")(cb)
+    assert "https://gh/i/17" in cb.message.edit_text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response", [
+    httpx.Response(201, json={"oops": 1}),
+    httpx.Response(201, content=b"not json"),
+])
+async def test_a_201_with_an_odd_body_is_a_filing_error_not_a_crash(monkeypatch, response):
+    _patch_transport(monkeypatch, lambda r: response)
+    with pytest.raises(evolve.FilingError):
+        await evolve.file_issue(token="t", repo="o/r", title="T", body="B")
+
+
+@pytest.mark.asyncio
+async def test_requests_stuck_filing_are_swept_so_they_can_be_retried():
+    db = SimpleNamespace(fetch=AsyncMock(return_value=[{"id": 4}, {"id": 9}]))
+    assert await evolve.recover_stuck(db) == 2
+    sql = db.fetch.await_args.args[0]
+    assert "status = 'filing'" in sql and "decided_at < NOW()" in sql
+    assert f"{evolve.STUCK_FILING_MINUTES} minutes" in sql

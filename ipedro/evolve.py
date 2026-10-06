@@ -85,6 +85,23 @@ async def mark_filed(
     )
 
 
+STUCK_FILING_MINUTES = 10
+
+
+async def recover_stuck(db: Database) -> int:
+    """Requests left 'filing' by a crash or a restart mid-filing are marked
+    failed, so they show as retryable instead of looking busy forever (their
+    buttons answer 'Already handled'). Returns how many."""
+    rows = await db.fetch(
+        "UPDATE change_requests SET status = 'failed', "
+        "error = 'interrupted while filing' "
+        "WHERE status = 'filing' "
+        f"AND decided_at < NOW() - INTERVAL '{STUCK_FILING_MINUTES} minutes' "
+        "RETURNING id"
+    )
+    return len(rows)
+
+
 async def mark_failed(db: Database, request_id: int, error: str) -> None:
     await db.execute(
         "UPDATE change_requests SET status = 'failed', error = $2 "
@@ -159,5 +176,11 @@ async def file_issue(
         except Exception:
             pass
         raise FilingError(f"GitHub said {resp.status_code}{': ' + detail if detail else ''}")
-    data = resp.json()
-    return int(data["number"]), str(data["html_url"])
+    try:
+        data = resp.json()
+        return int(data["number"]), str(data["html_url"])
+    except Exception as exc:
+        # A 201 whose body isn't the issue: don't let a KeyError out of
+        # here. The handler only expects FilingError and used to leave the
+        # request stuck in 'filing'.
+        raise FilingError("GitHub accepted it but sent back an odd reply") from exc

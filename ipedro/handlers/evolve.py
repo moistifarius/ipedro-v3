@@ -56,6 +56,10 @@ async def _usage_and_recent(rt: Runtime) -> str:
         "it the way you'd tell a developer. You'll see the issue before "
         "anything is filed.",
     ]
+    try:
+        await evolve.recover_stuck(rt.db)
+    except Exception as exc:
+        log.info("evolve: couldn't sweep stuck requests: %s", exc)
     rows = await evolve.recent_requests(rt.db, limit=8)
     if rows:
         lines.append("\nRecent requests:")
@@ -146,7 +150,15 @@ def build_router(rt: Runtime) -> Router:
         if claimed is None:
             await cb.answer("Already handled.", show_alert=True)
             return
-        await cb.answer("Filing…")
+        # From here the request is 'filing' and only mark_filed/mark_failed
+        # moves it on, so nothing below may escape before one of them runs.
+        # (Answering the tap used to sit unguarded here: a too-old callback
+        # query raised, the handler died, and the request stayed 'filing'
+        # for good with nothing filed.)
+        try:
+            await cb.answer("Filing…")
+        except Exception as exc:
+            log.info("evolve: couldn't answer the tap: %s", exc)
         token = rt.settings.evolve_github_token
         title, body = evolve.build_issue(request_id, claimed["request"])
         try:
@@ -156,19 +168,30 @@ def build_router(rt: Runtime) -> Router:
                 token=token, repo=rt.settings.evolve_github_repo,
                 title=title, body=body,
             )
-        except evolve.FilingError as exc:
-            await evolve.mark_failed(rt.db, request_id, str(exc))
+        except Exception as exc:
+            reason = (
+                str(exc) if isinstance(exc, evolve.FilingError)
+                else f"unexpected {type(exc).__name__}"
+            )
+            if not isinstance(exc, evolve.FilingError):
+                log.exception("evolve: filing request #%s failed", request_id)
+            await evolve.mark_failed(rt.db, request_id, reason)
             await _edit(
                 cb,
-                f"Request #{request_id} didn't file: {exc}. "
+                f"Request #{request_id} didn't file: {reason}. "
                 "Send /evolve again to retry.",
             )
             await rt.command_log.add(
                 cb.message.chat.id, ctx.user_id, "/evolve",
-                f"#{request_id} file", False, str(exc),
+                f"#{request_id} file", False, reason,
             )
             return
-        await evolve.mark_filed(rt.db, request_id, number, url)
+        try:
+            await evolve.mark_filed(rt.db, request_id, number, url)
+        except Exception:
+            # The issue EXISTS. Say so, rather than let a bookkeeping error
+            # hide the link (a retry would file it twice).
+            log.exception("evolve: issue #%s filed but not recorded", number)
         await _edit(
             cb,
             f"Request #{request_id} filed as issue #{number}:\n{url}\n\n"

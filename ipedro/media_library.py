@@ -46,6 +46,24 @@ _MEDIA_RE = re.compile(
     r"stickers?|memes?|videos?|clips?|selfies?)\b",
     re.IGNORECASE,
 )
+# Words of the REQUEST, not of the picture: the verbs and nouns detect_recall
+# itself requires, plus filler and time words. Left in the keyword fallback
+# they matched almost any description ("send that pic of the grill" kept
+# "send" and "that", so the newest description containing "that" won).
+_QUERY_NOISE = frozenset({
+    "send", "sent", "sending", "show", "shows", "showed", "post", "posted",
+    "find", "found", "pull", "dig", "repost", "resend", "share", "shared",
+    "drop", "gimme", "give", "bring", "back", "link", "where", "again",
+    "that", "this", "these", "those", "there", "here", "from", "with",
+    "what", "which", "when", "have", "were", "been", "last", "week", "weeks",
+    "month", "months", "year", "yesterday", "today", "earlier", "ago",
+    "pics", "pic", "picture", "pictures", "photo", "photos", "image",
+    "images", "screenshot", "screenshots", "screencap", "screencaps", "gifs",
+    "sticker", "stickers", "meme", "memes", "video", "videos", "clip",
+    "clips", "selfie", "selfies", "please", "could", "would", "should",
+    "some", "about", "know", "remember", "other", "another", "same",
+})
+
 # Not a request for one of OURS: making a new one is the meme/image path.
 _MAKE_RE = re.compile(r"\b(?:make|create|draw|generate|render)\b", re.IGNORECASE)
 
@@ -116,6 +134,18 @@ async def _rows_by_id(db, chat_id: int, ids: list[int]) -> dict[int, dict]:
     return {r["id"]: dict(r) for r in rows}
 
 
+def _bot_name_words(rt) -> set[str]:
+    """The bot's own names, which people say in a request and which are
+    never what the picture shows."""
+    from ipedro import identity
+    ident = identity.from_settings(getattr(rt, "settings", None) or object())
+    words = set(re.findall(r"[a-z0-9']+", ident.name.lower()))
+    words |= set(re.findall(r"[a-z0-9']+", ident.primary_alias))
+    if ident.dale_flavor:
+        words |= {"dale", "rusty", "shackleford", "pedro", "dude", "duder", "idale"}
+    return words
+
+
 async def search(rt, chat_id: int, query: str, *, k: int = 3) -> list[dict]:
     """Best-first candidates for ``query`` among this chat's pictures. Each
     carries a ``similarity`` (vector) or None (keyword fallback)."""
@@ -137,9 +167,14 @@ async def search(rt, chat_id: int, query: str, *, k: int = 3) -> list[dict]:
                     out.append({**row, "similarity": float(h.get("similarity") or 0)})
             if out:
                 return out
-    # Keyword fallback: any distinctive word in the description or caption.
+    # Keyword fallback (no pgvector / no embeddings key). Distinctive words
+    # only: not the request's own verbs and nouns, and not the bot's name.
     # POSIX regex (~*) because ILIKE has no alternation.
-    words = [w for w in re.findall(r"[a-z0-9']+", query.lower()) if len(w) >= 4]
+    noise = set(_QUERY_NOISE) | _bot_name_words(rt)
+    words = list(dict.fromkeys(
+        w for w in re.findall(r"[a-z0-9']+", query.lower())
+        if len(w) >= 4 and w not in noise
+    ))
     if not words:
         return []
     pattern = "|".join(re.escape(w) for w in words)
@@ -148,9 +183,20 @@ async def search(rt, chat_id: int, query: str, *, k: int = 3) -> list[dict]:
         "  FROM media_library "
         " WHERE chat_id = $1 AND (description ~* $2 OR caption ~* $2) "
         " ORDER BY created_at DESC LIMIT $3",
-        chat_id, pattern, k,
+        chat_id, pattern, max(k, 1) * 10,
     )
-    return [{**dict(r), "similarity": None} for r in rows]
+    # Recency alone picked whatever matched ONE word and was newest. Rank by
+    # how many of the distinctive words a picture matches, and when the
+    # request had several, insist on at least half of them.
+    need = (len(words) + 1) // 2
+    scored = []
+    for r in rows:
+        hay = f"{r['description'] or ''} {r['caption'] or ''}".lower()
+        hits = sum(1 for w in words if w in hay)
+        if hits >= need:
+            scored.append((hits, r))
+    scored.sort(key=lambda hr: hr[0], reverse=True)      # stable: newest first among ties
+    return [{**dict(r), "similarity": None} for _, r in scored[:k]]
 
 
 async def recent(rt, chat_id: int, *, limit: int = 8) -> list[dict]:

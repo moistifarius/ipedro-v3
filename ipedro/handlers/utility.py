@@ -23,7 +23,7 @@ from aiogram.types import (
 from ipedro.bot_messages import track
 from ipedro.auth import is_admin_user
 from ipedro.handlers.common import (
-    display_name, get_or_create_chat_config, require_memory,
+    display_name, get_or_create_chat_config, over_limit, require_memory,
 )
 from ipedro.on_this_day import build_on_this_day, render_on_this_day
 from ipedro.meme_finder import find_relevant_meme
@@ -71,9 +71,14 @@ def _parse_user_date(raw: str) -> tuple[int, int, int | None] | None:
     raw = raw.strip()
     for fmt in _DATE_FORMATS:
         try:
-            dt = datetime.strptime(raw, fmt)
-            year = dt.year if "%Y" in fmt else None
-            return dt.month, dt.day, year
+            if "%Y" in fmt:
+                dt = datetime.strptime(raw, fmt)
+                return dt.month, dt.day, dt.year
+            # No year given: parse inside a leap year. strptime defaults the
+            # year to 1900, which isn't one, so Feb 29 (a real birthday)
+            # could never be set.
+            dt = datetime.strptime(f"2000 {raw}", f"%Y {fmt}")
+            return dt.month, dt.day, None
         except ValueError:
             continue
     return None
@@ -1071,6 +1076,8 @@ def build_router(rt: Runtime) -> Router:
                 disable_notification=True,
             )
             return
+        if await over_limit(rt, msg, "image"):
+            return
         body = raw[1].strip()
         parts = [p.strip() for p in body.split("|", 1)]
         top = parts[0]
@@ -1235,7 +1242,10 @@ def _config_wizard_header(cfg, target_chat_id: int, *, is_dm_scoped: bool) -> st
         f"📡 <b>Response policy:</b> <code>{cfg.response_policy}</code>\n"
         f"   ambient probability: <code>{ambient_pct}</code> "
         f"(<code>{cfg.ambient_probability:.2f}</code>)\n"
-        f"🎭 <b>Persona:</b> <code>{cfg.persona}</code>\n"
+        # The persona NAME is free text a chat admin typed (/chat_config
+        # persona <name> ...). Unescaped under parse_mode=HTML, a '<' in it
+        # made the whole panel unparseable and bricked /config for the chat.
+        f"🎭 <b>Persona:</b> <code>{html.escape(str(cfg.persona))}</code>\n"
         f"{custom_line}\n"
         f"\n"
         f"<b>Features</b>\n"

@@ -20,20 +20,29 @@ from ipedro.db.pool import Database
 log = logging.getLogger(__name__)
 
 _DURATION_RE = re.compile(r"(\d+)\s*([smhdw])", re.IGNORECASE)
+# The whole token must be duration pieces ("2h30m"), not merely contain one:
+# finditer alone read "x5my" as five minutes.
+_DURATION_FULL_RE = re.compile(r"(?:\d+\s*[smhdw])+", re.IGNORECASE)
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+# A year. Beyond it a duration isn't a reminder, and an unbounded one
+# overflowed datetime/timedelta inside /remind, /tldr and /shutup, which
+# the dispatcher caught and logged as a bare traceback: no reply at all.
+MAX_DURATION_SECONDS = 366 * 86400
 
 
 def parse_duration(token: str) -> int | None:
-    """Parse a duration like '5m', '2h30m', '1d', '90s'. Returns seconds, or None."""
-    if not token:
+    """Parse a duration like '5m', '2h30m', '1d', '90s'. Returns seconds, or
+    None for anything that isn't one, or is longer than a year."""
+    token = (token or "").strip()
+    if not token or not _DURATION_FULL_RE.fullmatch(token):
         return None
     total = 0
-    matched_any = False
     for m in _DURATION_RE.finditer(token):
-        matched_any = True
         n, unit = int(m.group(1)), m.group(2).lower()
         total += n * _UNIT_SECONDS[unit]
-    if not matched_any or total <= 0:
+        if total > MAX_DURATION_SECONDS:
+            return None
+    if total <= 0:
         return None
     return total
 

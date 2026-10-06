@@ -38,6 +38,7 @@ from ipedro.personas import (
     current_master_prompt, default_prompt, set_master_prompt_override,
 )
 from ipedro.runtime import Runtime
+from ipedro.text_chunks import chunk_lines
 from ipedro.silenced_chats import (
     is_silenced, list_silenced, silence as silence_chat, unsilence as unsilence_chat,
 )
@@ -457,6 +458,28 @@ _MGM_LEAVES: tuple[str, ...] = tuple(sorted(set(
 )))
 
 
+async def _reply_in_chunks(
+    msg: Message, lines: list[str], *, header: str | None = None,
+    max_chunks: int = 6,
+) -> None:
+    """Send `lines` as however many messages they need (see
+    ipedro/text_chunks.py), with a "(2/4)" counter when there are several,
+    and say so if more than `max_chunks` would have been needed."""
+    chunks = chunk_lines(lines)
+    shown = chunks[:max_chunks]
+    for i, chunk in enumerate(shown, 1):
+        tag = ""
+        if header:
+            tag = header + (f" ({i}/{len(chunks)})" if len(chunks) > 1 else "") + "\n"
+        await msg.reply(tag + chunk, disable_notification=True)
+    if len(chunks) > max_chunks:
+        await msg.reply(
+            f"… {len(chunks) - max_chunks} more message(s) not shown. "
+            "Ask for fewer, or filter.",
+            disable_notification=True,
+        )
+
+
 # Known text models for /ai_model and aip:list pickers. Promotes the
 # private price-table keys without coupling admin.py to openai_client
 # internals. Update by hand when adding a new model price entry.
@@ -829,21 +852,7 @@ def build_router(rt: Runtime) -> Router:
                 disable_notification=True,
             )
             return
-        # Telegram caps a single message at 4096 chars; chunk and send.
-        chunks: list[str] = []
-        buf = ""
-        for ln in lines:
-            extra = ln + "\n"
-            if len(buf) + len(extra) > 3800:
-                chunks.append(buf)
-                buf = extra
-            else:
-                buf += extra
-        if buf:
-            chunks.append(buf)
-        for i, chunk in enumerate(chunks[:5], 1):
-            header = f"-- logs ({i}/{len(chunks)}) --\n" if len(chunks) > 1 else ""
-            await msg.reply(header + chunk, disable_notification=True)
+        await _reply_in_chunks(msg, lines, header="-- logs --", max_chunks=12)
 
     @r.message(Command("cmdlog"))
     async def cmdlog(msg: Message) -> None:
@@ -860,7 +869,7 @@ def build_router(rt: Runtime) -> Router:
             + (f" err={r['error']}" if r["error"] else "")
             for r in rows
         ]
-        await msg.reply("Recent commands:\n" + "\n".join(lines), disable_notification=True)
+        await _reply_in_chunks(msg, lines, header="Recent commands:")
 
     @r.message(Command("activity"))
     async def activity_cmd(msg: Message) -> None:
@@ -904,7 +913,7 @@ def build_router(rt: Runtime) -> Router:
             + (f": {r['detail']}" if r["detail"] else "")
             for r in rows
         ]
-        await msg.reply("Recent activity:\n" + "\n".join(lines), disable_notification=True)
+        await _reply_in_chunks(msg, lines, header="Recent activity:", max_chunks=12)
 
     @r.message(Command("quack_all"))
     async def quack_all(msg: Message) -> None:
@@ -2154,7 +2163,7 @@ def build_router(rt: Runtime) -> Router:
         if not chats:
             await msg.reply("No known chats yet.", disable_notification=True)
             return
-        sections: list[str] = []
+        lines: list[str] = []
         total_facts = 0
         chats_with_facts = 0
         for c in chats:
@@ -2163,38 +2172,21 @@ def build_router(rt: Runtime) -> Router:
                 continue
             chats_with_facts += 1
             total_facts += len(facts)
-            head = f"━ {_chat_label(c)} [{c['chat_id']}] ({len(facts)}):"
-            body = "\n".join(f"  [{f.id}] {f.fact}" for f in facts)
-            sections.append(f"{head}\n{body}")
-        if not sections:
+            if lines:
+                lines.append("")
+            lines.append(f"━ {_chat_label(c)} [{c['chat_id']}] ({len(facts)}):")
+            lines.extend(f"  [{f.id}] {f.fact}" for f in facts)
+        if not lines:
             await msg.reply(
                 "No facts stored in any known chat yet.",
                 disable_notification=True,
             )
             return
-        footer = (
-            f"\n\nTotal: {total_facts} facts across "
-            f"{chats_with_facts} chat(s)."
+        lines.append("")
+        lines.append(
+            f"Total: {total_facts} facts across {chats_with_facts} chat(s)."
         )
-        # Telegram caps outbound at 4096; chunk sections so each reply fits.
-        chunks: list[str] = []
-        current = ""
-        for section in sections:
-            piece = ("\n\n" if current else "") + section
-            if len(current) + len(piece) > 3900:
-                chunks.append(current)
-                current = section
-            else:
-                current += piece
-        if current:
-            chunks.append(current)
-        # Footer attaches to the last chunk if it fits, else gets its own.
-        if chunks and len(chunks[-1]) + len(footer) <= 3900:
-            chunks[-1] += footer
-        else:
-            chunks.append(footer.lstrip())
-        for chunk in chunks:
-            await msg.reply(chunk, disable_notification=True)
+        await _reply_in_chunks(msg, lines, max_chunks=12)
 
     @r.message(Command("memory_stats"))
     async def memory_stats(msg: Message) -> None:

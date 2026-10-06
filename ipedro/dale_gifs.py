@@ -167,14 +167,17 @@ async def note_sent(
 ) -> None:
     """Record a successful send, learning the file_id when we just got one.
 
-    Once a seeded url-row knows its file_id we drop the url: every later send
-    is a bare string hand-off to Telegram with no download, and the row stops
-    caring whether the original host is still up.
+    Once a seeded url-row knows its file_id every later send is a bare string
+    hand-off to Telegram with no download, and the row stops caring whether
+    the original host is still up. The url STAYS on the row, though: it is
+    what `/dalegif seed` dedupes on (ON CONFLICT (url)). Clearing it, as
+    this used to, made the next seed run insert a second copy of every GIF
+    that had been sent once, and a third on the run after.
     """
     if file_id:
         await db.execute(
             "UPDATE dale_gifs SET send_count = send_count + 1, "
-            "       file_id = $2, url = NULL "
+            "       file_id = $2 "
             " WHERE id = $1",
             gif_id, file_id,
         )

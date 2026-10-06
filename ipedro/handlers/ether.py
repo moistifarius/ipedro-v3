@@ -23,6 +23,7 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from ipedro import ether
+from ipedro.handlers.common import over_limit
 from ipedro.runtime import Runtime
 
 log = logging.getLogger(__name__)
@@ -47,6 +48,14 @@ async def _download_voice(rt: Runtime, voice) -> bytes | None:
         return None
 
 
+# A transmission is a few seconds of staticky radio. A 20 MB recording used
+# to be decoded whole (tens of seconds of pure-Python per-sample loops and
+# hundreds of MB of float arrays) and 4000 characters of text went to TTS.
+MAX_VOICE_SECONDS = 60
+MAX_VOICE_BYTES = 1_500_000
+MAX_TEXT_CHARS = 600
+
+
 def build_router(rt: Runtime) -> Router:
     r = Router(name="ether")
 
@@ -69,6 +78,40 @@ def build_router(rt: Runtime) -> Router:
                 "another chat tuned into the ether.",
                 disable_notification=True,
             )
+            return
+
+        # Who may transmit. Reaching into ANOTHER chat with an anonymous
+        # voice note is for people in a chat that is itself on the ether
+        # (and for bot admins): previously anyone the bot could hear, even a
+        # stranger in a DM, could. Then the size/length caps and the hourly
+        # limit, since this one costs a TTS call and lands in someone else's
+        # chat.
+        user_id = msg.from_user.id if msg.from_user else None
+        if user_id not in rt.settings.admin_ids:
+            cfg = (
+                await rt.chats.get_config(msg.chat.id)
+                if msg.chat.type != "private" else None
+            )
+            if cfg is None or not cfg.ether_enabled:
+                await msg.reply(
+                    "This chat isn't tuned into the ether, so it can't "
+                    "transmit. (/chat_config ether on, by a chat admin.)",
+                    disable_notification=True,
+                )
+                return
+        if voice is not None and (
+            (voice.duration or 0) > MAX_VOICE_SECONDS
+            or (voice.file_size or 0) > MAX_VOICE_BYTES
+        ):
+            await msg.reply(
+                f"That recording's too long for the radio: keep it under "
+                f"{MAX_VOICE_SECONDS} seconds.",
+                disable_notification=True,
+            )
+            return
+        if text and len(text) > MAX_TEXT_CHARS:
+            text = text[:MAX_TEXT_CHARS].rstrip()
+        if await over_limit(rt, msg, "ether"):
             return
 
         voice_bytes = await _download_voice(rt, voice) if voice else None

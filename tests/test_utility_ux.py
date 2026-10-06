@@ -160,3 +160,37 @@ async def test_birthday_unknown_user_errors_instead_of_saving_orphan():
     await handler(msg)
     assert "don't know" in msg.reply.await_args.args[0].lower()
     assert not [q for q, _ in executed if "chat_dates" in q]   # nothing saved
+
+
+# ── dates and the config panel ───────────────────────────────────────────────
+
+@pytest.mark.parametrize("raw", ["02-29", "2/29", "29 Feb", "Feb 29", "February 29"])
+def test_a_leap_day_birthday_can_be_set_without_a_year(raw):
+    """strptime defaulted a missing year to 1900, not a leap year, so no
+    year-less Feb 29 could ever be parsed."""
+    from ipedro.handlers.utility import _parse_user_date
+    assert _parse_user_date(raw) == (2, 29, None)
+
+
+def test_dates_that_dont_exist_are_still_refused():
+    from ipedro.handlers.utility import _parse_user_date
+    assert _parse_user_date("2023-02-29") is None        # 2023 isn't a leap year
+    assert _parse_user_date("02-30") is None
+    assert _parse_user_date("13-01") is None
+    assert _parse_user_date("2024-02-29") == (2, 29, 2024)
+
+
+def test_a_persona_name_with_markup_cant_break_the_config_panel():
+    """The name is free text a chat admin typed; under parse_mode=HTML an
+    unescaped '<' made the whole panel unparseable and bricked /config."""
+    from ipedro.db.repositories import ChatConfig
+    from ipedro.handlers.utility import _config_wizard_header
+
+    cfg = ChatConfig(
+        chat_id=1, response_policy="mention", ambient_probability=0.0,
+        persona="<b>evil</i> & co", persona_custom=None, duckhunt_enabled=False,
+        voice_transcribe=False, memory_enabled=True,
+    )
+    header = _config_wizard_header(cfg, 1, is_dm_scoped=False)
+    assert "<b>evil" not in header
+    assert "&lt;b&gt;evil&lt;/i&gt; &amp; co" in header

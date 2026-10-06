@@ -79,3 +79,24 @@ def test_parse_duration_still_works():
     assert parse_duration("2h30m") == 9000
     assert parse_duration("") is None
     assert parse_duration("nope") is None
+
+
+# ── bounded, whole-token durations ───────────────────────────────────────────
+
+@pytest.mark.parametrize("token,seconds", [
+    ("30s", 30), ("5m", 300), ("2h30m", 9000), ("1d", 86400), ("1w", 604800),
+    ("366d", 366 * 86400),
+])
+def test_durations_parse(token, seconds):
+    assert parse_duration(token) == seconds
+
+
+@pytest.mark.parametrize("token", [
+    "", "nope", "x5my", "5m30", "m5", "5", "0m", "-5m",
+    "367d", "100w", "9" * 40 + "w", "99999999999999d",
+])
+def test_garbage_and_oversized_durations_are_refused(token):
+    """Unbounded ones overflowed datetime/timedelta inside /remind, /tldr
+    and /shutup: the dispatcher logged a traceback and the user got no
+    reply. 'x5my' used to be five minutes."""
+    assert parse_duration(token) is None

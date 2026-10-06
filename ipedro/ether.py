@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import BufferedInputFile
 
 from ipedro.bot_messages import track
@@ -223,6 +224,48 @@ def _pick_destination_any(all_opted_in: list[int], exclude: int) -> int | None:
     return random.choice(candidates) if candidates else None
 
 
+_MAX_DESTINATION_TRIES = 3
+
+
+async def _drop_dead_destination(db: Database, dest_id: int) -> None:
+    """Take a chat the bot can no longer post in off the ether. Nothing
+    removes ether_enabled when the bot is kicked, so a dead chat stayed a
+    destination forever: every transmission to it was TTS paid for, then
+    thrown away."""
+    log.warning("Ether: chat %s refuses us; taking it off the ether.", dest_id)
+    try:
+        await db.execute(
+            "UPDATE chat_config SET ether_enabled = FALSE WHERE chat_id = $1",
+            dest_id,
+        )
+    except Exception as exc:                      # pragma: no cover - defensive
+        log.warning("Ether: couldn't disable %s: %s", dest_id, exc)
+
+
+async def _send_with_failover(
+    db: Database, opted_in: list[int], source_chat_id: int, dest_id: int, send,
+):
+    """Run ``send(dest_id)``. When Telegram says that chat is gone (kicked,
+    blocked, not found), drop it from the ether and try another opted-in
+    chat, up to a few. Returns (message | None, the dest used, the error)."""
+    tried: set[int] = set()
+    for _ in range(_MAX_DESTINATION_TRIES):
+        try:
+            return await send(dest_id), dest_id, None
+        except (TelegramForbiddenError, TelegramBadRequest) as exc:
+            tried.add(dest_id)
+            await _drop_dead_destination(db, dest_id)
+            nxt = _pick_destination_any(
+                [c for c in opted_in if c not in tried], exclude=source_chat_id,
+            )
+            if nxt is None:
+                return None, dest_id, exc
+            dest_id = nxt
+        except Exception as exc:
+            return None, dest_id, exc
+    return None, dest_id, RuntimeError("no reachable ether destination")
+
+
 async def _stamp_receiver(db: Database, dest_id: int) -> None:
     """Record that ``dest_id`` just received a transmission so the auto
     loop respects the 4h cooldown afterwards."""
@@ -301,13 +344,14 @@ async def manual_broadcast(
         treated = await apply_radio_effect(src_audio, intensity=radio_intensity)
         if treated:
             caption = random.choice(_VOICE_CAPTIONS)
-            try:
-                sent = await bot.send_voice(
-                    dest_id,
-                    BufferedInputFile(treated, filename="ether.ogg"),
-                    caption=caption,
-                    disable_notification=is_silenced(dest_id),
-                )
+            sent, dest_id, err = await _send_with_failover(
+                db, opted_in, source_chat_id, dest_id,
+                lambda d: bot.send_voice(
+                    d, BufferedInputFile(treated, filename="ether.ogg"),
+                    caption=caption, disable_notification=is_silenced(d),
+                ),
+            )
+            if sent is not None:
                 track(dest_id, sent.message_id, caption)
                 await _stamp_receiver(db, dest_id)
                 log.info(
@@ -315,9 +359,8 @@ async def manual_broadcast(
                     source_chat_id, dest_id, radio_intensity,
                 )
                 return ManualEtherResult(mode="voice", dest_id=dest_id)
-            except Exception as exc:  # pragma: no cover - telegram hiccup
-                reason = "voice_send_failed"
-                log.warning("Ether voice send failed → %s: %s", dest_id, exc)
+            reason = "voice_send_failed"
+            log.warning("Ether voice send failed → %s: %s", dest_id, err)
         else:
             reason = "fx_failed"
             log.warning(
@@ -330,11 +373,13 @@ async def manual_broadcast(
     if text:
         body = garble_pager(text, intensity=_roll_intensity())
         msg_text = _wrap(body)
-        try:
-            sent = await bot.send_message(
-                dest_id, msg_text,
-                disable_notification=is_silenced(dest_id),
-            )
+        sent, dest_id, err = await _send_with_failover(
+            db, opted_in, source_chat_id, dest_id,
+            lambda d: bot.send_message(
+                d, msg_text, disable_notification=is_silenced(d),
+            ),
+        )
+        if sent is not None:
             track(dest_id, sent.message_id, msg_text)
             await _stamp_receiver(db, dest_id)
             log.info(
@@ -342,11 +387,10 @@ async def manual_broadcast(
                 source_chat_id, dest_id, reason or "no_audio_path",
             )
             return ManualEtherResult(mode="text", dest_id=dest_id, reason=reason)
-        except Exception as exc:  # pragma: no cover
-            log.warning("Ether text send failed → %s: %s", dest_id, exc)
-            return ManualEtherResult(
-                mode="no_audio", dest_id=dest_id, reason="text_send_failed",
-            )
+        log.warning("Ether text send failed → %s: %s", dest_id, err)
+        return ManualEtherResult(
+            mode="no_audio", dest_id=dest_id, reason="text_send_failed",
+        )
 
     return ManualEtherResult(
         mode="no_audio", dest_id=dest_id,

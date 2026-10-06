@@ -34,7 +34,7 @@ async def test_comic_loop_keeps_going_after_one_chat_fails(monkeypatch):
         calls.append(chat_id)
         if chat_id == 2:
             raise RuntimeError("boom")
-        return True
+        return "posted"
 
     monkeypatch.setattr("ipedro.comic._build_and_post", fake_build_and_post)
     db = SimpleNamespace(execute=AsyncMock())
@@ -50,8 +50,9 @@ async def test_comic_loop_keeps_going_after_one_chat_fails(monkeypatch):
     await run_comic_loop(bot=SimpleNamespace(), db=db, openai=SimpleNamespace(), stop=stop)
 
     assert calls == [1, 2, 3]                 # chat 3 was still attempted
-    # Only the two successes (1, 3) got their last_comic_at stamped.
-    assert db.execute.await_count == 2
+    # Every chat is stamped so none is retried next tick: the two successes
+    # as done, the failure (chat 2) as due again in a few hours.
+    assert db.execute.await_count == 3
 
 
 # ── ambient_loops.py: yearly retro ──────────────────────────────────────────

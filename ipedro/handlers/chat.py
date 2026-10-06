@@ -28,6 +28,7 @@ from ipedro.handlers.automod import (
 )
 from ipedro.handlers.common import (
     catify, display_name, fallback_cat_fact, get_or_create_chat_config,
+    over_limit,
 )
 from ipedro.impersonate import build_impersonation_prompt, resolve_impersonation
 from ipedro.meme_finder import (
@@ -350,10 +351,20 @@ async def _meme_subject(rt: Runtime, msg: Message, cfg, topic: str) -> str:
     return queries[0] if queries else ""
 
 
+_MEME_TOPIC_MAX_CHARS = 200
+
+
 async def _handle_meme_generate(rt: Runtime, msg: Message, cfg, topic: str) -> None:
     """'make/create a meme about X' → GENERATE one (image model) rather
     than search Reddit for an existing one."""
+    if await over_limit(rt, msg, "image"):
+        return
     subject = await _meme_subject(rt, msg, cfg, topic)
+    if subject:
+        # A pasted paragraph isn't a topic: it was passed to the image model
+        # whole, and could push the reply past Telegram's 4096-char cap
+        # after the image was already paid for.
+        subject = subject[:_MEME_TOPIC_MAX_CHARS]
     if not subject:
         miss = "Sh-sha. Couldn't read a topic to meme. Say what it's about."
         await msg.reply(miss, disable_notification=True)

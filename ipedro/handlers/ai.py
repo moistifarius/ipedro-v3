@@ -9,7 +9,9 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, Message
 
-from ipedro.handlers.common import catify, fallback_cat_fact, get_or_create_chat_config
+from ipedro.handlers.common import (
+    catify, fallback_cat_fact, get_or_create_chat_config, over_limit,
+)
 from ipedro.memory.tokens import count_tokens
 from ipedro.prompts import (
     BENEFICIALITY_PROMPT, CAT_FACT_PROMPT,
@@ -122,6 +124,8 @@ def build_router(rt: Runtime) -> Router:
                 "Usage: /a <question>", disable_notification=True,
             )
             return
+        if await over_limit(rt, msg, "ask"):
+            return
         await msg.bot.send_chat_action(msg.chat.id, "typing")
         answer = await rt.openai.short_completion(
             question, max_tokens=400, chat_id=msg.chat.id,
@@ -133,6 +137,8 @@ def build_router(rt: Runtime) -> Router:
         prompt = _strip_command(msg.text)
         if not prompt:
             await msg.reply("Usage: /aigen <prompt>", disable_notification=True)
+            return
+        if await over_limit(rt, msg, "image"):
             return
         await msg.bot.send_chat_action(msg.chat.id, "upload_photo")
         data = await rt.openai.generate_image(prompt)
@@ -152,6 +158,8 @@ def build_router(rt: Runtime) -> Router:
                 "Reply to a voice note with /aitranslate.",
                 disable_notification=True,
             )
+            return
+        if await over_limit(rt, msg, "translate"):
             return
         voice = msg.reply_to_message.voice
         file = await msg.bot.get_file(voice.file_id)

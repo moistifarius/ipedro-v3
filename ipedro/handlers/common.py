@@ -9,6 +9,7 @@ from typing import Iterable
 
 from aiogram.types import Message
 
+from ipedro import ratelimit
 from ipedro.auth import AuthContext, is_admin, is_owner
 from ipedro.runtime import Runtime
 
@@ -52,6 +53,33 @@ _DUBIOUS_CAT_FACTS: tuple[str, ...] = (
     "a cat's brain is about 90% similar to a human's, which explains the contempt.",
     "a cat always lands on its feet unless it senses you're filming, out of spite.",
 )
+
+
+_LIMIT_NOUNS = {
+    "image": "images", "ether": "transmissions", "ask": "questions",
+    "translate": "translations",
+}
+
+
+async def over_limit(rt: Runtime, msg: Message, kind: str) -> bool:
+    """True, after telling them, when this person has used up `kind` (a
+    ratelimit.LIMITS key) for the hour. Bot admins are never limited. A
+    use that is allowed is counted here, so call it once, up front, at the
+    point where the cost starts."""
+    user_id = msg.from_user.id if msg.from_user else None
+    if user_id is None or user_id in rt.settings.admin_ids:
+        return False
+    chat_id = msg.chat.id if msg.chat else None
+    wait = ratelimit.wait_for(kind, user_id, chat_id)
+    if not wait:
+        return False
+    uses, _ = ratelimit.LIMITS[kind]
+    await msg.reply(
+        f"That's {uses} {_LIMIT_NOUNS.get(kind, 'of those')} for the hour. "
+        f"Try again in about {ratelimit.describe_wait(wait)}.",
+        disable_notification=True,
+    )
+    return True
 
 
 def fallback_cat_fact(rng: random.Random | None = None) -> str:

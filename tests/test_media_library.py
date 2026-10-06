@@ -141,6 +141,51 @@ async def test_keyword_fallback_without_pgvector():
     assert pattern == "grill"                              # short words dropped
 
 
+def _kw_row(i, desc, minutes_ago):
+    return {**_row(i, desc), "created_at": NOW - timedelta(minutes=minutes_ago)}
+
+
+@pytest.mark.asyncio
+async def test_the_requests_own_words_are_not_what_it_searches_for():
+    """'send that pic of the grill' kept 'send' and 'that' as search words,
+    so the NEWEST description containing 'that' beat the grill picture."""
+    rt = _rt(pgvector=False, fetch=[
+        _kw_row(1, "a sign that says happy hour", 5),
+        _kw_row(2, "a propane grill on a deck", 600),
+    ])
+    out = await lib.search(rt, 42, "dale send that pic of the grill")
+    assert [r["id"] for r in out] == [2]
+    pattern = rt.db.fetch.await_args.args[2]
+    assert pattern == "grill"                  # not send|that|dale|grill
+
+
+@pytest.mark.asyncio
+async def test_more_matched_words_beats_newer():
+    rt = _rt(pgvector=False, fetch=[
+        _kw_row(1, "a dog on a porch", 5),
+        _kw_row(2, "a brown dog on a boat at sunset", 900),
+    ])
+    out = await lib.search(rt, 42, "show the dog sunset boat photo")
+    assert out[0]["id"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_picture_matching_too_few_of_the_words_is_not_sent():
+    rt = _rt(pgvector=False, fetch=[_kw_row(1, "a dog on a porch", 5)])
+    assert await lib.search(rt, 42, "send the grill sunset boat pic") == []
+
+
+@pytest.mark.asyncio
+async def test_the_bots_own_name_is_not_a_search_word():
+    rt = _rt(pgvector=False, fetch=[_kw_row(1, "Dale Gribble on a poster", 5)])
+    rt.settings = SimpleNamespace(bot_name="Hank", bot_aliases="hank", bot_flavor="plain")
+    await lib.search(rt, 42, "hank send the pic of the grill")
+    assert rt.db.fetch.await_args.args[2] == "grill"
+    rt2 = _rt(pgvector=False, fetch=[])
+    await lib.search(rt2, 42, "rusty send the pic of the grill")        # Dale's names
+    assert rt2.db.fetch.await_args.args[2] == "grill"
+
+
 @pytest.mark.asyncio
 async def test_keyword_fallback_with_nothing_distinctive_finds_nothing():
     rt = _rt(pgvector=False)
