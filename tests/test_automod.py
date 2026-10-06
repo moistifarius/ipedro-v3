@@ -79,7 +79,7 @@ def test_long_pastas_fire_verbatim():
 # that phrase again. Adding a row without a sample fails the meta-test.
 
 _SAMPLES: dict[str, str] = {
-    r"\bkys\b|\b(kill|neck)\s*(your|my|ur|yr)\s*self\b": "kys",
+    r"\bkys\b|\b(kill|neck)\s*(your|ur|yr)\s*self\b": "kys",
     r"\bpocket\s*sand\b": "pocket sand",
     r"\bpropane\b": "propane",
     r"\bthat boy ain'?t right\b": "that boy ain't right",
@@ -354,6 +354,9 @@ async def test_automod_disabled_chat_gets_no_canned_reply():
     kenobi = "General Kenobi! You are a bold one. ⚔️"
 
     rt.chats.get_config.return_value.automod_enabled = True
+    # A group on the default 'mention' policy: canned bits are for chatter
+    # nobody aimed at the bot ('always' chats and DMs get real answers).
+    rt.chats.get_config.return_value.response_policy = "mention"
     router = build_router(rt)
     handler = next(h.callback for h in router.observers["message"].handlers
                    if h.callback.__name__ == "on_message")
@@ -501,3 +504,105 @@ def test_converted_rows_keep_their_old_text_as_the_fallback():
     assert isinstance(reddit, DaleGif) and "ackshually" in reddit.fallback
     society = _automod_response("we live in a society")
     assert isinstance(society, DaleGif) and "gamers" in society.fallback
+
+
+# ── canned bits are for chatter nobody aimed at him ─────────────────────────
+
+def _chat_handler(rt):
+    from ipedro.handlers.chat import build_router
+    return next(h.callback for h in build_router(rt).observers["message"].handlers
+                if h.callback.__name__ == "on_message")
+
+
+def _group_rt(policy="mention"):
+    from tests.test_captcha_intercept import _rt_with
+    rt = _rt_with()
+    rt.chats.get_config.return_value.response_policy = policy
+    return rt
+
+
+def _answering_rt(monkeypatch, policy="mention"):
+    """A runtime that can carry a message all the way to an AI reply."""
+    from tests.test_addressed import _mention_rt
+    rt = _mention_rt(monkeypatch)
+    rt.chats.get_config.return_value.response_policy = policy
+    return rt
+
+
+def _said_canned(msg) -> bool:
+    return any(
+        "GNU" in str(c.args[0]) or "Based on what?" in str(c.args[0])
+        for c in msg.reply.await_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_trigger_word_in_room_chatter_still_gets_the_bit():
+    from tests.test_captcha_intercept import _msg
+    rt = _group_rt()
+    msg = _msg(text="i switched to linux last week")
+    await _chat_handler(rt)(msg)
+    assert _said_canned(msg)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", [
+    "dale what linux distro should i run",       # names him
+    "bot is propane any good",                   # calls him 'bot'
+    "rusty based on what though",
+])
+async def test_a_question_to_him_is_not_answered_with_a_copypasta(monkeypatch, text):
+    from tests.test_captcha_intercept import _msg
+    rt = _answering_rt(monkeypatch)
+    msg = _msg(text=text)
+    msg.answer = AsyncMock(return_value=SimpleNamespace(message_id=9))
+    await _chat_handler(rt)(msg)
+    assert not _said_canned(msg)
+    rt.openai.chat.assert_awaited_once()         # he answered the question
+
+
+@pytest.mark.asyncio
+async def test_a_reply_to_him_is_not_answered_with_a_canned_bit(monkeypatch):
+    from tests.test_captcha_intercept import _msg
+    rt = _answering_rt(monkeypatch)
+    reply_to = SimpleNamespace(from_user=SimpleNamespace(id=1), message_id=5)
+    msg = _msg(text="i switched to linux last week", reply_to=reply_to)
+    msg.answer = AsyncMock(return_value=SimpleNamespace(message_id=9))
+    await _chat_handler(rt)(msg)                 # the stub bot's id is 1
+    assert not _said_canned(msg)
+    rt.openai.chat.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_an_always_chat_gets_real_answers_not_bits(monkeypatch):
+    """Under 'always' every message is for him."""
+    from tests.test_captcha_intercept import _msg
+    rt = _answering_rt(monkeypatch, "always")
+    msg = _msg(text="what linux distro should i run")
+    msg.answer = AsyncMock(return_value=SimpleNamespace(message_id=9))
+    await _chat_handler(rt)(msg)
+    assert not _said_canned(msg)
+    rt.openai.chat.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_private_chat_never_gets_canned_bits(monkeypatch):
+    from tests.test_captcha_intercept import _msg
+    rt = _answering_rt(monkeypatch, "mention")
+    msg = _msg(text="what linux distro should i run")
+    msg.chat.type = "private"
+    msg.answer = AsyncMock(return_value=SimpleNamespace(message_id=9))
+    await _chat_handler(rt)(msg)
+    assert not _said_canned(msg)
+
+
+@pytest.mark.parametrize("text", ["thanks man", "thank you man", "man thanks"])
+def test_thanks_between_people_is_not_a_thank_you_to_him(text):
+    from ipedro.handlers import chat
+    assert chat._THANKS_PEDRO_RE.search(text) is None
+
+
+@pytest.mark.parametrize("text", ["thanks dale", "thx rusty", "dude thanks", "ty pedro"])
+def test_thanking_him_by_name_still_gets_the_line(text):
+    from ipedro.handlers import chat
+    assert chat._THANKS_PEDRO_RE.search(text)

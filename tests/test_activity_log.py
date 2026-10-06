@@ -92,6 +92,21 @@ async def test_credit_line_logs_itself_distinctly_from_no_reply(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_model_that_returns_nothing_is_logged_not_silent(monkeypatch):
+    """A rejected model setting makes every reply a swallowed error. It
+    used to leave no trace at all: 'why didn't he answer?' had no answer."""
+    rt = _mention_rt(monkeypatch)
+    rt.openai.chat = AsyncMock(return_value=None)
+    msg = _msg(text="dale what do you think")
+    await _handler(rt)(msg)
+    rt.activity.log.assert_awaited_once()
+    args = rt.activity.log.await_args.args
+    assert args[1] == "no_reply"
+    assert args[2].startswith("model returned nothing")
+    msg.answer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_ai_reply_logs_addressed_reason(monkeypatch):
     rt = _mention_rt(monkeypatch)
     await _handler(rt)(_msg(text="dale what do you think"))

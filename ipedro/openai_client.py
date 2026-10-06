@@ -31,6 +31,7 @@ from anthropic import (
     APITimeoutError as AnthropicAPITimeoutError,
     AsyncAnthropic,
     InternalServerError as AnthropicInternalServerError,
+    OverloadedError as AnthropicOverloadedError,
 )
 from openai import (
     APIConnectionError as OpenAIAPIConnectionError,
@@ -52,6 +53,12 @@ log = logging.getLogger(__name__)
 # Crucially NOT RateLimitError (429): retrying immediately just slams the
 # limit again and inflates Anthropic's hit counter. A 429 propagates up
 # and the calling feature degrades gracefully (None response).
+#
+# This is the ONLY retry layer: both SDK clients are built with
+# max_retries=0. The SDKs retry 408/409/429 and every 5xx on their own by
+# default, which stacked underneath this made one failing call up to nine
+# requests, and retried 429s after all (the rule above was never true on
+# the wire).
 _OPENAI_RETRY = dict(
     retry=retry_if_exception_type((
         OpenAIAPIConnectionError, OpenAIAPITimeoutError,
@@ -62,10 +69,16 @@ _OPENAI_RETRY = dict(
     reraise=False,
 )
 
+_ANTHROPIC_TIMEOUT_SECONDS = 45.0
+_OPENAI_TIMEOUT_SECONDS = 120.0
+
 _CLAUDE_RETRY = dict(
     retry=retry_if_exception_type((
         AnthropicAPIConnectionError, AnthropicAPITimeoutError,
         AnthropicInternalServerError,
+        # 529: Anthropic is overloaded. Not an InternalServerError, and
+        # exactly the transient case worth a short wait.
+        AnthropicOverloadedError,
     )),
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=8),
@@ -81,6 +94,7 @@ _OPENAI_TEXT_PRICE_PER_1K = {
 }
 _CLAUDE_TEXT_PRICE_PER_1K = {
     "claude-fable-5":    (0.010, 0.050),
+    "claude-opus-5-5":   (0.004, 0.020),     # before "claude-opus-5": first match wins
     "claude-opus-5":     (0.005, 0.025),
     "claude-opus-4-8":   (0.005, 0.025),
     "claude-opus-4-7":   (0.005, 0.025),
@@ -120,6 +134,7 @@ CACHE_BREAKPOINT = "_cache_breakpoint"
 _CACHE_MIN_TOKENS: tuple[tuple[str, int], ...] = (
     ("claude-opus-5", 512),
     ("claude-fable-5", 512),
+    ("claude-mythos-5", 512),
     ("claude-opus-4-8", 1024),
     ("claude-sonnet-5", 1024),
     ("claude-sonnet-4-6", 1024),
@@ -137,6 +152,20 @@ _CACHE_MIN_DEFAULT = 4096   # unknown model: assume the strictest we know of
 _CACHE_WRITE_MULTIPLIER = 1.25        # 5-minute entries
 _CACHE_WRITE_1H_MULTIPLIER = 2.0       # 1-hour entries
 _CACHE_READ_MULTIPLIER = 0.1
+# ...except on the models that discount reads further: 0.05x on Opus 5.5,
+# 0.025x on Fable / Mythos 5.1. Longest matching prefix wins.
+_CACHE_READ_MULTIPLIER_BY_MODEL: tuple[tuple[str, float], ...] = (
+    ("claude-opus-5-5", 0.05),
+    ("claude-fable-5-1", 0.025),
+    ("claude-mythos-5-1", 0.025),
+)
+
+
+def _cache_read_multiplier(model: str) -> float:
+    for prefix, mult in _CACHE_READ_MULTIPLIER_BY_MODEL:
+        if model.startswith(prefix):
+            return mult
+    return _CACHE_READ_MULTIPLIER
 
 
 # Models that removed temperature/top_p/top_k: passing one is a 400, not a
@@ -147,16 +176,39 @@ _NO_SAMPLING_PREFIXES: tuple[str, ...] = (
     "claude-sonnet-5",
 )
 
-# Models on which OMITTING `thinking` means adaptive thinking is ON. Every
-# older model runs without thinking unless asked; these two invert that.
 # For a persona chat bot writing two-sentence replies, thinking is pure
 # cost: the reasoning tokens bill as output (5x the input price) and count
-# against the 500-token reply cap, so a chatty think would truncate the
-# actual answer. Explicitly off. (Fable 5 rejects "disabled" outright and
-# must be left alone — it is deliberately absent here.)
-_THINKS_UNLESS_TOLD_NOT_TO: tuple[str, ...] = (
-    "claude-sonnet-5", "claude-opus-5",
-)
+# against the reply's max_tokens, so a chatty think would truncate the
+# actual answer. How to turn it off differs by model, and getting it wrong
+# is a 400 on EVERY request (swallowed into a silent no-reply):
+#
+#   claude-sonnet-5, claude-opus-5   omitting `thinking` runs adaptive
+#                                    thinking; {"type": "disabled"} turns it
+#                                    off.
+#   claude-sonnet-5-5                {"type": "disabled"} is a 400. The
+#                                    lowest setting is {"type": "between_tools"}
+#                                    (no other field inside it).
+#   claude-opus-5-5, claude-fable-5*, claude-mythos-5*
+#                                    thinking can't be turned off at all, and
+#                                    "disabled" is a 400. Omit `thinking` and
+#                                    keep it short with effort "low".
+#
+# These are matched on the exact id (an optional -YYYYMMDD snapshot suffix
+# aside), never on a bare prefix: "claude-sonnet-5" is a prefix of
+# "claude-sonnet-5-5", and treating them alike is what broke it.
+_THINKING_DISABLED_OK: tuple[str, ...] = ("claude-sonnet-5", "claude-opus-5")
+_THINKING_BETWEEN_TOOLS: tuple[str, ...] = ("claude-sonnet-5-5",)
+_THINKING_ALWAYS_ON_EXACT: tuple[str, ...] = ("claude-opus-5-5",)
+_THINKING_ALWAYS_ON_PREFIXES: tuple[str, ...] = ("claude-fable-5", "claude-mythos-5")
+# Extra room in max_tokens for a model that always thinks: its thinking
+# counts against the cap, and a reply cut off (or never started) because the
+# think ate the budget is a silent no-reply. The reply's length is set by
+# the prompt, not by this cap, so the headroom costs nothing when unused.
+_THINKING_HEADROOM_TOKENS = 1024
+
+
+def _model_is(model: str, *ids: str) -> bool:
+    return any(re.fullmatch(rf"{re.escape(i)}(?:-\d{{8}})?", model) for i in ids)
 
 
 def _rejects_sampling(model: str) -> bool:
@@ -164,7 +216,29 @@ def _rejects_sampling(model: str) -> bool:
 
 
 def _thinks_by_default(model: str) -> bool:
-    return model.startswith(_THINKS_UNLESS_TOLD_NOT_TO)
+    """Thinking is on unless told otherwise, and {"type": "disabled"} is the
+    way to tell it. Only the 5 generation: the 5.5 models are NOT this."""
+    return _model_is(model, *_THINKING_DISABLED_OK)
+
+
+def _always_thinks(model: str) -> bool:
+    """Thinking can't be turned off: the best a caller can do is keep it
+    short with effort "low"."""
+    return (
+        _model_is(model, *_THINKING_ALWAYS_ON_EXACT)
+        or model.startswith(_THINKING_ALWAYS_ON_PREFIXES)
+    )
+
+
+def _thinking_param(model: str) -> dict[str, str] | None:
+    """The `thinking` field this model wants for a no-thinking chat reply,
+    or None to omit it (omitting is always valid, which is why a model this
+    table has never heard of gets None rather than a guess)."""
+    if _thinks_by_default(model):
+        return {"type": "disabled"}
+    if _model_is(model, *_THINKING_BETWEEN_TOOLS):
+        return {"type": "between_tools"}
+    return None
 
 
 def _cache_minimum(model: str) -> int:
@@ -225,7 +299,7 @@ def _claude_text_price(
         prompt_tokens * inp
         + write_5m * inp * _CACHE_WRITE_MULTIPLIER
         + write_1h * inp * _CACHE_WRITE_1H_MULTIPLIER
-        + cache_read_tokens * inp * _CACHE_READ_MULTIPLIER
+        + cache_read_tokens * inp * _cache_read_multiplier(model)
         + completion_tokens * (rate[1] / 1000)
     )
 
@@ -329,15 +403,35 @@ def _claude_text(resp: Any) -> str | None:
     return "\n".join(parts).strip() or None
 
 
+def _written_out_call(text: str, tool_names: Sequence[str]) -> bool:
+    """Does `text` look like a tool CALL written out, rather than a reply
+    that mentions a tool? A call has the name followed by an argument list
+    or brace (`check_my_records(limit=5)`, `check_my_records {`) or sits in
+    a JSON name field. A reply that says it "checked my records
+    (check_my_records)" is prose, and the capability brief names the tools
+    to the model, so it will; dropping those silenced the bot in exactly
+    the situation the records feature exists for ("why did you ignore
+    me?")."""
+    for name in tool_names:
+        quoted = re.escape(name)
+        if re.search(rf"\b{quoted}\b\s*[({{]", text):
+            return True
+        if re.search(rf"[\"']name[\"']\s*:\s*[\"']{quoted}[\"']", text):
+            return True
+        if re.search(rf"<\s*/?\s*{quoted}\b", text):
+            return True
+    return False
+
+
 def _withhold_leaked_internals(
     text: str | None, tool_names: Sequence[str],
 ) -> str | None:
-    """Drop a reply that carries tool markup or a tool's own name — the
-    signature of a call written out as text. Silence beats the persona
-    reciting its internals to a group."""
+    """Drop a reply that carries tool markup or a tool call written out as
+    text. Silence beats the persona reciting its internals to a group; a
+    plain mention of a tool's name is not that (see _written_out_call)."""
     if not text:
         return text
-    if _LEAKED_INTERNALS_RE.search(text) or any(n in text for n in tool_names):
+    if _LEAKED_INTERNALS_RE.search(text) or _written_out_call(text, tool_names):
         log.warning("withheld a reply carrying tool markup: %r", text[:120])
         return None
     return text
@@ -370,12 +464,23 @@ class AIClient:
         tts_model: str = "gpt-4o-mini-tts",
         tts_voice: str = "onyx",
     ) -> None:
+        # max_retries=0: tenacity (above) owns retrying. Timeouts are real:
+        # the SDK default is ten minutes per attempt, which let one stalled
+        # upstream pin a handler (and, on the hub, the serialized listener)
+        # for the better part of an hour across retries. Text replies are a
+        # few hundred tokens; images and transcription get more room.
         self._openai = (
-            AsyncOpenAI(api_key=api_key, organization=organization or None)
+            AsyncOpenAI(
+                api_key=api_key, organization=organization or None,
+                max_retries=0, timeout=_OPENAI_TIMEOUT_SECONDS,
+            )
             if api_key else None
         )
         self._anthropic = (
-            AsyncAnthropic(api_key=anthropic_api_key)
+            AsyncAnthropic(
+                api_key=anthropic_api_key,
+                max_retries=0, timeout=_ANTHROPIC_TIMEOUT_SECONDS,
+            )
             if anthropic_api_key else None
         )
         # Auto-default: claude if we have the key, else openai.
@@ -423,6 +528,28 @@ class AIClient:
 
     def set_claude_model(self, model: str) -> None:
         self.claude_model = model
+
+    async def probe_claude_model(self, model: str) -> str | None:
+        """None when ``model`` accepts the request shape chat() would send
+        it; otherwise why not. A model id that Anthropic rejects turns
+        every reply into a swallowed 400 — the bot just goes quiet, and
+        the setting survives a restart — so /ai_model asks first. One
+        eight-token request, built by the same code as a real one so the
+        thinking and sampling rules are the ones actually in force."""
+        if self._anthropic is None:
+            return None
+        kwargs = self._claude_kwargs(
+            model=model, system=None,
+            chat_messages=[{"role": "user", "content": "ping"}],
+            max_tokens=8, temperature=1.0,
+        )
+        try:
+            await self._anthropic.messages.create(**kwargs)
+        except AnthropicAPIError as exc:
+            return str(exc)[:300]
+        except Exception as exc:                  # pragma: no cover - defensive
+            return f"{type(exc).__name__}: {exc}"[:300]
+        return None
 
     def set_openai_text_model(self, model: str) -> None:
         self.text_model = model
@@ -644,7 +771,10 @@ class AIClient:
         caching, sampling and thinking rules can't drift between them."""
         kwargs: dict[str, Any] = {
             "model": model,
-            "max_tokens": max_tokens,
+            "max_tokens": (
+                max_tokens + _THINKING_HEADROOM_TOKENS
+                if _always_thinks(model) else max_tokens
+            ),
             "messages": chat_messages,
         }
         if tools:
@@ -656,23 +786,33 @@ class AIClient:
             kwargs["tools"] = tools
         if system:
             kwargs["system"] = system
-        if isinstance(system, list):
-            # The explicit breakpoint above covers the stable prefix. This
-            # top-level one is Anthropic's automatic caching for the growing
-            # conversation: it lands on the last block, and the next
-            # request's lookback finds that write a couple of blocks back —
-            # which only works because build_context keeps the history
-            # window anchored (append-only) rather than sliding. Default
-            # 5m TTL, after the (possibly 1h) system entry, as required.
-            kwargs["cache_control"] = {"type": "ephemeral"}
+        # No top-level (automatic) cache_control, deliberately. It caches
+        # the conversation after the system prompt, but caching is a prefix
+        # match over tools -> system -> messages, and the second system
+        # block (the minute-resolution clock stamp, this message's retrieval
+        # hits, the style reminder) sits BEFORE the messages and differs on
+        # every request. So the entry written for one reply was never read
+        # by the next: a 1.25x write premium on the whole history, every
+        # reply, for nothing. The explicit breakpoint on the stable system
+        # prefix above is the part that actually hits.
+        #
+        # To cache the conversation too, the volatile text has to leave the
+        # system prompt (into a trailing block of the last user turn, after
+        # an explicit breakpoint on the history) so the history prefix stays
+        # byte-identical between replies. Until that is done and measured
+        # (usage.cache_read_input_tokens should then exceed the stable
+        # prefix), not paying the premium is the right default.
         # Sampling parameters were removed across the newer generation, not
         # just on Opus 4.7 — sending temperature to any of them is a 400 on
         # every request. This gate is what keeps /ai_model able to point at
         # a current model at all.
         if not _rejects_sampling(model):
             kwargs["temperature"] = max(0.0, min(1.0, temperature))
-        if _thinks_by_default(model):
-            kwargs["thinking"] = {"type": "disabled"}
+        thinking = _thinking_param(model)
+        if thinking is not None:
+            kwargs["thinking"] = thinking
+        if _always_thinks(model):
+            kwargs["output_config"] = {"effort": "low"}
         return kwargs
 
     async def _log_claude_usage(

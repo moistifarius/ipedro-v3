@@ -21,7 +21,10 @@ House rules (enforced by tests/test_automod.py):
 - Patterns use only simple alternations and bounded quantifiers — no nested
   quantifiers — so there is no catastrophic-backtracking (ReDoS) risk.
 - The one-time serious case ('kys') gets a deflection that never instructs
-  self-harm. See `_KYS_LINES`.
+  self-harm. See `_KYS_LINES`. It is for the second-person insult only: a
+  first-person "I want to kill myself" is a person in trouble, not a
+  taunt, and gets no canned bit at all (it falls through to the normal
+  flow).
 - Responses are static constants: no user input is ever interpolated.
 - Media URLs are pinned to stable hosts (imgflip templates, KYM entry icons,
   giphy/tenor media) and were content-verified when added. A dead URL only
@@ -294,7 +297,7 @@ _AUTOMOD_TRIGGERS: tuple[
           "str | tuple[str, ...] | MediaResponse | DaleGif"], ...
 ] = (
     # --- kys stays first: it must win over any joke trigger in the message ---
-    (re.compile(r"\bkys\b|\b(kill|neck)\s*(your|my|ur|yr)\s*self\b", re.IGNORECASE),
+    (re.compile(r"\bkys\b|\b(kill|neck)\s*(your|ur|yr)\s*self\b", re.IGNORECASE),
      _KYS_LINES),
 
     # --- Dale Gribble GIFs (the bot's own persona) ---

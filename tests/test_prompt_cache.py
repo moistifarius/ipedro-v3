@@ -416,6 +416,94 @@ async def test_older_models_are_left_exactly_as_before():
         assert captured["temperature"] == 1.0, model
 
 
+# The 5.5 generation changed the thinking rules. A bare prefix match once
+# sent {"type": "disabled"} to claude-sonnet-5-5 and claude-opus-5-5, both of
+# which reject it with a 400 — and a 400 here is swallowed into "the bot
+# stopped answering", on every request, until someone un-sets the model.
+
+async def _captured_request(model: str, max_tokens: int = 300) -> dict:
+    from ipedro.openai_client import OpenAIClient
+
+    captured: dict = {}
+
+    class _Msgs:
+        async def create(self, **kw):
+            captured.update(kw)
+            return type("R", (), {"content": [], "usage": None})()
+
+    client = OpenAIClient(api_key=None, anthropic_api_key="k", claude_model=model)
+    client._anthropic = type("A", (), {"messages": _Msgs()})()
+    await client.chat([{"role": "user", "content": "hi"}], max_tokens=max_tokens)
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_sonnet_5_5_turns_thinking_off_with_between_tools_not_disabled():
+    req = await _captured_request("claude-sonnet-5-5")
+    assert req["thinking"] == {"type": "between_tools"}
+    assert "output_config" not in req          # between_tools needs effort <= high
+    assert "temperature" not in req
+    assert req["max_tokens"] == 300
+
+
+@pytest.mark.asyncio
+async def test_opus_5_5_cant_disable_thinking_so_it_omits_it_and_asks_for_low_effort():
+    req = await _captured_request("claude-opus-5-5")
+    assert "thinking" not in req               # "disabled" is a 400 on this model
+    assert req["output_config"] == {"effort": "low"}
+    assert "temperature" not in req
+    # The think counts against max_tokens; without headroom a long think
+    # leaves no room for the reply, which reads as the bot going quiet.
+    assert req["max_tokens"] == 300 + 1024
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["claude-fable-5", "claude-fable-5-1", "claude-mythos-5-1"])
+async def test_fable_and_mythos_also_cant_disable_thinking(model):
+    req = await _captured_request(model)
+    assert "thinking" not in req
+    assert req["output_config"] == {"effort": "low"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["claude-sonnet-5", "claude-opus-5",
+                                   "claude-sonnet-5-20260401"])
+async def test_the_original_5_generation_keeps_disabled(model):
+    req = await _captured_request(model)
+    assert req["thinking"] == {"type": "disabled"}
+    assert "output_config" not in req
+    assert req["max_tokens"] == 300
+
+
+@pytest.mark.asyncio
+async def test_a_model_this_code_has_never_heard_of_gets_no_thinking_field():
+    """Omitting `thinking` is valid everywhere; a guess is a possible 400."""
+    for model in ("claude-sonnet-5-6", "claude-opus-6"):
+        req = await _captured_request(model)
+        assert "thinking" not in req, model
+        assert "output_config" not in req, model
+
+
+def test_5_5_prices_and_cache_read_discounts():
+    from ipedro.openai_client import _claude_text_price
+
+    # Opus 5.5 is cheaper than Opus 5 ($4/$20 vs $5/$25), and its cache
+    # reads are 0.05x, not 0.1x.
+    opus5 = _claude_text_price("claude-opus-5", 1000, 100, cache_read_tokens=10000)
+    opus55 = _claude_text_price("claude-opus-5-5", 1000, 100, cache_read_tokens=10000)
+    assert opus55 == pytest.approx(1000 * 0.004 / 1000 + 100 * 0.020 / 1000
+                                   + 10000 * 0.004 / 1000 * 0.05)
+    assert opus55 < opus5
+    assert _claude_text_price("claude-sonnet-5-5", 1000, 0) == pytest.approx(0.002)
+    # Fable 5.1 reads are 0.025x.
+    fable = _claude_text_price("claude-fable-5-1", 0, 0, cache_read_tokens=1000)
+    assert fable == pytest.approx(1000 * 0.010 / 1000 * 0.025)
+
+
+def test_mythos_cache_minimum_is_not_the_unknown_model_default():
+    assert _cache_minimum("claude-mythos-5-1") == 512
+
+
 # ── retrieval never pays for what is already in the request ──────────────────
 
 class _EchoStore(_Store):
@@ -523,9 +611,12 @@ async def test_a_fresh_process_starts_a_window_at_n():
 
 
 @pytest.mark.asyncio
-async def test_the_claude_request_carries_both_breakpoints():
-    """Explicit on the system prefix (1h), automatic top-level for the
-    conversation (5m). Longer TTL first, as the API requires."""
+async def test_the_claude_request_caches_the_stable_prefix_and_nothing_else():
+    """One explicit breakpoint, on the stable system prefix (1h). There is
+    deliberately no automatic top-level one: the volatile system block
+    (clock, retrieval hits) sits ahead of the messages, so a conversation
+    entry written on one request can never be read by the next, and it
+    cost a 1.25x write premium on the whole history every reply."""
     from tests.test_openai_client import _FakeAnthropicMessages, _claude_client
 
     fake = _FakeAnthropicMessages(text="ok")
@@ -538,7 +629,7 @@ async def test_the_claude_request_carries_both_breakpoints():
         max_tokens=10, temperature=1.0, chat_id=1,
     )
     sent = fake.calls[0]
-    assert sent["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in sent
     assert sent["system"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
 
 

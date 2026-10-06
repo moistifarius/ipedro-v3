@@ -120,3 +120,55 @@ async def test_force_summarize_passes_chat_id_to_all_ai_calls():
     assert store.summaries_added == [(1, "forced summary", 4)]
     assert store.facts_added == []  # "NONE" → nothing durable
     assert [c["chat_id"] for c in ai.calls] == [1, 1]
+
+
+@pytest.mark.asyncio
+async def test_overlapping_calls_for_one_chat_summarize_once():
+    """Every message calls maybe_summarize and each update is its own task,
+    so two overlap whenever one arrives mid-pass. Both used to read the
+    same batch, both summarize it, both insert every fact."""
+    import asyncio
+
+    gate = asyncio.Event()
+
+    class SlowAI(FakeAI):
+        async def cheap_completion(self, prompt, *, max_tokens=200, chat_id=None):
+            self.calls.append({"prompt": prompt, "chat_id": chat_id})
+            await gate.wait()              # the model is "thinking"
+            return self._responses.pop(0) if self._responses else None
+
+    store = FakeStore([_msg(i, f"line {i}") for i in range(1, 6)])
+    ai = SlowAI(["a summary", "- Matt likes IPA"])
+    first = asyncio.create_task(maybe_summarize(store, ai, _settings(), 1))
+    await asyncio.sleep(0)                 # first is now inside its pass
+    second = asyncio.create_task(maybe_summarize(store, ai, _settings(), 1))
+    await asyncio.sleep(0)
+    assert second.done()                   # it didn't wait, and didn't start another
+    gate.set()
+    await first
+    assert len(store.summaries_added) == 1
+    assert store.facts_added == ["Matt likes IPA"]
+    assert len(ai.calls) == 2              # one summary call + one fact call
+
+
+@pytest.mark.asyncio
+async def test_a_second_chat_is_not_held_up_by_the_first():
+    import asyncio
+
+    gate = asyncio.Event()
+
+    class SlowAI(FakeAI):
+        async def cheap_completion(self, prompt, *, max_tokens=200, chat_id=None):
+            self.calls.append({"chat_id": chat_id})
+            if chat_id == 1:
+                await gate.wait()
+            return "x" if chat_id != 1 else None
+
+    store = FakeStore([_msg(i, f"line {i}") for i in range(1, 6)])
+    ai = SlowAI([])
+    one = asyncio.create_task(maybe_summarize(store, ai, _settings(), 1))
+    await asyncio.sleep(0)
+    await maybe_summarize(store, ai, _settings(), 2)     # runs to completion
+    assert any(c["chat_id"] == 2 for c in ai.calls)
+    gate.set()
+    await one

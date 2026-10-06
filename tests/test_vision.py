@@ -354,7 +354,8 @@ async def test_a_description_never_fires_a_canned_automod_bit(monkeypatch):
     """The sharpest one. If the bot's own words about a picture were
     treated as user input, a photo the model calls 'based' would trigger
     the automod table — the bot answering itself."""
-    rt = _seeing_rt(monkeypatch, seen="[photo: a poster reading BASED]")
+    rt = _seeing_rt(monkeypatch, seen="[photo: a poster reading BASED]",
+                    policy="mention")
     monkeypatch.setattr(chat, "should_respond", lambda *a, **k: False)
     fired = []
     monkeypatch.setattr(chat, "_automod_response",

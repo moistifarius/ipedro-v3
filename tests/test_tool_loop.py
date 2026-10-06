@@ -127,7 +127,7 @@ async def test_tool_rounds_keep_the_caching_and_thinking_rules():
     await client.chat_with_tools(long_prefix, tools=TOOLS, run_tool=_runner())
     for s in sent:
         assert s["thinking"] == {"type": "disabled"}
-        assert s["cache_control"] == {"type": "ephemeral"}
+        assert "cache_control" not in s          # see _claude_kwargs
         assert s["system"][0]["cache_control"]["type"] == "ephemeral"
         assert "temperature" not in s
 
@@ -194,6 +194,26 @@ async def test_a_tool_call_written_out_as_text_is_never_sent(leaked):
     client, _ = _client(_text(leaked))
     out = await client.chat_with_tools(MESSAGES, tools=TOOLS, run_tool=_runner())
     assert out is None
+
+
+@pytest.mark.parametrize("prose", [
+    "Checked my records (check_my_records): I let that one pass, nobody was talking to me.",
+    "check_my_health says two warnings about the hub, nothing else.",
+    "I ran list_my_chats and I'm in four of them.",
+    "Matt asked me to check_my_records and I did.",
+])
+@pytest.mark.asyncio
+async def test_naming_a_tool_in_prose_is_not_a_leak(prose):
+    """The brief hands the model these names. A reply that echoes one while
+    explaining itself must be sent, not swallowed: silence on 'why did you
+    ignore me?' is the one failure this feature can't have."""
+    client, _ = _client(_text(prose))
+    out = await client.chat_with_tools(
+        MESSAGES, tools=TOOLS + [
+            {"name": "list_my_chats"}, {"name": "check_my_health"},
+        ], run_tool=_runner(),
+    )
+    assert out == prose
 
 
 @pytest.mark.asyncio

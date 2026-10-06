@@ -104,6 +104,35 @@ async def _can_edit_config(
     return getattr(member, "status", None) in ("creator", "administrator")
 
 
+async def _may_correct_notes(rt: Runtime, msg: Message) -> bool:
+    """Who may rewrite the bot's notes with /fixname: a bot admin, a chat
+    admin of THIS chat, or the person in a private chat with the bot (it's
+    their own conversation). A plain group member may not: the rewrite
+    reaches every summary and fact, which sit in the bot's system prompt for
+    everyone, and there is no undo."""
+    user_id = msg.from_user.id if msg.from_user else None
+    if user_id is None:
+        return False
+    if msg.chat.type == "private":
+        return True
+    return await _can_edit_config(rt, user_id, msg.chat, msg.chat.id)
+
+
+_NAME_MAX_CHARS = 40
+_NAME_MAX_WORDS = 4
+
+
+def _looks_like_a_name(text: str) -> bool:
+    """A name, not a sentence: this text is pasted verbatim into the bot's
+    summaries and facts, which are part of its system prompt. Letters,
+    digits, spaces and the few marks names carry; short; one line."""
+    return (
+        0 < len(text) <= _NAME_MAX_CHARS
+        and len(text.split()) <= _NAME_MAX_WORDS
+        and all(ch.isalnum() or ch in " '’.-" for ch in text)
+    )
+
+
 async def _answer_reddit_media(
     msg: Message, data: bytes, kind: str, caption: str | None,
 ):
@@ -844,10 +873,17 @@ def build_router(rt: Runtime) -> Router:
         past messages. Use an arrow for multi-word names; otherwise the
         first two words are taken as <wrong> <right>."""
         cfg = await get_or_create_chat_config(rt, msg)
+        if not await _may_correct_notes(rt, msg):
+            await msg.reply(
+                "Only chat admins can do that: it rewrites my notes for "
+                "everyone here, and there's no undo.",
+                disable_notification=True,
+            )
+            return
         raw = (msg.text or "").split(None, 1)
         if len(raw) < 2 or not raw[1].strip():
             await msg.reply(
-                "Usage: /fixname <wrong> -> <right>\n"
+                "Usage: /fixname <wrong> -> <right>   (chat admins)\n"
                 "e.g. /fixname Matt -> Sarah   (or: /fixname Matt Sarah)\n"
                 "Careful with names that are also common words (Will, "
                 "Grace, Rose, ...) — this does a whole-word replace across "
@@ -872,6 +908,14 @@ def build_router(rt: Runtime) -> Router:
         if not wrong or not right:
             await msg.reply(
                 "Both names need to be non-empty.", disable_notification=True,
+            )
+            return
+        if not (_looks_like_a_name(wrong) and _looks_like_a_name(right)):
+            await msg.reply(
+                f"Those need to be names: up to {_NAME_MAX_WORDS} words and "
+                f"{_NAME_MAX_CHARS} characters, letters and numbers only. "
+                "This pastes the new one into my notes word for word.",
+                disable_notification=True,
             )
             return
         if not cfg.memory_enabled:

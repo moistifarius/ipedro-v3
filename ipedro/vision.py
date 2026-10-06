@@ -80,10 +80,20 @@ class Media:
     file_unique_id: str
     label: str                  # what to say when we can't see it
     file_id: str | None = None  # the still frame to look at, when there is one
+    # The file itself, as Telegram can send it back. NOT file_id: for a GIF,
+    # video, video note, animated sticker or non-image file, file_id is the
+    # THUMBNAIL's id, which Telegram will only send as a photo. The picture
+    # library files this one, so "send that gif" can actually send the gif.
+    source_file_id: str | None = None
 
     @property
     def viewable(self) -> bool:
         return self.file_id is not None
+
+    @property
+    def sendable_id(self) -> str | None:
+        """What to store so the media can be sent back as itself."""
+        return self.source_file_id or self.file_id
 
 
 def _clock(seconds: int | None) -> str:
@@ -115,7 +125,7 @@ def extract_media(msg: Message) -> Media | None:
         )
         return Media(
             kind="photo", file_unique_id=best.file_unique_id,
-            label="a photo", file_id=best.file_id,
+            label="a photo", file_id=best.file_id, source_file_id=best.file_id,
         )
 
     if msg.sticker:
@@ -129,14 +139,14 @@ def extract_media(msg: Message) -> Media | None:
         still = s.file_id if not (s.is_animated or s.is_video) else _thumb_id(s)
         return Media(
             kind="sticker", file_unique_id=s.file_unique_id,
-            label=label, file_id=still,
+            label=label, file_id=still, source_file_id=s.file_id,
         )
 
     if msg.animation:                       # a GIF, which Telegram stores as mp4
         a = msg.animation
         return Media(
             kind="gif", file_unique_id=a.file_unique_id,
-            label="a GIF", file_id=_thumb_id(a),
+            label="a GIF", file_id=_thumb_id(a), source_file_id=a.file_id,
         )
 
     if msg.video:
@@ -144,6 +154,7 @@ def extract_media(msg: Message) -> Media | None:
         return Media(
             kind="video", file_unique_id=v.file_unique_id,
             label=f"a video{_clock(v.duration)}", file_id=_thumb_id(v),
+            source_file_id=v.file_id,
         )
 
     if msg.video_note:
@@ -151,6 +162,7 @@ def extract_media(msg: Message) -> Media | None:
         return Media(
             kind="video note", file_unique_id=v.file_unique_id,
             label=f"a video note{_clock(v.duration)}", file_id=_thumb_id(v),
+            source_file_id=v.file_id,
         )
 
     if msg.document:
@@ -164,6 +176,7 @@ def extract_media(msg: Message) -> Media | None:
             kind="image" if is_image else "file",
             file_unique_id=d.file_unique_id,
             label=f"a file ({name})", file_id=still,
+            source_file_id=d.file_id,
         )
 
     if msg.audio:

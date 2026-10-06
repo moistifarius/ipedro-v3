@@ -416,3 +416,41 @@ async def test_describe_image_swallows_a_total_failure():
     client._anthropic = None
     client._client.chat = _ExplodingChatNamespace()
     assert await client.describe_image(b"x", prompt="p") is None
+
+
+# ── one retry layer, and real timeouts ───────────────────────────────────────
+
+def test_the_sdk_clients_do_not_retry_underneath_tenacity():
+    """The SDKs retry 408/409/429/5xx by default. Stacked under tenacity
+    that made one failing call up to nine requests and retried 429s the
+    module swears it never retries."""
+    from ipedro.openai_client import OpenAIClient
+
+    client = OpenAIClient(api_key="k", anthropic_api_key="k")
+    assert client._anthropic.max_retries == 0
+    assert client._openai.max_retries == 0
+
+
+def test_the_sdk_clients_have_real_timeouts_not_ten_minutes():
+    from ipedro.openai_client import OpenAIClient
+
+    client = OpenAIClient(api_key="k", anthropic_api_key="k")
+    assert client._anthropic.timeout == 45.0
+    assert client._openai.timeout == 120.0
+
+
+def test_overload_is_retried_like_other_transient_upstream_errors():
+    """529 is not an InternalServerError, so tenacity never saw it; the
+    SDK's own retry used to cover it, and now that it's off this must."""
+    from anthropic import OverloadedError
+    from ipedro.openai_client import _CLAUDE_RETRY
+
+    class _Pred:
+        def __init__(self, p):
+            self.p = p
+
+    predicate = _CLAUDE_RETRY["retry"]
+    classes = predicate.exception_types
+    assert OverloadedError in classes
+    from anthropic import RateLimitError
+    assert not issubclass(RateLimitError, classes)

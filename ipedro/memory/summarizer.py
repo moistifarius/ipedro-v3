@@ -19,9 +19,9 @@ from ipedro.prompts import FACT_EXTRACT_PROMPT, SUMMARIZE_PROMPT
 log = logging.getLogger(__name__)
 
 
-# Per-chat asyncio locks so two concurrent admin clicks on
-# `force_summarize` for the same chat serialize. The dict grows
-# unbounded; that's fine for an admin-only feature with <50 chats.
+# Per-chat asyncio locks: one summarization pass per chat at a time, whether
+# it came from a message (maybe_summarize) or an admin click (force_summarize).
+# One small lock per chat the bot has ever summarized; that's a few dozen.
 _force_summarize_locks: dict[int, asyncio.Lock] = {}
 
 
@@ -49,7 +49,26 @@ def _format_messages_block(messages: list[StoredMessage]) -> str:
 async def maybe_summarize(
     store: MemoryStore, openai: OpenAIClient, settings: Settings, chat_id: int,
 ) -> None:
-    """Trigger summarization if enough new messages have accumulated."""
+    """Trigger summarization if enough new messages have accumulated.
+
+    Every incoming message calls this, and aiogram runs each update as its
+    own task, so two calls for one chat overlap whenever messages arrive
+    during a pass (a pass is several seconds of model calls). Both would
+    read the same latest summary, both pass the threshold, both summarize
+    the same batch and both insert every extracted fact: a doubled summary
+    row and doubled facts. So at most one pass per chat runs at a time, and
+    a call that finds one running just returns; the pass in flight covers
+    those messages, and anything newer re-triggers on the next one."""
+    lock = _lock_for(chat_id)
+    if lock.locked():
+        return
+    async with lock:
+        await _summarize_if_due(store, openai, settings, chat_id)
+
+
+async def _summarize_if_due(
+    store: MemoryStore, openai: OpenAIClient, settings: Settings, chat_id: int,
+) -> None:
     last = await store.latest_summary(chat_id)
     since_id = last.covers_until_id if last else 0
     new_count = await store.messages.count_since(chat_id, since_id)

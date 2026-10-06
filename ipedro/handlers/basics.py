@@ -50,7 +50,7 @@ HELP_TEXT_PUBLIC = _DALE_HELP_INTRO + (
     "  (or just say 'act like <name>' / 'do a <name> impression' in chat — "
     "I'll reply in that member's voice, learned from their history)\n"
     "/roast @user, /compliment @user\n"
-    "/fixname <wrong> -> <right> - fix a name I keep getting wrong, "
+    "/fixname <wrong> -> <right> - (chat admins) fix a name I keep getting wrong, "
     "across my notes (never touches what you typed)\n"
     "/lyric <line> - I mishear it\n"
     "/meme top text | bottom text - generate a meme image\n"

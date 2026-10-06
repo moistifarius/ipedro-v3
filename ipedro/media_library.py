@@ -86,7 +86,7 @@ async def remember(
             " file_id, kind, description, caption, posted_by, posted_by_name) "
             "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) "
             "ON CONFLICT (chat_id, message_id) DO NOTHING RETURNING id",
-            chat_id, message_id, media.file_unique_id, media.file_id,
+            chat_id, message_id, media.file_unique_id, media.sendable_id,
             media.kind, description, caption or None, posted_by, posted_by_name,
         )
     except Exception as exc:
@@ -222,6 +222,17 @@ async def send(rt, msg: Message, row: dict, caption: str | None) -> Message | No
         )
     except Exception as exc:
         log.warning("re-sending stored %s failed: %s", kind, exc)
+    if kind == "photo":
+        return None
+    # Rows filed before the original file's id was kept hold the THUMBNAIL's
+    # id, which Telegram refuses as a gif/video/sticker/document but sends
+    # fine as a photo. A still frame beats "nothing saved matches that".
+    try:
+        return await msg.reply_photo(
+            file_id, caption=caption, disable_notification=True,
+        )
+    except Exception as exc:
+        log.warning("sending the stored %s as a still failed too: %s", kind, exc)
         return None
 
 

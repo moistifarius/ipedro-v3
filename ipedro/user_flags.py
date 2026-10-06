@@ -17,29 +17,49 @@ VALID_FLAGS = ("shutup", "snark", "grudge")
 # Auto-grudge decays after this long. Re-insulting refreshes it.
 GRUDGE_TTL = timedelta(hours=24)
 
-# Insult words, before or after one of the bot's names (or "bot") in the
-# same message. The names come from the deployment's identity: this used
-# to list only the legacy Dude/Pedro aliases, so "dale you're useless"
-# never registered at all.
-_INSULTS_BEFORE = (
-    r"stupid|dumb|trash|garbage|shut\s*up|fuck\s*off|fuck\s*you|"
-    r"shitty|hate|useless|broken|terrible|awful|kill\s*yourself|kys|"
-    r"die|piece\s*of\s*shit"
+# An insult has to be POINTED AT the bot: an insult word right next to one
+# of its names (or "bot"), or the name followed by "you're / is / are" and
+# the insult. Not merely both in the same message. The first version joined
+# any insult word to any name within 40 characters, which is how "my car is
+# broken dude", "the hinge is rusty and broken" and "dale cooper is trash"
+# earned a 24-hour grudge: the bot turned snarky at someone who'd said
+# nothing to it. Words that are as often a complaint about something else
+# ("broken", "hate", "die") aren't in the list at all.
+_ADJ = (
+    r"(?:stupid|dumb|trash|garbage|useless|shitty|terrible|awful|worthless"
+    r"|pathetic)"
 )
-_INSULTS_AFTER = (
-    r"stupid|dumb|trash|garbage|shut\s*up|fuck\s*off|fuck\s*you|"
-    r"shitty|hate|useless|broken|terrible|awful|piece\s*of\s*shit"
+_CMD = (
+    r"(?:shut\s*up|stfu|fuck\s*off|fuck\s*you|fuck\s*u|kys"
+    r"|kill\s*yourself|piece\s*of\s*shit)"
 )
+# Words that can sit between the insult and the name without breaking the
+# aim: "you stupid bot", "such a useless bot", "shut up you fucking dale".
+_FILLER = (
+    r"(?:you(?:'re|\s+are)?|u(?:\s*r)?|ur|so|such\s+an?|an?|the|total|complete"
+    r"|absolute|fucking|f+ing|goddamn|damn|fkn)"
+)
+_COPULA = r"(?:you(?:'re|\s+are)?|ur|u\s*r|is|are)"
 
 
 @lru_cache(maxsize=16)
 def _insult_re(names_pattern: str) -> re.Pattern:
     # Lookarounds around the names, as in identity.py: an alias can end in
     # punctuation, where \b would never match.
-    names = rf"(?<!\w)(?:(?:{names_pattern})|bot)(?!\w)"
+    name = rf"(?<!\w)(?:(?:{names_pattern})|bot)(?!\w)"
+    # Dale's legacy "dude" / "duder" are also what people call each other:
+    # "this movie is trash dude" is about the movie. So an insult right
+    # BEFORE the name doesn't count when the name is just that word (the
+    # name-first forms below still do: "dude you're garbage").
+    vocative = r"(?!(?:dude|duder)(?!\w))" if names_pattern == DALE.names_pattern else ""
+    before_name = rf"{vocative}{name}"
     return re.compile(
-        rf"\b(?:{_INSULTS_BEFORE})\b.{{0,40}}{names}"
-        rf"|{names}.{{0,40}}\b(?:{_INSULTS_AFTER})\b",
+        # "useless bot", "shut up dale", "you stupid bot", "fuck you rusty"
+        rf"\b(?:{_ADJ}|{_CMD})\b(?:\W+{_FILLER}){{0,3}}\W+{before_name}"
+        # "dale you're useless", "bot is stupid", "rusty is so dumb"
+        rf"|{name}\W+{_COPULA}\W+(?:{_FILLER}\W+){{0,2}}(?:{_ADJ}|piece\s*of\s*shit)\b"
+        # "dale shut up", "bot fuck off"
+        rf"|{name}\W+{_CMD}\b",
         re.IGNORECASE,
     )
 

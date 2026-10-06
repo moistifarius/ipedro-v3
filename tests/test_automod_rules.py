@@ -26,7 +26,7 @@ from ipedro.handlers.automod import (
 
 def test_kys_gets_a_deflection_and_wins_priority():
     for t in ("kys", "kill yourself", "just neck yourself",
-              "i want to kill myself", "killurself", "kill ur self"):
+              "killurself", "kill ur self"):
         assert _automod_response(t, random.Random(0)) in _KYS_LINES, t
     # kys intercepts first — a joke trigger in the same message can't win
     assert _automod_response("kys you gay loser", random.Random(0)) in _KYS_LINES
@@ -35,6 +35,18 @@ def test_kys_gets_a_deflection_and_wins_priority():
     for line in _KYS_LINES:
         assert not banned.search(line), line
     assert _automod_response("that joke killed me lol") not in _KYS_LINES
+
+
+def test_a_first_person_statement_is_never_met_with_a_taunt():
+    """'kill yourself' is the insult the deflection exists for. 'I want to
+    kill myself' is somebody saying something true and awful; answering it
+    with 'skill issue' (and returning before any real reply could follow)
+    was the bug. It must reach the normal flow, with no canned bit."""
+    for t in ("i want to kill myself", "I'm going to kill myself tonight",
+              "gonna neck myself", "i might kill my self"):
+        assert _automod_response(t, random.Random(0)) is None, t
+        for seed in range(8):
+            assert _automod_response(t, random.Random(seed)) not in _KYS_LINES
 
 
 def test_kys_regex_has_word_boundaries_on_both_ends():

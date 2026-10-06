@@ -231,6 +231,90 @@ async def test_a_telegram_refusal_is_a_miss_not_a_crash(monkeypatch):
     assert await lib.recall(rt, msg, _cfg(memory=False), "send it") is False
 
 
+# ── sending back what was actually posted, not its thumbnail ────────────────
+
+def _bare_msg(**attrs):
+    base = dict(photo=None, sticker=None, animation=None, video=None,
+                video_note=None, document=None, audio=None)
+    base.update(attrs)
+    return SimpleNamespace(**base)
+
+
+def _thumb(file_id="thumb"):
+    return SimpleNamespace(file_id=file_id)
+
+
+@pytest.mark.parametrize("name,attrs,kind,viewed,sent", [
+    ("gif", dict(animation=SimpleNamespace(file_id="anim", file_unique_id="u", thumbnail=_thumb())),
+     "gif", "thumb", "anim"),
+    ("video", dict(video=SimpleNamespace(file_id="vid", file_unique_id="u", thumbnail=_thumb(), duration=5)),
+     "video", "thumb", "vid"),
+    ("video note", dict(video_note=SimpleNamespace(file_id="note", file_unique_id="u", thumbnail=_thumb(), duration=5)),
+     "video note", "thumb", "note"),
+    ("animated sticker", dict(sticker=SimpleNamespace(file_id="stk", file_unique_id="u", thumbnail=_thumb(),
+                                                       is_animated=True, is_video=False, emoji="x", set_name=None)),
+     "sticker", "thumb", "stk"),
+    ("static sticker", dict(sticker=SimpleNamespace(file_id="stk", file_unique_id="u", thumbnail=None,
+                                                     is_animated=False, is_video=False, emoji="x", set_name=None)),
+     "sticker", "stk", "stk"),
+    ("file", dict(document=SimpleNamespace(file_id="doc", file_unique_id="u", thumbnail=_thumb(),
+                                           mime_type="application/pdf", file_name="a.pdf")),
+     "file", "thumb", "doc"),
+    ("photo", dict(photo=[SimpleNamespace(file_id="big", file_unique_id="u", file_size=10)]),
+     "photo", "big", "big"),
+])
+def test_media_keeps_the_original_files_id_apart_from_the_still_it_was_described_from(
+    name, attrs, kind, viewed, sent,
+):
+    """For a GIF, video, animated sticker or non-image file the id we LOOK
+    at is the thumbnail's, and Telegram will only send that as a photo.
+    Filing it as the file made every 'send that gif' fail."""
+    media = vision.extract_media(_bare_msg(**attrs))
+    assert media.kind == kind
+    assert media.file_id == viewed          # what vision describes
+    assert media.sendable_id == sent        # what the library files
+
+
+@pytest.mark.asyncio
+async def test_the_library_files_the_gif_not_its_thumbnail():
+    rt = _rt()
+    media = vision.Media(kind="gif", file_unique_id="u", label="a GIF",
+                         file_id="thumb", source_file_id="anim")
+    await lib.remember(rt, chat_id=-1, message_id=5, media=media,
+                       description="a dog", caption=None, posted_by=1,
+                       posted_by_name="Matt")
+    stored = rt.db.fetchval.await_args.args
+    assert "anim" in stored and "thumb" not in stored
+
+
+@pytest.mark.asyncio
+async def test_a_row_filed_with_a_thumbnail_id_still_sends_a_still(monkeypatch):
+    """Rows saved before the fix hold a thumbnail's id: Telegram refuses it
+    as a gif and takes it as a photo. A still frame beats 'nothing saved
+    matches that'."""
+    rt = _rt()
+    monkeypatch.setattr(lib, "search", AsyncMock(return_value=[
+        {**_row(3, "a dog", kind="gif"), "similarity": 0.9},
+    ]))
+    msg = _tg_msg()
+    msg.reply_animation = AsyncMock(side_effect=RuntimeError("can't use file of type Photo as Animation"))
+    assert await lib.recall(rt, msg, _cfg(memory=False), "send the gif of the dog") is True
+    msg.reply_photo.assert_awaited_once()
+    assert msg.reply_photo.await_args.args[0] == "file3"
+
+
+@pytest.mark.asyncio
+async def test_if_even_the_still_is_refused_it_is_a_miss(monkeypatch):
+    rt = _rt()
+    monkeypatch.setattr(lib, "search", AsyncMock(return_value=[
+        {**_row(3, "a dog", kind="video"), "similarity": 0.9},
+    ]))
+    msg = _tg_msg()
+    msg.reply_video = AsyncMock(side_effect=RuntimeError("no"))
+    msg.reply_photo = AsyncMock(side_effect=RuntimeError("no"))
+    assert await lib.recall(rt, msg, _cfg(memory=False), "send it") is False
+
+
 # ── through on_message ───────────────────────────────────────────────────────
 
 def _chat_rt(monkeypatch):

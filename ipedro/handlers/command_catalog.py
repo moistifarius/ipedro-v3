@@ -125,7 +125,7 @@ COMMANDS: tuple[Command, ...] = (
             "facts, the summary and the bot's own messages — and leave a "
             "correction so it sticks. Never touches what people typed."),
     Command("fixname",      "ai", "/fixname",
-            "/fixname <wrong> -> <right>",
+            "/fixname <wrong> -> <right>  (chat admin)",
             "Fix a name the bot keeps getting wrong — recursively across "
             "summaries, facts, and the bot's own past messages. Never "
             "rewrites what people actually typed. Careful with names that "

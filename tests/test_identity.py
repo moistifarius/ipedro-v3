@@ -263,20 +263,27 @@ def gif_sender(monkeypatch):
     return sent
 
 
+def _group_rt():
+    """A group chat on the default policy: where the ambient bits live."""
+    rt = _rt_with()
+    rt.chats.get_config.return_value.response_policy = "mention"
+    return rt
+
+
 @pytest.mark.asyncio
 async def test_another_bot_never_rolls_for_an_ambient_dale_gif(gif_sender, monkeypatch):
     monkeypatch.setattr(chat, "_DALE_GIF_PROBABILITY", 1.0)
-    await _handler(_as_hank(_rt_with())).callback(_msg(text="anyway the tap drips"))
+    await _handler(_as_hank(_group_rt())).callback(_msg(text="anyway the tap drips"))
     gif_sender.assert_not_awaited()
-    await _handler(_rt_with()).callback(_msg(text="anyway the tap drips"))
+    await _handler(_group_rt()).callback(_msg(text="anyway the tap drips"))
     gif_sender.assert_awaited_once()              # control: Dale still does
 
 
 @pytest.mark.asyncio
 async def test_another_bot_skips_the_dale_gif_triggers(gif_sender):
-    await _handler(_as_hank(_rt_with())).callback(_msg(text="pocket sand!"))
+    await _handler(_as_hank(_group_rt())).callback(_msg(text="pocket sand!"))
     gif_sender.assert_not_awaited()
-    await _handler(_rt_with()).callback(_msg(text="pocket sand!"))
+    await _handler(_group_rt()).callback(_msg(text="pocket sand!"))
     gif_sender.assert_awaited_once()              # control: Dale still does
 
 
@@ -357,7 +364,7 @@ async def test_the_chat_handler_briefs_another_bot_as_itself(monkeypatch):
     "dale you're useless",              # never registered before: wrong names
     "rusty is so dumb",
     "shut up rusty shackleford",
-    "dude this is garbage",             # the legacy names still count
+    "dude you're garbage",              # the legacy names still count
     "pedro is trash",
     "useless bot",
 ])

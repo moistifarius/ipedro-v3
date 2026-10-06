@@ -116,12 +116,15 @@ _CREDIT_LINES = (
     "yeah. that was me. don't tell anyone",
 )
 
-# "thanks dale" / "thanks rusty" / "thanks man" — common ways someone
-# might thank the bot directly. Legacy dude/duder/pedro still match.
+# "thanks dale" / "thanks rusty" — common ways someone might thank the bot
+# directly. Legacy dude/duder/pedro still match. Not "man": "thanks man" is
+# what one person says to another, and with this firing under every policy
+# (no mention needed) the bot answered thanks that weren't meant for it,
+# then treated the thanker as someone it owed a follow-up.
 _THANKS_PEDRO_RE = re.compile(
     r"\b(thanks|thank\s*you|ty|tysm|cheers|thx)\b"
-    r"[\s,!.]*\b(dale|rusty|idale|dude|duder|pedro|boomhauer|man)\b"
-    r"|\b(dale|rusty|idale|dude|duder|pedro|boomhauer|man)\b"
+    r"[\s,!.]*\b(dale|rusty|idale|dude|duder|pedro|boomhauer)\b"
+    r"|\b(dale|rusty|idale|dude|duder|pedro|boomhauer)\b"
     r"[\s,!.]*\b(thanks|thank\s*you|ty|cheers|thx)\b",
     re.IGNORECASE,
 )
@@ -738,9 +741,24 @@ def build_router(rt: Runtime) -> Router:
         # AutoModerator-style canned responses (e.g. 'gay' → the copypasta,
         # 'stonks' → the actual image). Fixed intercept; skip the AI reply.
         # Not written to memory — canned bits aren't conversational context.
+        # Only for chatter nobody aimed at him. A message that names him,
+        # replies to him, or arrives in a chat where everything is for him
+        # (a DM, an 'always' chat) is a question, and the table's plain-word
+        # rows ('linux', 'based', 'propane', 'sigma') answered it with a
+        # copypasta instead. The bits still fire on room chatter.
+        aimed_at_him = (
+            _has_bot_mention(msg, bot_username)
+            or _mentions_pedro(typed, ident)
+            or _is_reply_to_bot(msg, bot_id)
+            or msg.chat.type == "private"
+            or cfg.response_policy == "always"
+        )
         automod = (
             _automod_response(typed, dale_gifs=ident.dale_flavor)
-            if cfg.automod_enabled and cfg.response_policy != "commands"
+            if (
+                cfg.automod_enabled and cfg.response_policy != "commands"
+                and not aimed_at_him
+            )
             else None
         )
         if automod is not None:
@@ -891,7 +909,8 @@ def build_router(rt: Runtime) -> Router:
             typed
             and ident.dale_flavor
             and cfg.automod_enabled
-            and cfg.response_policy != "commands"
+            and cfg.response_policy not in ("commands", "always")
+            and msg.chat.type != "private"
             and not incoming.has_mention_of_bot
             and not incoming.is_reply_to_bot
             and random.random() < _DALE_GIF_PROBABILITY
@@ -1093,6 +1112,15 @@ def build_router(rt: Runtime) -> Router:
                 ctx.messages, max_tokens=300, chat_id=msg.chat.id,
             )
         if not reply:
+            # He meant to answer and couldn't (the model errored or sent
+            # nothing). Say so in the activity log: otherwise "why didn't
+            # he answer?" has no answer, and a bad model setting reads as
+            # a quiet bot rather than a failing one.
+            await _log_activity(
+                rt, msg.chat.id, "no_reply",
+                f"model returned nothing on {typed[:60]!r}",
+                message_id=msg.message_id,
+            )
             return
 
         sent = await msg.answer(reply, disable_notification=True)

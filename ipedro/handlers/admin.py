@@ -461,6 +461,7 @@ _MGM_LEAVES: tuple[str, ...] = tuple(sorted(set(
 # private price-table keys without coupling admin.py to openai_client
 # internals. Update by hand when adding a new model price entry.
 _KNOWN_CLAUDE_TEXT_MODELS: tuple[str, ...] = (
+    "claude-sonnet-5-5", "claude-opus-5-5",
     "claude-sonnet-5", "claude-opus-5", "claude-opus-4-8",
     "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5",
     "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5",
@@ -1820,6 +1821,16 @@ def build_router(rt: Runtime) -> Router:
             slot = rt.openai.text_provider
             new_model = parts[1]
         if slot == "claude":
+            # Ask Anthropic first: a model id it rejects makes every reply
+            # a swallowed 400, and the saved setting outlives a restart.
+            problem = await rt.openai.probe_claude_model(new_model)
+            if problem:
+                await msg.reply(
+                    f"Anthropic rejected {new_model}, so nothing changed "
+                    f"(still {rt.openai.claude_model}):\n{problem}",
+                    disable_notification=True,
+                )
+                return
             rt.openai.set_claude_model(new_model)
             await kv_set(rt.db, "claude_text_model", new_model)
         else:
