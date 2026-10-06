@@ -268,13 +268,13 @@ def build_router(rt: Runtime) -> Router:
           1. chat_config.persona_custom (if set) — WINS over everything
           2. chat_config.persona == "neutral" → NEUTRAL_PROMPT
           3. chat_config.persona in {"dude", "pedro"} → /master_prompt
-             override, or DEFAULT_DUDE_PROMPT if no override is set
+             override, or the bot's starting persona if there is none
           4. anything else → /master_prompt fallback
         """
         if not await require_admin(msg, rt.settings.admin_ids):
             return
         from ipedro.personas import (
-            DEFAULT_DUDE_PROMPT, current_master_prompt, resolve_persona,
+            current_master_prompt, default_prompt, resolve_persona,
         )
         cfg = await rt.chats.get_config(msg.chat.id)
         if cfg is None:
@@ -283,7 +283,9 @@ def build_router(rt: Runtime) -> Router:
             return
         resolved = resolve_persona(cfg.persona, cfg.persona_custom)
         master = current_master_prompt()
-        master_overridden = master != DEFAULT_DUDE_PROMPT
+        # Against what THIS bot starts as (Dale's, or its own /newbot persona),
+        # not Dale's: every other bot reported a phantom /master_prompt override.
+        master_overridden = master != default_prompt()
         custom = (cfg.persona_custom or "").strip()
         # Which branch of resolve_persona fired?
         if custom:
@@ -292,10 +294,10 @@ def build_router(rt: Runtime) -> Router:
             source = "built-in NEUTRAL_PROMPT (persona=neutral)"
         elif (cfg.persona or "dude").lower() in ("dude", "pedro"):
             source = ("/master_prompt override" if master_overridden
-                      else "DEFAULT_DUDE_PROMPT (no override; /master_prompt reset)")
+                      else "the bot's starting persona (no override; /master_prompt reset)")
         else:
             source = (f"unknown persona '{cfg.persona}' → fell back to "
-                      f"{'/master_prompt' if master_overridden else 'DEFAULT_DUDE_PROMPT'}")
+                      f"{'/master_prompt' if master_overridden else 'the starting persona'}")
         body = (
             f"📋 Persona resolution for chat {msg.chat.id}\n\n"
             f"chat_config.persona        = {cfg.persona!r}\n"

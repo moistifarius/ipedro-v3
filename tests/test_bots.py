@@ -115,12 +115,15 @@ def test_child_env_is_its_own_bot_and_keeps_none_of_dales_secrets():
     assert env["BOT_PERSONA"] == "You are Hank Hill."
     assert env["MANAGES_BOTS"] == "false"
     assert env["OPENAI_API_KEY"] == "sk-shared"
-    assert not any(k.upper() == "EVOLVE_GITHUB_TOKEN" for k in env)
+    # not inherited, and BLANKED: a .env in the working directory would
+    # otherwise be re-read by pydantic for any key the environment lacks
+    assert [v for k, v in env.items() if k.upper() == "EVOLVE_GITHUB_TOKEN"] == [""]
 
 
 def test_child_env_without_a_persona_sets_none():
-    env = bots.child_env({}, _row(persona=None), "postgresql://u:p@h/ipedro")
-    assert "BOT_PERSONA" not in env
+    env = bots.child_env({"BOT_PERSONA": "You are Dale."}, _row(persona=None),
+                         "postgresql://u:p@h/ipedro")
+    assert env["BOT_PERSONA"] == ""        # blank, so Dale's can't be re-read
 
 
 def test_a_bot_with_no_persona_starts_as_itself_not_dale():
@@ -695,3 +698,75 @@ def test_child_bots_get_a_small_connection_pool():
     Postgres (default max_connections 100)."""
     env = bots.child_env({"DB_POOL_MAX": "50"}, _row(), "postgresql://u:p@h/ipedro")
     assert env["DB_POOL_MAX"] == str(bots.CHILD_DB_POOL_MAX) == "4"
+
+
+# ── things a review of the first version turned up ────────────────────────────
+
+@pytest.mark.parametrize("tail", ["-", "_", "-_-", "a-"])
+def test_a_token_may_end_in_a_dash(tail):
+    """\\b after a trailing "-" is no boundary, so a real token that ended
+    in one was refused by /newbot ("doesn't look like a bot token")."""
+    token = "7123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PAL" + tail
+    assert bots.contains_token(f"here {token} ok")
+    assert bots.parse_newbot(f"/newbot {token} Hank").token == token
+
+
+def test_a_token_is_found_whole_not_by_its_prefix():
+    token = "7123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PAL-"
+    assert bots.TOKEN_RE.search(f"say {token}").group(0) == token
+    assert bots.TOKEN_RE.search("1234:short") is None
+    assert bots.TOKEN_RE.search("xx7123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw1") is None
+
+
+def test_a_dotenv_in_the_working_directory_cannot_hand_a_child_the_owners_secrets(
+        tmp_path, monkeypatch):
+    """Not inheriting EVOLVE_GITHUB_TOKEN isn't enough on a bare-metal run:
+    pydantic re-reads a .env for any key the environment lacks."""
+    from ipedro.config import Settings
+
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("EVOLVE_GITHUB_TOKEN=github_pat_owners\nBOT_PERSONA=You are Dale.\n")
+    base = {"EVOLVE_GITHUB_TOKEN": "github_pat_owners", "OPENAI_API_KEY": "sk-shared"}
+    env = bots.child_env(base, _row(persona=None), "postgresql://u:p@h/ipedro")
+    for key in list(__import__("os").environ):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    child = Settings(_env_file=dotenv)                       # type: ignore[call-arg]
+    assert not child.evolve_github_token
+    assert not child.bot_persona
+    assert identity.starting_persona(child) == "You are Hank."
+
+
+@pytest.mark.asyncio
+async def test_removing_a_bot_blanks_its_token_but_stopping_it_does_not():
+    seen = []
+
+    async def fetchrow(sql, *args):
+        seen.append((sql, args))
+        return _record(_row())
+
+    db = SimpleNamespace(fetchrow=fetchrow)
+    await bots.set_status(db, 3, "removed")
+    await bots.set_status(db, 3, "stopped")
+    sql = seen[0][0]
+    assert "token = CASE WHEN $2 = 'removed' THEN '' ELSE token END" in sql
+    assert [a[1] for _, a in seen] == ["removed", "stopped"]
+
+
+@pytest.mark.asyncio
+async def test_a_pasted_token_is_not_echoed_when_no_bot_matches(cmds):
+    msg = _msg(f"/bot_stop {TOKEN}")
+    await cmds.h["stop_cmd"](msg)
+    said = _said(msg)[0]
+    assert "No bot called" in said and TOKEN not in said and "<token>" in said
+
+
+@pytest.mark.asyncio
+async def test_bot_persona_shows_the_whole_persona_not_a_preview(cmds):
+    cmds.rows = [_row(persona="You are Hank Hill. " + "Propane, and propane accessories. " * 400)]
+    msg = _msg("/bot_persona 3")
+    await cmds.h["persona_cmd"](msg)
+    parts = _said(msg)
+    assert len(parts) >= 3 and all(len(p) <= 4096 for p in parts)
+    assert " ".join(parts).count("Propane, and propane accessories.") == 400

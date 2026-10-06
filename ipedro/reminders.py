@@ -88,10 +88,9 @@ async def run_reminders_loop(
                 # reminder (it retries next tick). A permanent failure (bot
                 # kicked/blocked, chat gone) marks it fired so it doesn't
                 # retry forever.
+                body = f"⏰ Reminder: {r['text']}"
                 try:
-                    body = f"⏰ Reminder: {r['text']}"
                     sent = await bot.send_message(r["chat_id"], body)
-                    track(r["chat_id"], sent.message_id, body)
                 except (TelegramForbiddenError, TelegramBadRequest) as exc:
                     log.warning(
                         "Reminder %s undeliverable (dropping): %s", r["id"], exc,
@@ -101,7 +100,23 @@ async def run_reminders_loop(
                         "Reminder %s send failed (will retry): %s", r["id"], exc,
                     )
                     continue
-                await _mark_fired(db, r["id"])
+                else:
+                    # It IS delivered. Bookkeeping that goes wrong from here
+                    # on must not look like a failed send: that re-sent it.
+                    try:
+                        track(r["chat_id"], sent.message_id, body)
+                    except Exception as exc:
+                        log.debug("Reminder %s sent but not tracked: %s", r["id"], exc)
+                try:
+                    await _mark_fired(db, r["id"])
+                except Exception as exc:
+                    # Delivered but not recorded (a DB blip): it may repeat
+                    # once on the next tick. That beats losing it, and the
+                    # rest of this batch shouldn't wait a minute behind it.
+                    log.warning(
+                        "Reminder %s was sent but not marked fired (%s); it "
+                        "may be sent once more.", r["id"], exc,
+                    )
             wait = 30
         except Exception as exc:
             log.exception("Reminders iteration failed: %s", exc)

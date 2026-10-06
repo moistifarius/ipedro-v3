@@ -168,7 +168,7 @@ def _command_lines() -> str:
     return "\n".join(lines)
 
 
-def _chat_lines(cfg: ChatConfig) -> str:
+def _chat_lines(cfg: ChatConfig, *, dale_flavor: bool = True) -> str:
     lines = ["In THIS chat:"]
     lines.append(
         "- You reply to " + _POLICY_LINE.get(
@@ -180,8 +180,10 @@ def _chat_lines(cfg: ChatConfig) -> str:
     else:
         lines.append(
             "- Memory is OFF here: you keep nothing between messages, so "
-            "you can't recall earlier conversation, summarize it, or "
-            "remember facts about people. Say so if it comes up."
+            "you can't recall earlier conversation, summarize it, "
+            "remember facts about people, or keep pictures to send back "
+            "(this overrides what you were told above about keeping "
+            "pictures and remembering people). Say so if it comes up."
         )
     lines.append(
         "- Voice notes: you " + (
@@ -195,7 +197,12 @@ def _chat_lines(cfg: ChatConfig) -> str:
             "reach you as a bare note that something was posted, with no "
             "idea what's in it. Don't pretend otherwise."
         )
-    scheduled = [desc for field, desc in _SCHEDULED if getattr(cfg, field)]
+    # The shared photo is Dale's own bit (ipedro/sharephoto.py); another bot
+    # doesn't post one, whatever the chat's switch says.
+    scheduled = [
+        desc for field, desc in _SCHEDULED
+        if getattr(cfg, field) and (dale_flavor or field != "share_photo_enabled")
+    ]
     if scheduled:
         lines.append("- Unprompted, you also post: " + "; ".join(scheduled) + ".")
     else:
@@ -241,7 +248,7 @@ def capability_brief(
         _CANNOT,
     ]
     if cfg is not None:
-        parts.append(_chat_lines(cfg))
+        parts.append(_chat_lines(cfg, dale_flavor=dale_flavor))
     if check_records:
         parts.append(_RECORDS)
         if all_chats:

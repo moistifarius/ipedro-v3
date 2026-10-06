@@ -77,3 +77,29 @@ async def test_a_bot_admin_may_silence_another_bot_admin(flags):
     rt = _rt()
     await _handler(rt, "shutup")(_msg("/shutup", caller=OWNER, target=BOT_ADMIN))
     assert flags == [(-100, BOT_ADMIN, "shutup")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tail,ttl_set", [
+    ("", False),                  # no duration: indefinitely, as documented
+    (" 30m", True), (" 2h", True), (" 1d", True),
+])
+async def test_a_duration_that_parses_is_applied(monkeypatch, tail, ttl_set):
+    seen = []
+
+    async def set_flag(db, chat_id, user_id, flag, **kw):
+        seen.append(kw.get("ttl"))
+
+    monkeypatch.setattr(mod, "set_flag", set_flag)
+    msg = _msg(f"/shutup{tail}", caller=CHAT_ADMIN, target=MEMBER)
+    await _handler(_rt(), "shutup")(msg)
+    assert (seen[0] is not None) is ttl_set
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("junk", ["30mins", "forever", "banana", "2 hours"])
+async def test_a_duration_that_does_not_parse_is_refused_not_read_as_forever(flags, junk):
+    msg = _msg(f"/shutup {junk}", caller=CHAT_ADMIN, target=MEMBER)
+    await _handler(_rt(), "shutup")(msg)
+    assert flags == []
+    assert "Nothing changed" in msg.reply.await_args.args[0]

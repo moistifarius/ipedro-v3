@@ -25,7 +25,7 @@ from aiogram.types import (
 from ipedro.handlers.common import (
     display_name, get_or_create_chat_config, require_admin,
 )
-from ipedro.personas import current_master_prompt
+from ipedro.personas import persona_for_chat
 from ipedro.quizzes import image_fetch, registry
 from ipedro.quizzes.types import Quiz, QuizResult
 from ipedro.runtime import Runtime
@@ -199,20 +199,40 @@ async def images_cached_count(rt: Runtime, quiz: Quiz) -> int:
     return int(n or 0)
 
 
+async def _drop_cached_image(rt: Runtime, quiz: Quiz, item_key: str) -> None:
+    try:
+        await rt.db.execute(
+            "DELETE FROM quiz_item_images "
+            " WHERE quiz_id = $1 AND item_key = ANY($2::text[])",
+            quiz.id, [item_key],
+        )
+    except Exception as exc:                          # pragma: no cover - defensive
+        log.warning("couldn't drop a bad quiz image (%s/%s): %s", quiz.id, item_key, exc)
+
+
 # --------------------------------------------------------------- flow
 async def begin(rt: Runtime, quiz: Quiz, target, chat_id: int, uid: int) -> None:
     """Send question 1 (photo if all images cached, else text) and (re)create
     the session. `target` exposes .answer / .answer_photo."""
     img = await _get_item_image(rt, quiz, quiz.items[0].key) \
         if await _all_images_cached(rt, quiz) else None
+    sent = None
     if img:
-        sent = await target.answer_photo(
-            BufferedInputFile(img, filename="q1.png"),
-            caption=question_caption(quiz, 0),
-            reply_markup=_rating_keyboard(quiz, uid, 0),
-            parse_mode="HTML", disable_notification=True,
-        )
-    else:
+        try:
+            sent = await target.answer_photo(
+                BufferedInputFile(img, filename="q1.png"),
+                caption=question_caption(quiz, 0),
+                reply_markup=_rating_keyboard(quiz, uid, 0),
+                parse_mode="HTML", disable_notification=True,
+            )
+        except TelegramBadRequest as exc:
+            # A cached image Telegram won't take (a truncated file, a
+            # mislabelled one) used to fail EVERY start of this quiz, since
+            # the row is never retried. Drop it so the warm-up re-fetches it,
+            # and run this one as text.
+            log.warning("quiz %s: Telegram refused its cached image: %s", quiz.id, exc)
+            await _drop_cached_image(rt, quiz, quiz.items[0].key)
+    if sent is None:
         sent = await target.answer(
             question_caption(quiz, 0),
             reply_markup=_rating_keyboard(quiz, uid, 0),
@@ -331,11 +351,20 @@ async def _finalize(
                 pass
         await _set_message(cb, caption, reply_markup=kb, parse_mode=None)
     else:
+        sent_photo = False
         if image:
-            await cb.message.answer_photo(
-                BufferedInputFile(image, filename="result.png"),
-                caption=caption, reply_markup=kb, disable_notification=True,
-            )
+            try:
+                await cb.message.answer_photo(
+                    BufferedInputFile(image, filename="result.png"),
+                    caption=caption, reply_markup=kb, disable_notification=True,
+                )
+                sent_photo = True
+            except TelegramBadRequest as exc:
+                # The session is already closed and the result stored by now:
+                # an unguarded failure here left "Crunching…" up for good and
+                # made the taker retake the quiz. Say it as text instead.
+                log.warning("quiz %s: result image refused: %s", quiz.id, exc)
+        if sent_photo:
             await _set_message(cb, f"{quiz.emoji} {name}'s result 👇", parse_mode=None)
         else:
             await _set_message(cb, caption, reply_markup=kb, parse_mode=None)
@@ -347,7 +376,8 @@ async def _persona_verdict(
     try:
         ai = await rt.openai.chat(
             [
-                {"role": "system", "content": current_master_prompt()},
+                {"role": "system",
+                 "content": await persona_for_chat(getattr(rt, "chats", None), chat_id)},
                 {"role": "system", "content": quiz.verdict_instruction},
                 {"role": "user", "content": f"Name: {name}. {result.verdict_payload}"},
             ],

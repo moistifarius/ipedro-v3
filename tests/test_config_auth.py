@@ -77,3 +77,48 @@ async def test_none_user_and_dm_non_admin_rejected():
     assert await _can_edit_config(rt, None, _Chat(-100123), -100123) is False
     # A DM (private) has no chat admins → only bot admins pass there.
     assert await _can_edit_config(rt, 5, _Chat(5, "private"), 5) is False
+
+
+# ── "clear custom" in the wizard ─────────────────────────────────────────────
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("before,expect_persona", [
+    ("pirate", "dude"),            # a custom persona's name is only a label
+    ("dude", None),                # a built-in stays as it is
+    ("neutral", None),
+])
+async def test_clearing_a_custom_persona_leaves_a_persona_that_exists(before, expect_persona):
+    """It nulled the text but kept the custom NAME, so the chat quietly ran
+    the master prompt while the header still said "Persona: pirate"."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from ipedro.handlers.utility import build_router
+
+    cfg = SimpleNamespace(
+        persona=before, persona_custom=None, response_policy="mention",
+        ambient_probability=0.03, duckhunt_enabled=False, share_photo_enabled=False,
+        comic_enabled=False, fortune_enabled=False, voice_transcribe=True,
+        memory_enabled=True, ether_enabled=False, duck_names_public=True,
+        monthly_recap_enabled=True, automod_enabled=True, vision_enabled=True,
+        on_this_day_enabled=True,
+    )
+    rt = SimpleNamespace(
+        settings=SimpleNamespace(admin_ids=frozenset({7})),
+        chats=SimpleNamespace(get_config=AsyncMock(return_value=cfg), update_config=AsyncMock()),
+        bot=SimpleNamespace(),
+    )
+    on_cfg = next(h.callback for h in build_router(rt).observers["callback_query"].handlers
+                  if h.callback.__name__ == "on_cfg")
+    cb = SimpleNamespace(
+        data="cfg:-100123:custompersona:clear",
+        from_user=SimpleNamespace(id=7),
+        message=SimpleNamespace(chat=SimpleNamespace(id=7, type="private"),
+                                edit_text=AsyncMock()),
+        answer=AsyncMock(),
+    )
+    await on_cfg(cb)
+    sent = rt.chats.update_config.await_args
+    assert sent.args == (-100123,)
+    assert sent.kwargs["persona_custom"] is None
+    assert sent.kwargs.get("persona") == expect_persona

@@ -123,6 +123,19 @@ async def test_force_summarize_passes_chat_id_to_all_ai_calls():
 
 
 @pytest.mark.asyncio
+async def test_force_summarize_with_no_summary_extracts_no_facts():
+    """No summary means the covered range doesn't move, so the same batch is
+    offered again on the admin's retry. Extracting facts anyway inserted the
+    same ones every time (there is no unique key on facts)."""
+    store = _store()
+    ai = FakeAI([None, "- Matt likes ducks"])          # the summary call fails
+    report = await force_summarize(store, ai, _settings(), 1)
+    assert report["ok"] is False and "returned nothing" in report["reason"]
+    assert store.summaries_added == [] and store.facts_added == []
+    assert len(ai.calls) == 1                           # and it didn't pay for the fact call
+
+
+@pytest.mark.asyncio
 async def test_overlapping_calls_for_one_chat_summarize_once():
     """Every message calls maybe_summarize and each update is its own task,
     so two overlap whenever one arrives mid-pass. Both used to read the

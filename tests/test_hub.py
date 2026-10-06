@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from ipedro import bot_messages, bots, hub, identity
+from ipedro import addressed, bot_messages, bots, hub, identity
 from ipedro.memory import context_builder
 
 HANK = identity.from_settings(SimpleNamespace(
@@ -474,3 +474,15 @@ async def test_a_one_off_send_error_is_not_mistaken_for_being_kicked(heard):
     heard.hub._last_bot_reply[CHAT] -= hub.MIN_GAP_SECONDS
     await heard.hear(_post(id=2, message_id=43))
     assert heard.rt.openai.chat.await_count == 2
+
+
+def test_answering_another_bot_does_not_open_the_human_follow_up_window():
+    """Dale answers a human and names Hank; Hank answers Dale through the hub.
+    Hank's reply used to open Hank's follow-up window too, so the human's next
+    "why?" drew an answer from BOTH bots."""
+    addressed.reset()
+    bot_messages.track(CHAT, 90, "hank, you're up", hub_depth=1,
+                       replied_to_user_id=DALE_ID)
+    assert not addressed.in_conversation(CHAT)
+    bot_messages.track(CHAT, 91, "sh-sha, the human spoke to me", hub_depth=0)
+    assert addressed.in_conversation(CHAT)

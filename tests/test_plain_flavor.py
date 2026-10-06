@@ -121,3 +121,22 @@ def test_only_a_plain_bot_gets_the_filter():
     bot_mod.install_flavor(hank, _settings(bot_name="Hank", bot_flavor="plain"))
     hank.session.middleware.assert_called_once()
     assert isinstance(hank.session.middleware.call_args.args[0], PlainFlavorMiddleware)
+
+
+@pytest.mark.asyncio
+async def test_the_share_photo_loop_does_not_run_for_a_bot_that_isnt_dale():
+    """Its scene, render and caption prompts are the Dude's. Switched on in a
+    chat, a plain bot would post Lebowski-voiced photos over its own persona."""
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from ipedro import sharephoto
+
+    stop = asyncio.Event()
+    db = SimpleNamespace(fetch=AsyncMock(return_value=[]))
+    plain = SimpleNamespace(bot_name="Hank", bot_aliases="hank", bot_flavor="plain",
+                            share_photo_tick_seconds=1, share_photo_mean_interval_seconds=1)
+    await asyncio.wait_for(
+        sharephoto.run_share_photo_loop(None, db, None, plain, stop), timeout=1)
+    db.fetch.assert_not_awaited()                     # returned at once, never looked

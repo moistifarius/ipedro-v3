@@ -23,10 +23,27 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import re
 import socket
 from urllib.parse import urlsplit
 
 import httpx
+
+
+_SECRET_PARAM_RE = re.compile(
+    r"(?i)([?&;](?:password|passwd|pass|pwd|token|key|secret|apikey|api_key)=)[^&#\s]*")
+_USERINFO_RE = re.compile(r"(?i)(^[a-z][a-z0-9+.-]*://)[^/@\s]+@")
+
+
+def redact_url(url: str | None) -> str | None:
+    """`url` with anything secret-looking blanked, for logs and for replies
+    that show a configured URL back. A private KiwiSDR takes its password in
+    the query string (kiwi://host:8073?freq=...&password=...), and a stream URL
+    may carry `user:pass@`; both used to be written to the container log on
+    every refresh and printed by /ether_status."""
+    if not url:
+        return url
+    return _USERINFO_RE.sub(r"\1***@", _SECRET_PARAM_RE.sub(r"\1***", url))
 
 
 class UnsafeURL(ValueError):

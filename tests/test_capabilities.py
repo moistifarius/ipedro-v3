@@ -201,3 +201,35 @@ async def test_on_message_hands_the_brief_to_the_context_builder(monkeypatch):
     assert "NOT a bot" in brief
     assert "Memory is OFF" in brief          # built from THIS chat's config
     rt.openai.chat.assert_awaited_once()
+
+
+def test_a_memory_off_chat_is_told_it_keeps_no_pictures_either():
+    """The general brief says "you keep every picture posted here". Filing
+    and recall only run when memory is on, so the memory-off line has to
+    take that back, or the bot promises a picture it can't send."""
+    from types import SimpleNamespace as NS
+
+    from ipedro.capabilities import _chat_lines
+
+    base = dict(response_policy="mention", voice_transcribe=True, vision_enabled=True,
+                duckhunt_enabled=False)
+    off = _chat_lines(NS(memory_enabled=False, **base, **{
+        f: False for f in ("share_photo_enabled", "comic_enabled", "fortune_enabled",
+                           "ether_enabled", "on_this_day_enabled", "monthly_recap_enabled")}))
+    assert "keep pictures" in off and "overrides" in off
+
+
+def test_another_bot_is_not_told_it_posts_photos():
+    """The shared photo is Dale's bit (the Dude in Venice Beach); the loop
+    doesn't run for any other bot, so its brief must not promise one."""
+    from types import SimpleNamespace as NS
+
+    from ipedro.capabilities import _chat_lines
+
+    cfg = NS(memory_enabled=True, response_policy="mention", voice_transcribe=True,
+             vision_enabled=True, duckhunt_enabled=False, share_photo_enabled=True,
+             comic_enabled=False, fortune_enabled=False, ether_enabled=False,
+             on_this_day_enabled=False, monthly_recap_enabled=False)
+    assert "an occasional photo you took" in _chat_lines(cfg, dale_flavor=True)
+    assert "photo you took" not in _chat_lines(cfg, dale_flavor=False)
+    assert "Nothing is scheduled here" in _chat_lines(cfg, dale_flavor=False)

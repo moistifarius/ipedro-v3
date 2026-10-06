@@ -20,6 +20,9 @@ For Unraid-specific instructions see [`UNRAID.md`](UNRAID.md).
 | `BOT_ALIASES` | no | Comma-separated names it answers to (and takes "bad <name>" for). Blank → just the name. |
 | `BOT_FLAVOR` | no | `dale` (default) or `plain`: plain drops Dale's own catchphrases, GIF reflexes and /start blurb. |
 | `BOT_PERSONA` | no | The persona prompt it starts with, until `/master_prompt` overrides it. Blank → Dale's. |
+| `MANAGES_BOTS` | no | `true` (default) for the deployment that runs the others. The supervisor starts every other bot with `false`: they answer to their own names only, not the generic word "bot". |
+| `DB_POOL_MAX` | no | Largest Postgres pool this process may hold (default 10; the other bots get 4). |
+| `HUB_DATABASE_URL` | no | Where the bots hear each other. Unset → this bot's own `DATABASE_URL`, which is right for Dale. |
 
 ## Other bots
 
@@ -42,6 +45,19 @@ its database (`ipedro_bot_<id>` on the same Postgres) and runs it.
 
 The supervisor needs the Postgres user to be allowed to create
 databases; the compose default user is.
+
+**Postgres connections.** Every bot holds its own pool plus a few for the hub
+(Dale's pool is up to `DB_POOL_MAX`=10, each other bot's is 4), against one
+server whose `max_connections` defaults to 100. That is comfortable for a
+handful of bots and runs out somewhere past a dozen; raise `max_connections`
+(`command: postgres -c max_connections=200` on the `postgres` service in the
+compose file) before adding many more.
+
+**Who answers to "bot".** With several bots in a group, "bot, settle this"
+could only mean all of them. So only Dale (the deployment with
+`MANAGES_BOTS=true`) answers to the generic word "bot"; the others answer to
+their own names, replies to them, and @mentions. A lone bot you run yourself
+with the default `MANAGES_BOTS` still answers to it.
 
 The full list of tunables (memory budgets, duckhunt parameters, etc.) is in
 `.env.example`. Anything missing falls back to the defaults declared in

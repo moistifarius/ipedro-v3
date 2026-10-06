@@ -74,6 +74,14 @@ async def run_share_photo_loop(
     stop: asyncio.Event,
 ) -> None:
     """Loop until `stop` is set."""
+    from ipedro import identity
+
+    # The scene, the render and the caption are all written as the Dude in
+    # Venice Beach. That is Dale's bit; a bot that isn't Dale would post
+    # Lebowski-voiced photos over its own persona if a chat switched it on.
+    if not identity.from_settings(settings).dale_flavor:
+        log.info("Share-photo loop off: this bot isn't Dale.")
+        return
     tick = max(1, settings.share_photo_tick_seconds)
     mean = max(tick, settings.share_photo_mean_interval_seconds)
     p_post = 1.0 - math.exp(-tick / mean)

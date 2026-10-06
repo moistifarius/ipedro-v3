@@ -132,11 +132,14 @@ _STYLE_REMINDER = (
 # "The last N messages" changes its first byte on every turn, so nothing
 # in it can ever be a cache prefix. Anchoring the start and letting the
 # window grow to 2N before re-anchoring makes the history append-only
-# between re-anchors — which is what Anthropic's automatic conversation
-# breakpoint needs: last turn's write is then two blocks back, inside the
-# lookback. The extra rows cost a tenth of the price; the price of a
-# sliding window was all of them, every time. In-process state: a restart
-# is one cache miss, not a bug.
+# between re-anchors — which is what a conversation cache breakpoint
+# needs: last turn's write is then two blocks back, inside the lookback.
+# NOTE: nothing caches the conversation today (openai_client.py explains
+# why the automatic breakpoint was dropped: the volatile system text sits
+# before the messages), so for now the window is only a stable shape, and
+# the up-to-2N rows are sent at full price. If the volatile text moves to
+# the end of the last turn and a breakpoint is added, this is what makes
+# it hit. In-process state: a restart is one cache miss, not a bug.
 _window_anchor: dict[int, int] = {}
 # The timestamp of the row immediately before a freshly established
 # anchor. The window's first rendered row is always the anchor row for
@@ -414,9 +417,12 @@ async def build_context(
     for label, block in zip(labels, stable):
         if _add({"role": "system", "content": block}, label=label):
             stable_end = len(messages) - 1
-    if stable_end >= 0:
+    if stable_end >= 0 and not persona_override:
         # Mark the last block that actually survived the budget — marking one
         # the budget dropped would put the breakpoint in the wrong place.
+        # An impersonation turn gets none: its "persona" is a one-off sample
+        # of one member's lines, so its prefix is almost never read again
+        # and a 1h cache write is a 2x charge for nothing.
         messages[stable_end][CACHE_BREAKPOINT] = True
 
     # ── the volatile tail ───────────────────────────────────────────────

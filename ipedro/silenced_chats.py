@@ -60,7 +60,13 @@ async def silence(db: Database, chat_id: int) -> bool:
     if chat_id in _cache:
         return False
     _cache.add(chat_id)
-    await _persist(db)
+    try:
+        await _persist(db)
+    except Exception:
+        # Not saved, so not silenced: leaving it in the set would make this
+        # process and the database disagree until the next restart.
+        _cache.discard(chat_id)
+        raise
     return True
 
 
@@ -69,7 +75,11 @@ async def unsilence(db: Database, chat_id: int) -> bool:
     if chat_id not in _cache:
         return False
     _cache.discard(chat_id)
-    await _persist(db)
+    try:
+        await _persist(db)
+    except Exception:
+        _cache.add(chat_id)
+        raise
     return True
 
 

@@ -89,7 +89,7 @@ class _FakeEmbeddingsOk:
 
 @pytest.mark.asyncio
 async def test_embed_returns_vector():
-    client = OpenAIClient(api_key="x", text_provider="openai")
+    client = OpenAIClient(api_key="x", text_provider="openai", embedding_dim=3)
     client._client.embeddings = _FakeEmbeddingsOk()
     out = await client.embed("hello")
     assert out == [0.1, 0.2, 0.3]
@@ -127,7 +127,7 @@ async def test_embed_retries_transient_connection_error():
         def __init__(self):  # skip the SDK's required httpx request arg
             pass
 
-    client = OpenAIClient(api_key="x", text_provider="openai")
+    client = OpenAIClient(api_key="x", text_provider="openai", embedding_dim=2)
     flaky = _FlakyEmbeddings(_ConnError())
     client._client.embeddings = flaky
     out = await client.embed("hello")
@@ -454,3 +454,45 @@ def test_overload_is_retried_like_other_transient_upstream_errors():
     assert OverloadedError in classes
     from anthropic import RateLimitError
     assert not issubclass(RateLimitError, classes)
+
+
+# ── the embedding size the model returns is the size the column holds ────────
+
+def _embedding_client(*, model="text-embedding-3-small", dim=1536, returns=1536):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    client = OpenAIClient(api_key="x", embedding_model=model, embedding_dim=dim)
+    create = AsyncMock(return_value=SimpleNamespace(
+        data=[SimpleNamespace(embedding=[0.1] * returns)],
+        usage=SimpleNamespace(prompt_tokens=3),
+    ))
+    client._openai = SimpleNamespace(embeddings=SimpleNamespace(create=create))
+    client._log_usage = AsyncMock()
+    return client, create
+
+
+@pytest.mark.asyncio
+async def test_the_configured_size_is_requested_from_the_v3_models():
+    client, create = _embedding_client(dim=512, returns=512)
+    assert len(await client.embed("hello")) == 512
+    assert create.await_args.kwargs["dimensions"] == 512
+
+
+@pytest.mark.asyncio
+async def test_models_that_cannot_be_resized_are_not_asked_to():
+    client, create = _embedding_client(model="text-embedding-ada-002")
+    assert len(await client.embed("hello")) == 1536
+    assert "dimensions" not in create.await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_a_vector_of_the_wrong_size_is_refused_with_a_reason(caplog):
+    import logging
+
+    client, _ = _embedding_client(model="text-embedding-ada-002", dim=1024, returns=1536)
+    with caplog.at_level(logging.ERROR, logger="ipedro.openai_client"):
+        assert await client.embed("hello") is None
+        assert await client.embed("again") is None          # still refused...
+    errors = [r for r in caplog.records if "EMBEDDING_DIM" in r.getMessage()]
+    assert len(errors) == 1                                  # ...but said once

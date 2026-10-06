@@ -49,6 +49,8 @@ from pathlib import Path
 import numpy as np
 from scipy.signal import butter, fftconvolve, sosfiltfilt
 
+from ipedro.net_safety import redact_url
+
 log = logging.getLogger(__name__)
 
 SR = 8000  # working sample rate (the audio bandwidth is < 3 kHz anyway)
@@ -148,14 +150,14 @@ def _fetch_live_from_url(url: str) -> np.ndarray:
         pcm = np.frombuffer(got[: len(got) - len(got) % 4], dtype=np.float32)
         if pcm.size >= SR and float(np.max(np.abs(pcm))) >= 1e-4:
             log.info("live shortwave fetch %s timed out; keeping the %.1fs "
-                     "it delivered", url, pcm.size / SR)
+                     "it delivered", redact_url(url), pcm.size / SR)
             return pcm.copy()
-        log.info("live shortwave fetch %s timed out", url)
+        log.info("live shortwave fetch %s timed out", redact_url(url))
         return np.zeros(0, dtype=np.float32)
     if proc.returncode != 0 or not proc.stdout:
         tail = (proc.stderr or b"")[-200:].decode("utf-8", "replace")
         log.info("live shortwave fetch %s failed rc=%s: %s",
-                 url, proc.returncode, tail)
+                 redact_url(url), proc.returncode, redact_url(tail))
         return np.zeros(0, dtype=np.float32)
     pcm = np.frombuffer(proc.stdout, dtype=np.float32)
     if pcm.size < SR or float(np.max(np.abs(pcm))) < 1e-4:
@@ -177,12 +179,12 @@ def _ensure_live_pcm() -> tuple[np.ndarray, str] | None:
         if now - fetched_at < _LIVE_CACHE_TTL_SECONDS and pcm.size > 0:
             return pcm, src
     for url in urls:
-        log.info("live shortwave: fetching from %s", url)
+        log.info("live shortwave: fetching from %s", redact_url(url))
         pcm = _fetch_live_from_url(url)
         if pcm.size > 0:
             _live_cache = (pcm, now, url)
             log.info("live shortwave: cached %.1fs from %s",
-                     pcm.size / SR, url)
+                     pcm.size / SR, redact_url(url))
             return pcm, url
     log.info("live shortwave: all %d URLs failed, falling back", len(urls))
     return None
@@ -260,9 +262,9 @@ def live_cache_status() -> dict[str, object]:
         cached = pcm.size > 0
         cached_seconds = pcm.size / SR
         cached_age = time.monotonic() - fetched_at
-        cached_source = src
+        cached_source = redact_url(src)
     return {
-        "urls": _live_urls(),
+        "urls": tuple(redact_url(u) for u in _live_urls()),
         "cached": cached,
         "cached_source": cached_source,
         "cached_seconds": cached_seconds,

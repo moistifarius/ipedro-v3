@@ -349,6 +349,17 @@ async def _issue_bef_challenge(
     return True
 
 
+_MAX_NAMES_PAGE = 10_000
+_DUCK_NAME_MAX = 60
+
+
+def _clean_duck_name(raw: str) -> str:
+    """A name is one short line. /ducknames lists names from every chat as
+    "  • <name> — <owner>", so a name with a newline could forge a line of
+    someone else's."""
+    return " ".join((raw or "").split())[:_DUCK_NAME_MAX]
+
+
 def build_router(rt: Runtime) -> Router:
     r = Router(name="duckhunt")
 
@@ -456,7 +467,9 @@ def build_router(rt: Runtime) -> Router:
         parts = (msg.text or "").split()
         if len(parts) >= 2:
             try:
-                page = max(1, int(parts[1]))
+                # Capped: OFFSET beyond int64 is a Postgres error, and no
+                # list has a million pages anyway ("past the end" says so).
+                page = min(max(1, int(parts[1])), _MAX_NAMES_PAGE)
             except ValueError:
                 pass
         per_page = 100
@@ -534,7 +547,10 @@ def build_router(rt: Runtime) -> Router:
         except ValueError:
             await msg.reply("Bad duck id.", disable_notification=True)
             return
-        name = parts[2].strip()[:60]
+        name = _clean_duck_name(parts[2])
+        if not name:
+            await msg.reply("Give it a name.", disable_notification=True)
+            return
         ok = await rt.duckhunt.name_duck(
             msg.chat.id, msg.from_user.id, duck_id, name,
         )
@@ -778,7 +794,9 @@ def build_router(rt: Runtime) -> Router:
         if entry is None:
             return  # raced with another reply; safe to drop
         _user_id, duck_id, _ts = entry
-        name = (msg.text or msg.caption or "").strip()[:60]
+        name = _clean_duck_name(msg.text or msg.caption or "")
+        if not name:
+            return
         ok = await rt.duckhunt.name_duck(
             msg.chat.id, msg.from_user.id, duck_id, name,
         )

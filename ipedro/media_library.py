@@ -27,7 +27,7 @@ from aiogram.types import Message
 
 from ipedro.bot_messages import track
 from ipedro.memory.context_builder import _humanize_span
-from ipedro.personas import current_master_prompt
+from ipedro.personas import persona_for_chat
 from ipedro.vision import Media
 
 log = logging.getLogger(__name__)
@@ -226,7 +226,8 @@ async def _caption(rt, row: dict, chat_id: int) -> str:
     try:
         line = await rt.openai.cheap_chat(
             [
-                {"role": "system", "content": current_master_prompt()},
+                {"role": "system",
+                 "content": await persona_for_chat(getattr(rt, "chats", None), chat_id)},
                 {"role": "user", "content": (
                     f"You are sending back a {row.get('kind', 'picture')} "
                     f"that {who} posted in this chat {_ago(row.get('created_at'))}. "

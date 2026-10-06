@@ -357,12 +357,13 @@ async def test_replying_to_him_ignores_someone_else_chiming_in(monkeypatch):
 @pytest.mark.asyncio
 async def test_the_reply_token_cap_is_a_backstop_not_the_length_mechanism(monkeypatch):
     """The prompt now carries the actual judgment on reply length; this
-    cap only has to stay generous enough to never cut off a real rant."""
+    cap is only a backstop, and a reply that does reach it is trimmed to its
+    last full sentence rather than posted mid-word."""
     rt = _mention_rt(monkeypatch)
     msg = _msg(text="dale hi")
     msg.answer = AsyncMock(return_value=SimpleNamespace(message_id=9))
     await _handler(rt)(msg)
-    assert rt.openai.chat.await_args.kwargs["max_tokens"] == 300
+    assert rt.openai.chat.await_args.kwargs["max_tokens"] == 400
 
 
 @pytest.mark.asyncio

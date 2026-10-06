@@ -1108,8 +1108,9 @@ def build_router(rt: Runtime) -> Router:
         # 500 used to sit here — room for a small essay. The prompt now
         # carries its own judgment on when a reply should run long; this
         # is a backstop against a runaway generation, not the mechanism
-        # doing the actual work, so it stays generous enough to never cut
-        # off a genuine rant.
+        # doing the actual work. A reply that does hit it is trimmed back
+        # to its last full sentence (openai_client._trim_to_sentence), so
+        # it never posts stopping mid-word.
         if tools_on:
             async def _run_tool(name: str, args: dict) -> tuple[str, bool]:
                 return await introspection.run_tool(
@@ -1120,11 +1121,11 @@ def build_router(rt: Runtime) -> Router:
             reply = await rt.openai.chat_with_tools(
                 ctx.messages,
                 tools=introspection.tools_for(owner_dm=owner_dm),
-                run_tool=_run_tool, max_tokens=300, chat_id=msg.chat.id,
+                run_tool=_run_tool, max_tokens=400, chat_id=msg.chat.id,
             )
         else:
             reply = await rt.openai.chat(
-                ctx.messages, max_tokens=300, chat_id=msg.chat.id,
+                ctx.messages, max_tokens=400, chat_id=msg.chat.id,
             )
         if not reply:
             # He meant to answer and couldn't (the model errored or sent

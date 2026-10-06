@@ -31,7 +31,14 @@ class _QuotesFakeDB:
 
     def __init__(self) -> None:
         self.rows: list[dict] = []
+        self.locks: list[int] = []
         self._next_id = 1
+
+    async def fetchval_serialized(self, lock_key, query, *args):
+        """The real one takes a per-chat advisory lock first; this stand-in
+        records that it was asked to, with the right key."""
+        self.locks.append(lock_key)
+        return await self.fetchval(query, *args)
 
     async def fetchval(self, query, *args):
         assert "INSERT INTO quotes" in query
@@ -268,3 +275,18 @@ async def test_unquote_wont_reach_into_another_chat():
 
     assert len(db.rows) == 1                      # A's quote untouched
     assert "No quote" in msg.reply.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_saving_a_quote_is_serialized_per_chat():
+    """Two /quote at once both read MAX(seq) and saved the same number, and
+    /unquote N then deleted both. (Against real Postgres, 40 concurrent
+    unserialized inserts produced 18 distinct numbers.)"""
+    db = _QuotesFakeDB()
+    rt = _make_rt(db)
+    for chat in (-5, -7):
+        await _handler(rt, "quote")(_msg(
+            chat_id=chat, text="/quote", sender=_user(1, "Matt"),
+            reply_to=_replied("something quotable", from_user=_user(2, "Luke")),
+        ))
+    assert db.locks == [-5, -7]            # one lock per chat, keyed by the chat

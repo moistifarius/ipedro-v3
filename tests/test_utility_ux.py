@@ -194,3 +194,54 @@ def test_a_persona_name_with_markup_cant_break_the_config_panel():
     header = _config_wizard_header(cfg, 1, is_dm_scoped=False)
     assert "<b>evil" not in header
     assert "&lt;b&gt;evil&lt;/i&gt; &amp; co" in header
+
+
+# ── small command corrections ────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_a_reminder_too_long_to_send_back_is_refused_up_front():
+    """It would be accepted now and silently dropped when it fired (Telegram
+    refuses a message over 4096 characters, and the loop marks that fired)."""
+    rt, executed = _rt()
+    msg = _msg("/remind 1h " + "x" * 1001)
+    await _handler(rt, "remind")(msg)
+    assert "too long" in msg.reply.await_args.args[0]
+    assert not any("INSERT INTO reminders" in q for q, _ in executed)
+    ok = _msg("/remind 1h " + "x" * 1000)
+    await _handler(rt, "remind")(ok)
+    assert "Set" in ok.reply.await_args.args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text,topic", [
+    ("/echo tacos", "tacos"),                      # a reply: no @user token
+    ("/echo about the cats", "about the cats"),    # nothing is dropped
+    ("/echo", "literally anything they'd say"),
+    ("/echo @bob tacos", "tacos"),                 # the @user is not the topic
+])
+async def test_echo_as_a_reply_takes_the_whole_topic(text, topic):
+    rt, _ = _rt()
+    rt.db.fetch = AsyncMock(return_value=[{"content": "tacos are life"}])
+    msg = _msg(text)
+    msg.reply_to_message = SimpleNamespace(from_user=SimpleNamespace(
+        id=9, is_bot=False, username="bob", first_name="Bob", last_name=None))
+    await _handler(rt, "echo")(msg)
+    assert f"{topic}" in rt.openai.cheap_completion.await_args.args[0]
+    if topic != "tacos":
+        assert "@bob" not in rt.openai.cheap_completion.await_args.args[0].split("Topic")[-1][:60]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text,note", [
+    ("/anniversary 06-12-2020", None),
+    ("/anniversary wedding 06-12-2020", "wedding"),
+    ("/anniversary our first date 06-12-2020", "our first date"),
+    ("/anniversary @bob moving day 03-01-2021", "moving day"),
+])
+async def test_an_anniversary_note_may_be_several_words(text, note):
+    rt, executed = _rt(user_lookup={"user_id": 9})
+    msg = _msg(text)
+    await _handler(rt, "anniversary")(msg)
+    assert "Couldn't parse" not in msg.reply.await_args.args[0], msg.reply.await_args.args[0]
+    saved = [a for q, a in executed if "chat_dates" in q]
+    assert saved and note in (None, *saved[0])

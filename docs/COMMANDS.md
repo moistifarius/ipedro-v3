@@ -20,6 +20,29 @@ Generate an image with the configured image model (default `gpt-image-1`).
 ### `/aitranslate`
 Reply to a voice note with this command to translate the audio to English.
 
+### Spend limits
+The commands that cost real money are limited per person per hour, and the
+bot says when to come back: `/aigen` / `/meme` / "make a meme about …" 5,
+`/ether` 3 (and 10 per chat), `/a` 30, `/aitranslate` 10, `/duckhunt` 6
+summons. Bot admins are exempt. The counters are in memory, so a restart
+forgets them.
+
+### `/fixname <wrong> -> <right>`
+Chat admins only (and bot admins). Replaces a name, as a whole word, in the
+bot's own notes about this chat (its summaries, remembered facts and past
+replies) when it learned someone's name wrong. Both sides have to look like a
+name (up to 4 words and 40 characters, letters and numbers), not a sentence,
+because those notes are fed back into the bot's prompt. There is no undo.
+
+### `/shutup @user [duration]`, `/unshutup @user`, `/snark_at @user`, `/unsnark @user`, `/flags`
+Chat admins and bot admins. The bot ignores (or needles) that person in this
+chat, optionally for a while; `/flags` lists who. A chat admin can't do this to
+a bot admin. Reply-to works in place of `@user`.
+
+### `/unquote <#>`
+Deletes quote number `#` from this chat's list (the number `/quotes` shows).
+Any member can: the list is communal.
+
 ### `/catfact`
 Returns a single dubious cat fact.
 
@@ -171,10 +194,22 @@ These commands are silently ignored when used in groups, and reply with
 List chats the bot has been added to.
 
 ### `/send_message <chat_id> <text>`
-Send a literal message to a known chat as the bot.
+Send a literal message to a known chat as the bot. Replies "Sent." or says why
+Telegram refused (kicked from the chat, blocked, rate limited).
 
 ### `/logs`
-Tail the in-DB command audit log.
+Tail the bot's program log (what the process printed), newest last, split
+across messages when it's long.
+
+### `/cmdlog`
+The command audit log: who ran what, where, and whether it worked. Also
+records `/memory_wipe`, which has no undo.
+
+### `/memory_wipe [chat_id] [facts]`
+Deletes a chat's conversation memory (messages, summaries, embeddings, media),
+this chat by default; add `facts` to clear the remembered facts too. For
+resetting a persona that keeps leaking through old context. No confirmation,
+no undo; it writes a `/cmdlog` row.
 
 ### `/activity [N] [chat_id] [event_type]`
 The durable "why did/didn't he answer" log: every AI reply (and whether it
@@ -310,8 +345,9 @@ re-applied on the next startup.
 ### `/ai_model show | <model_id> | claude <model_id> | openai <model_id>`
 Switch the text model used by the active provider. With no provider word
 the new model is applied to whichever provider is currently active.
-Examples: `/ai_model claude-opus-4-7`, `/ai_model openai gpt-4.1-mini`.
-Persisted in `kv_store`.
+Examples: `/ai_model claude-opus-5-5`, `/ai_model openai gpt-4.1-mini`.
+A Claude id is sent to Anthropic first and refused if it can't answer, so a
+typo never gets saved. Persisted in `kv_store`.
 
 ### `/debug_toggle [<name> on|off]`
 Admin-scoped duckhunt cheats for testing flows end-to-end without

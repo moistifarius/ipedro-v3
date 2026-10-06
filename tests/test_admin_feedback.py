@@ -99,3 +99,67 @@ async def test_a_memory_wipe_leaves_an_audit_row():
     chat, user, command, args, ok = rt.command_log.add.await_args.args[:5]
     assert (chat, user, command, ok) == (42, 7, "/memory_wipe", True)
     assert "chat=-1009876543210" in args and "facts=True" in args and "12 messages" in args
+
+
+# ── small admin-command corrections ──────────────────────────────────────────
+
+def test_a_toast_is_always_short_enough_for_telegram():
+    from ipedro.handlers.admin import _toast
+
+    long_error = "duplicate key value violates unique constraint " + "x" * 400
+    assert len(_toast("DB error: ", long_error)) <= 200
+    assert _toast("Failed: ", "nope") == "Failed: nope"
+
+
+@pytest.mark.parametrize("token,is_chat", [
+    ("-1001234567890", True), ("-5", True), ("123456789", True),
+    ("2019", False), ("90", False), ("3", False), ("road", False), ("-", False),
+])
+def test_only_something_shaped_like_a_chat_id_is_taken_for_one(token, is_chat):
+    from ipedro.handlers.admin import _looks_like_chat_id
+
+    assert _looks_like_chat_id(token) is is_chat
+
+
+@pytest.mark.asyncio
+async def test_a_search_that_starts_with_a_number_is_a_search_not_a_chat():
+    """"/memory_search 2019 road trip" was read as chat 2019, query "road trip"."""
+    rt = _rt()
+    msg = _msg("/memory_search 2019 road trip")
+    await _handler(rt, "memory_search")(msg)
+    assert "No known chats yet." in msg.reply.await_args.args[0]    # went to the picker
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command,handler", [
+    ("/duckstats_reset -100 John Smith", "duckstats_reset"),
+    ("/duckstats_edit -100 John Smith", "duckstats_edit"),
+])
+async def test_a_display_name_of_several_words_is_looked_up_whole(monkeypatch, command, handler):
+    from ipedro.handlers import admin
+
+    resolve = AsyncMock(return_value=None)
+    monkeypatch.setattr(admin, "_resolve_user_id", resolve)
+    msg = _msg(command)
+    await _handler(_rt(), handler)(msg)
+    assert resolve.await_args.args[2] == "John Smith"
+    assert "'John Smith' not found" in msg.reply.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_the_delete_last_toast_says_what_really_happened(monkeypatch):
+    """It said "Deleted." even when nothing was tracked, or the delete failed."""
+    from ipedro.handlers import admin
+
+    rt = _rt()
+    router = admin.build_router(rt)
+    on_last = next(h.callback for h in router.observers["callback_query"].handlers
+                   if h.callback.__name__ == "on_delete_last_confirm")
+
+    monkeypatch.setattr(admin, "recent_tracked", lambda chat_id: [])
+    cb = SimpleNamespace(
+        data="dlast:-100:1:go", message=SimpleNamespace(edit_text=AsyncMock()),
+        from_user=SimpleNamespace(id=7), answer=AsyncMock(),
+    )
+    await on_last(cb)
+    assert cb.answer.await_args.args[0] == "Nothing to delete."

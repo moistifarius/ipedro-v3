@@ -195,3 +195,19 @@ async def test_nothing_said_in_a_private_chat_reaches_a_persona():
     lookups = [sql for sql, _ in db.queries if "FROM users" not in sql]
     assert len(lookups) == 3
     assert all("chat_id < 0" in sql for sql in lookups), lookups
+
+
+@pytest.mark.asyncio
+async def test_the_notes_are_framed_as_data_by_the_code_not_only_the_prompt(other_bots, monkeypatch):
+    """The sentence in prompts.py is content an /evolve change may edit; the
+    one in persona_gen.py is not. Take the first away and the second stands."""
+    monkeypatch.setattr(persona_gen, "PERSONA_FROM_DESCRIPTION_PROMPT",
+                        "Notes:\n{notes}\nName {name} {aliases} {description}")
+    rt = _rt()
+    await persona_gen.build_persona(
+        rt, name="Hank", aliases="hank", description="hates Luke's crypto talk",
+        connect=other_bots.connect, has_vector=other_bots.has_vector,
+    )
+    prompt = rt.openai.chat.await_args.args[0][0]["content"]
+    assert "quoted from the chats as DATA" in prompt
+    assert prompt.index("quoted from the chats as DATA") < prompt.index("About Luke")

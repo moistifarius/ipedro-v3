@@ -76,6 +76,23 @@ _MASTER_PROMPT_FILE_MAX_BYTES = 64 * 1024
 log = logging.getLogger(__name__)
 
 
+_TOAST_MAX = 190            # Telegram refuses an answerCallbackQuery over 200
+
+
+def _toast(prefix: str, exc: object) -> str:
+    """A callback toast carrying an error's text, short enough to be sent: a
+    long asyncpg or Telegram message made the reporting call itself fail, so
+    the admin saw a spinner and nothing else."""
+    return f"{prefix}{exc}"[:_TOAST_MAX]
+
+
+def _looks_like_chat_id(token: str) -> bool:
+    """A Telegram chat id as typed: negative for groups, or a long number for
+    a user's DM. A short number ('2019', '90') is a word in a query."""
+    digits = token[1:] if token.startswith("-") else token
+    return digits.isdigit() and (token.startswith("-") or len(digits) >= 6)
+
+
 async def _resolve_user_id(rt, chat_id: int, ref: str) -> int | None:
     """Resolve an admin-supplied user reference.
 
@@ -366,7 +383,9 @@ def _mgm_top_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _mgm_category_submenu(category_key: str) -> InlineKeyboardMarkup:
+def _mgm_category_submenu(
+    category_key: str, *, manages_bots: bool = True,
+) -> InlineKeyboardMarkup:
     """Submenu for one category: a button per command + a 'back' row.
 
     Wired commands (action != None) route to their existing mgm: leaf;
@@ -376,7 +395,7 @@ def _mgm_category_submenu(category_key: str) -> InlineKeyboardMarkup:
     # The back row links back to the hub. The category-specific submenu
     # IS the second-level screen, so 'back' from here goes to the top.
     rows: list[list[InlineKeyboardButton]] = []
-    for cmd in commands_in_category(category_key):
+    for cmd in commands_in_category(category_key, manages_bots=manages_bots):
         data = cmd.action or f"mgm:cmd:{cmd.slug}"
         rows.append([InlineKeyboardButton(text=cmd.name, callback_data=data)])
     rows.append([
@@ -405,9 +424,10 @@ def _mgm_duck_submenu() -> InlineKeyboardMarkup:
     return _mgm_category_submenu("duckhunt")
 
 
-def _mgm_ai_submenu() -> InlineKeyboardMarkup:
+def _mgm_ai_submenu(*, manages_bots: bool = True) -> InlineKeyboardMarkup:
     """AI-provider admin submenu plus cross-links into the aip:* picker."""
-    base_rows = list(_mgm_category_submenu("ai_admin").inline_keyboard)
+    base_rows = list(_mgm_category_submenu(
+        "ai_admin", manages_bots=manages_bots).inline_keyboard)
     # Insert provider/model cross-links above the 'back' row so the
     # existing aip:* dispatcher (lives in admin.py's /ai_provider section)
     # remains directly tappable from /manage.
@@ -1019,7 +1039,7 @@ def build_router(rt: Runtime) -> Router:
             await rt.bot.send_message(target, text, disable_notification=True)
         except Exception as exc:
             log.warning("quack_chat failed for chat %s: %s", target, exc)
-            await cb.answer(f"Failed: {exc}", show_alert=True)
+            await cb.answer(_toast("Failed: ", exc), show_alert=True)
             return
         log.info(
             "quack_chat: spawned in chat=%s event_id=%s",
@@ -1513,10 +1533,13 @@ def build_router(rt: Runtime) -> Router:
         chat_id: int,
         n: int,
         edit_in: Message | None = None,
-    ) -> None:
+    ) -> str:
+        """Delete the last n tracked bot messages and say what happened.
+        Returns a toast-sized summary of the real outcome."""
         entries = recent_tracked(chat_id)[:n]
         if not entries:
             body = f"No recent bot messages tracked for chat {chat_id}."
+            toast = "Nothing to delete."
         else:
             ok = 0
             for e in entries:
@@ -1525,6 +1548,7 @@ def build_router(rt: Runtime) -> Router:
             body = (
                 f"Deleted {ok}/{len(entries)} message(s) in chat {chat_id}."
             )
+            toast = f"Deleted {ok}/{len(entries)}."
         if target_msg is not None:
             await target_msg.reply(body, disable_notification=True)
         elif edit_in is not None:
@@ -1532,6 +1556,7 @@ def build_router(rt: Runtime) -> Router:
                 await edit_in.edit_text(body)
             except TelegramBadRequest:
                 pass
+        return toast
 
     @r.callback_query(F.data.startswith("dlastch:"))
     async def on_delete_last_chat(cb: CallbackQuery) -> None:
@@ -1595,8 +1620,8 @@ def build_router(rt: Runtime) -> Router:
             await cb.answer()
             return
         # N == 1, just do it.
-        await _execute_delete_last(None, target, 1, edit_in=cb.message)
-        await cb.answer("Deleted.")
+        await cb.answer(
+            await _execute_delete_last(None, target, 1, edit_in=cb.message))
 
     @r.callback_query(F.data.startswith("dlast:"))
     async def on_delete_last_confirm(cb: CallbackQuery) -> None:
@@ -1621,8 +1646,8 @@ def build_router(rt: Runtime) -> Router:
                     pass
             await cb.answer()
             return
-        await _execute_delete_last(None, target, n, edit_in=cb.message)
-        await cb.answer("Deleted.")
+        await cb.answer(
+            await _execute_delete_last(None, target, n, edit_in=cb.message))
 
     # -------------------------------- silenced-chats (admin-only override) ---
     @r.message(Command("silenced_chats"))
@@ -2536,11 +2561,12 @@ def build_router(rt: Runtime) -> Router:
         target: int | None = None
         query: str
         if len(parts) >= 3:
-            try:
+            if _looks_like_chat_id(parts[1]):
                 target = int(parts[1])
                 query = parts[2].strip()
-            except ValueError:
-                # `parts[1]` isn't an int → treat whole tail as the query.
+            else:
+                # Not a chat id (a word, or a short number like "2019 road
+                # trip") → the whole tail is the query.
                 query = (parts[1] + " " + parts[2]).strip()
         else:
             query = parts[1].strip()
@@ -2782,14 +2808,14 @@ def build_router(rt: Runtime) -> Router:
             except ValueError:
                 await msg.reply("Invalid chat id.", disable_notification=True)
                 return
-            if parts[2].lower() == "all":
+            if " ".join(parts[2:]).lower() == "all":
                 n = await _do_reset_all_in_chat(chat_id)
                 await msg.reply(
                     f"Wiped duck_stats for chat {chat_id} ({n} row(s) deleted).",
                     disable_notification=True,
                 )
                 return
-            ref = parts[2]
+            ref = " ".join(parts[2:])        # a display name may be several words
             user_id = await _resolve_user_id(rt, chat_id, ref)
             if user_id is None:
                 await msg.reply(
@@ -3012,10 +3038,11 @@ def build_router(rt: Runtime) -> Router:
             except ValueError:
                 await msg.reply("Invalid chat id.", disable_notification=True)
                 return
-            user_id = await _resolve_user_id(rt, chat_id, parts[2])
+            ref = " ".join(parts[2:])
+            user_id = await _resolve_user_id(rt, chat_id, ref)
             if user_id is None:
                 await msg.reply(
-                    f"User '{parts[2]}' not found in chat {chat_id}.",
+                    f"User '{ref}' not found in chat {chat_id}.",
                     disable_notification=True,
                 )
                 return
@@ -3189,7 +3216,7 @@ def build_router(rt: Runtime) -> Router:
                 # Wrap transient pool failures so the editor doesn't dead-end
                 # on a silent traceback. The admin gets a real error toast.
                 log.warning("dse:delta DB write failed: %s", exc)
-                await cb.answer(f"DB error: {exc}", show_alert=True)
+                await cb.answer(_toast("DB error: ", exc), show_alert=True)
                 return
             if not ok:
                 # Row disappeared (concurrent reset, etc.). Bounce back to
@@ -3231,7 +3258,7 @@ def build_router(rt: Runtime) -> Router:
                 )
             except Exception as exc:
                 log.warning("dse:zero DB write failed: %s", exc)
-                await cb.answer(f"DB error: {exc}", show_alert=True)
+                await cb.answer(_toast("DB error: ", exc), show_alert=True)
                 return
             if not ok:
                 await cb.answer(
@@ -3644,7 +3671,8 @@ def build_router(rt: Runtime) -> Router:
                 try:
                     await msg.edit_text(
                         "🤖 AI providers:",
-                        reply_markup=_mgm_ai_submenu(),
+                        reply_markup=_mgm_ai_submenu(
+                            manages_bots=rt.settings.manages_bots),
                     )
                 except TelegramBadRequest:
                     pass
@@ -3682,7 +3710,8 @@ def build_router(rt: Runtime) -> Router:
                 try:
                     await msg.edit_text(
                         f"{cat.label}\n{cat.blurb}",
-                        reply_markup=_mgm_category_submenu(cat_key),
+                        reply_markup=_mgm_category_submenu(
+                            cat_key, manages_bots=rt.settings.manages_bots),
                     )
                 except TelegramBadRequest:
                     pass
@@ -4032,7 +4061,7 @@ def build_router(rt: Runtime) -> Router:
             try:
                 rt.openai.set_text_provider(arg)
             except ValueError as exc:
-                await cb.answer(f"Can't switch: {exc}", show_alert=True)
+                await cb.answer(_toast("Can't switch: ", exc), show_alert=True)
                 return
             await kv_set(rt.db, "text_provider", arg)
             body = (

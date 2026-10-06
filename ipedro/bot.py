@@ -166,8 +166,11 @@ def build_dispatcher(rt: Runtime) -> Dispatcher:
     dp.include_router(ether_h.build_router(rt))
     dp.include_router(dale_h.build_router(rt))
     dp.include_router(media_h.build_router(rt))
-    dp.include_router(evolve_h.build_router(rt))
+    # Changing the code and adding bots are the managing deployment's alone
+    # (Dale). A bot it runs has no EVOLVE_GITHUB_TOKEN and no registry, so
+    # offering the commands there only produced "isn't set" replies.
     if rt.settings.manages_bots:
+        dp.include_router(evolve_h.build_router(rt))
         dp.include_router(bots_h.build_router(rt))
     dp.include_router(chat_h.build_router(rt))
     return dp

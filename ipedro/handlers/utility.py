@@ -125,6 +125,7 @@ async def _may_correct_notes(rt: Runtime, msg: Message) -> bool:
 
 _NAME_MAX_CHARS = 40
 _NAME_MAX_WORDS = 4
+_REMINDER_MAX_CHARS = 1000
 
 
 def _looks_like_a_name(text: str) -> bool:
@@ -275,6 +276,16 @@ def build_router(rt: Runtime) -> Router:
         if not body:
             await msg.reply("Empty reminder text.", disable_notification=True)
             return
+        if len(body) > _REMINDER_MAX_CHARS:
+            # It's sent back as one message with a prefix, and Telegram
+            # drops anything over 4096 characters: a reminder this long
+            # would be accepted now and silently lost when it fires.
+            await msg.reply(
+                f"That's too long for a reminder ({_REMINDER_MAX_CHARS} "
+                "characters at most).",
+                disable_notification=True,
+            )
+            return
         rid = await add_reminder(
             rt.db, msg.chat.id,
             msg.from_user.id if msg.from_user else None,
@@ -382,7 +393,10 @@ def build_router(rt: Runtime) -> Router:
             qname = display_name(target.from_user) if target.from_user else "anonymous"
             # Allocate the next per-chat number atomically inside the INSERT so
             # each chat gets contiguous #1, #2, #3… instead of the global id.
-            seq = await rt.db.fetchval(
+            # Serialized per chat: two /quote at once both read the same MAX
+            # and saved the same number, and /unquote N then deleted both.
+            seq = await rt.db.fetchval_serialized(
+                msg.chat.id,
                 "INSERT INTO quotes (chat_id, seq, quoted_user_id, quoted_name, "
                 "                    text, saved_by, source_message_id) "
                 "VALUES ($1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM quotes "
@@ -805,9 +819,18 @@ def build_router(rt: Runtime) -> Router:
                 disable_notification=True,
             )
             return
-        # Topic = everything after the @user token (or "anything" if reply-to).
+        # Topic = everything after the @user token. A reply-to target has no
+        # @user token, so there the topic starts at the first word (it used
+        # to be read from the third, dropping a word, or ignored entirely).
         parts = (msg.text or "").split(None, 2)
-        topic = parts[2] if len(parts) >= 3 else "literally anything they'd say"
+        if msg.reply_to_message is not None and msg.reply_to_message.from_user:
+            words = (msg.text or "").split(None, 1)
+            tail = words[1] if len(words) > 1 else ""
+            if tail.startswith("@"):                  # /echo @bob tacos, as a reply
+                tail = tail.split(None, 1)[1] if " " in tail.strip() else ""
+            topic = tail.strip() or "literally anything they'd say"
+        else:
+            topic = parts[2] if len(parts) >= 3 else "literally anything they'd say"
         rows = await rt.db.fetch(
             "SELECT content FROM messages "
             " WHERE chat_id = $1 AND user_id = $2 "
@@ -1191,7 +1214,16 @@ def build_router(rt: Runtime) -> Router:
                     target_chat_id, persona=new_persona, persona_custom=None,
                 )
         elif field == "custompersona:clear":
-            await rt.chats.update_config(target_chat_id, persona_custom=None)
+            # Back to a persona that exists. A custom persona's NAME is only a
+            # label; keeping it with no text left the chat quietly running the
+            # master prompt while the header still showed the old name.
+            current = await rt.chats.get_config(target_chat_id)
+            updates = {"persona_custom": None}
+            if current is not None and (current.persona or "dude") not in (
+                "dude", "pedro", "neutral",
+            ):
+                updates["persona"] = "dude"
+            await rt.chats.update_config(target_chat_id, **updates)
         new_cfg = await rt.chats.get_config(target_chat_id)
         # DM-scoped means the cb.message.chat.id (where the wizard is shown)
         # differs from the target_chat_id (whose config we're editing).
@@ -1420,7 +1452,9 @@ async def _set_date(rt: Runtime, msg: Message, *, label: str) -> None:
       /anniversary "wedding" MM-DD-YYYY     — set chat-level anniversary
     """
     await get_or_create_chat_config(rt, msg)
-    parts = (msg.text or "").split(None, 3)
+    # No maxsplit: with one, a note of three words glued its last word to the
+    # date ("date 06-12-2020") and the date was unparseable.
+    parts = (msg.text or "").split()
     if len(parts) < 2:
         await msg.reply(
             f"Usage: /{label} MM-DD  (or /{label} @user MM-DD-YYYY)",

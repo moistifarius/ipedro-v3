@@ -164,12 +164,19 @@ async def force_summarize(
             max_tokens=400,
             chat_id=chat_id,
         )
-        new_summary_id: int | None = None
-        if summary_text:
-            new_summary_id = await store.add_summary(
-                chat_id, summary_text, batch[-1].id,
-            )
-            log.info("Forced summary for chat %s up to msg %s.", chat_id, batch[-1].id)
+        if not summary_text:
+            # Same rule as maybe_summarize: with no summary the covered range
+            # doesn't advance, so extracting facts now would insert the same
+            # ones again on every retry (the facts table has no unique key).
+            return {
+                "ok": False,
+                "reason": "the summary call returned nothing, so nothing was "
+                          "stored. Try again in a moment.",
+            }
+        new_summary_id = await store.add_summary(
+            chat_id, summary_text, batch[-1].id,
+        )
+        log.info("Forced summary for chat %s up to msg %s.", chat_id, batch[-1].id)
 
         facts_added: list[str] = []
         facts_text = await openai.cheap_completion(
@@ -191,7 +198,7 @@ async def force_summarize(
             "ok": True,
             "messages_summarized": len(batch),
             "summary_id": new_summary_id,
-            "summary_chars": len(summary_text or ""),
+            "summary_chars": len(summary_text),
             "facts_added": facts_added,
             "raw_facts_response": facts_text,
         }

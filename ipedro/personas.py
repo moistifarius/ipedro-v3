@@ -67,3 +67,19 @@ def resolve_persona(name: str | None, custom: str | None) -> str:
     if key in ("dude", "pedro"):
         return current_master_prompt()
     return PERSONAS.get(key, current_master_prompt())
+
+
+async def persona_for_chat(chats, chat_id: int | None) -> str:
+    """The persona this chat actually gets: its own override, 'neutral', or
+    the master prompt. For the lines the bot writes outside the main reply
+    path (a recalled picture's caption, a quiz verdict) that used to read the
+    master prompt directly and so ignored a chat's own persona. Falls back to
+    the master prompt when the chat has no config or the lookup fails."""
+    if chat_id is not None and chats is not None:
+        try:
+            cfg = await chats.get_config(chat_id)
+        except Exception:                     # a caption must not fail on this
+            cfg = None
+        if cfg is not None:
+            return resolve_persona(cfg.persona, cfg.persona_custom)
+    return current_master_prompt()

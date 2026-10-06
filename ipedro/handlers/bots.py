@@ -23,6 +23,7 @@ from ipedro import bots, persona_gen
 from ipedro.auth import is_owner
 from ipedro.handlers.common import auth_ctx
 from ipedro.runtime import Runtime
+from ipedro.text_chunks import chunk_lines
 
 log = logging.getLogger(__name__)
 
@@ -184,8 +185,9 @@ def build_router(rt: Runtime) -> Router:
         if len(found) == 1:
             return found[0]
         if not found:
+            # Never echo a token someone pasted where a name goes.
             await msg.reply(
-                f"No bot called {parts[1].strip()!r}. /bots lists them.",
+                f"No bot called {bots.scrub(parts[1].strip())!r}. /bots lists them.",
                 disable_notification=True,
             )
         else:
@@ -337,20 +339,20 @@ def build_router(rt: Runtime) -> Router:
         found = await bots.resolve(rt.db, parts[1])
         if len(found) != 1:
             await msg.reply(
-                f"No single bot called {parts[1]!r}. /bots lists them; use "
-                "the #number.",
+                f"No single bot called {bots.scrub(parts[1])!r}. /bots lists "
+                "them; use the #number.",
                 disable_notification=True,
             )
             return
         row = found[0]
         description = " ".join(parts[2].split()) if len(parts) > 2 else ""
         if not description:
-            await msg.reply(
-                f"#{row.id} {row.name}"
-                + (f", described as: {row.description}" if row.description else "")
-                + "\n\n" + _preview(row.persona or "(no persona)"),
-                disable_notification=True,
-            )
+            # The whole persona: the preview in /newbot's reply is cut short
+            # on purpose, and this is where its "…" says to look for the rest.
+            head = (f"#{row.id} {row.name}"
+                    + (f", described as: {row.description}" if row.description else ""))
+            for part in chunk_lines([head, "", *(row.persona or "(no persona)").splitlines()]):
+                await msg.reply(part, disable_notification=True)
             return
         draft = await _write_persona(
             rt, msg.reply, name=row.name, aliases=row.aliases,

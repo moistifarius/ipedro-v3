@@ -509,3 +509,56 @@ def test_the_bot_noun_only_opens_the_classifier_for_the_bot_that_owns_it():
     line = "honestly the bot gets this wrong"
     assert quick_verdict(line, in_conversation=False) is None          # worth a look
     assert quick_verdict(line, in_conversation=False, bot_word=False) is False
+
+
+# ── what a bot offers depends on whether it runs the others ──────────────────
+
+def _help_msg(chat_type, user_id=7):
+    return SimpleNamespace(
+        chat=SimpleNamespace(id=-5 if chat_type != "private" else user_id, type=chat_type, title="t"),
+        from_user=SimpleNamespace(id=user_id, is_bot=False, username="a", first_name="A", last_name=None),
+        text="/help", reply=AsyncMock(),
+    )
+
+
+def _help_rt(*, manages_bots=True):
+    from ipedro.config import Settings
+
+    settings = Settings(telegram_bot_token="t", openai_api_key="k",   # type: ignore[call-arg]
+                        database_url="postgresql://t/t", admin_user_ids="7",
+                        manages_bots=manages_bots)
+    return SimpleNamespace(
+        settings=settings,
+        chats=SimpleNamespace(upsert_chat=AsyncMock(), get_config=AsyncMock(return_value=None),
+                              upsert_default_config=AsyncMock(
+                                  return_value=SimpleNamespace(memory_enabled=True))),
+        users=SimpleNamespace(upsert_user=AsyncMock()),
+        command_log=SimpleNamespace(add=AsyncMock()),
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_admin_help_is_only_ever_posted_in_a_private_chat():
+    """It is headed "DM only"; in a group it told everyone which admin
+    commands exist."""
+    rt = _help_rt()
+    handler = next(h.callback for h in basics.build_router(rt).observers["message"].handlers
+                   if h.callback.__name__ == "help_")
+    group, dm = _help_msg("supergroup"), _help_msg("private")
+    await handler(group)
+    await handler(dm)
+    assert group.reply.await_count == 1                       # the public help only
+    assert dm.reply.await_count == 2
+    assert "Bot admin (DM only)" in dm.reply.await_args.args[0]
+    assert "/evolve" in dm.reply.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_a_bot_the_manager_runs_does_not_advertise_the_managers_commands():
+    rt = _help_rt(manages_bots=False)
+    handler = next(h.callback for h in basics.build_router(rt).observers["message"].handlers
+                   if h.callback.__name__ == "help_")
+    dm = _help_msg("private")
+    await handler(dm)
+    assert "/newbot" not in dm.reply.await_args.args[0]
+    assert "/evolve" not in dm.reply.await_args.args[0]

@@ -25,10 +25,12 @@ from urllib.parse import urlsplit, urlunsplit
 
 from ipedro.kv import kv_get, kv_set
 
-# BotFather tokens: "<numeric bot id>:<35-ish url-safe chars>".
-TOKEN_RE = re.compile(r"\b\d{5,}:[A-Za-z0-9_-]{30,}\b")
+# BotFather tokens: "<numeric bot id>:<35-ish url-safe chars>". The ends are
+# lookarounds, not \b: a token may end in "-", and \b after a "-" is no
+# boundary, which made /newbot reject a perfectly good one.
+TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_])\d{5,}:[A-Za-z0-9_-]{30,}(?![A-Za-z0-9_-])")
 # The same, anywhere in a line — including mid-URL ("/bot123:AAH…/getMe"),
-# where the \b above wouldn't fire. For scrubbing, not for parsing.
+# where the lookbehind above wouldn't fire. For scrubbing, not for parsing.
 _TOKEN_ANYWHERE_RE = re.compile(r"\d{5,}:[A-Za-z0-9_-]{30,}")
 _DB_NAME_RE = re.compile(r"^ipedro_bot_\d+$")
 _NAME_MAX = 64
@@ -178,6 +180,12 @@ def child_env(
     })
     if row.persona:
         env["BOT_PERSONA"] = row.persona
+    # Not inheriting a variable isn't enough: pydantic re-reads a .env in the
+    # working directory for any key the process environment lacks (a bare-metal
+    # run, a dev checkout), which would hand the owner's EVOLVE_GITHUB_TOKEN or
+    # Dale's persona straight back. An explicit empty value wins over the file.
+    for key in _NOT_INHERITED:
+        env.setdefault(key, "")
     return env
 
 
@@ -274,8 +282,12 @@ async def resolve(db, key: str) -> list[BotRow]:
 async def set_status(db, bot_id: int, status: str) -> BotRow | None:
     if status not in ("active", "stopped", "removed"):
         raise ValueError(status)
+    # A removed bot's token has no further use (bringing it back takes the
+    # token again), so don't leave a live credential in the table, and in
+    # every backup of it, indefinitely.
     row = await db.fetchrow(
-        "UPDATE bot_registry SET status = $2, updated_at = NOW() "
+        "UPDATE bot_registry SET status = $2, updated_at = NOW(), "
+        "       token = CASE WHEN $2 = 'removed' THEN '' ELSE token END "
         "WHERE id = $1 RETURNING *",
         bot_id, status,
     )

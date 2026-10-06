@@ -750,3 +750,23 @@ async def test_nothing_is_warned_when_everything_fits(caplog):
             persona="dude", persona_custom=None, latest_user_text="hi",
         )
     assert not caplog.records
+
+
+@pytest.mark.asyncio
+async def test_an_impersonation_turn_asks_for_no_cache_write():
+    """Its persona is a one-off sample of one member's lines, so nothing
+    would ever read the prefix back: the 1h write premium bought nothing."""
+    from ipedro.openai_client import CACHE_BREAKPOINT
+
+    store = FakeStore(recent=[_msg("hi")])
+    normal = await build_context(
+        store=store, settings=_settings(), chat_id=1, persona="dude",
+        persona_custom=None, latest_user_text="hi",
+    )
+    impersonating = await build_context(
+        store=store, settings=_settings(), chat_id=1, persona="dude",
+        persona_custom=None, latest_user_text="hi",
+        persona_override="IMPERSONATION MODE: you are Luke.",
+    )
+    assert any(m.get(CACHE_BREAKPOINT) for m in normal.messages)
+    assert not any(m.get(CACHE_BREAKPOINT) for m in impersonating.messages)

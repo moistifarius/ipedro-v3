@@ -353,12 +353,24 @@ def pick_top_comment(
 # These also only run on messages the bot was answering anyway.
 # Every name the bot answers to (current persona + legacy aliases) —
 # "duder gimme a meme about that" is as much a request as "pedro …".
+# A request with no topic ("gimme a meme") has to end the message, apart from
+# politeness: "send memes to the group later" and "we need some memes in the
+# wiki" name no meme to fetch, they talk about memes.
+_ASK_ENDS = (
+    r"(?=(?:[,\s]+(?:please|pls|plz|thanks|thx|man|dude|bro|dale|pedro|now|rn"
+    r"|asap|lol|lmao|real\s+quick))*[\s.!?]*$)"
+)
 _BOT_NAMES = (
     r"(?:pedro|idale|dale(?:\s+gribble)?|rusty(?:\s+shackleford)?"
     r"|boomhauer|dude(?:r(?:ino)?)?|el\s+duderino|bot)"
 )
+# "lol, send memes to the group later" used to be an order because a comma
+# counts as the start of a clause. The comma stays ("sure, drop a meme about
+# it" is one), but a topic-less ask now has to END the message (_ASK_ENDS),
+# which is what separates a request from talk about memes.
 _REQ_PREFIX = (
     r"(?:^|[.!?]\s+|,\s*"
+    r"|\b(?:hey|yo|ok|okay)\s+"
     r"|\b" + _BOT_NAMES + r"\b[,!:]?\s+"
     r"|\b(?:please|pls)\s+"
     r"|\b(?:can|could|will|would)\s+(?:you|u|i|we)\s+(?:please\s+)?"
@@ -372,16 +384,16 @@ _MEME_VERB_RE = re.compile(
     r"|pull(?:\s+up)?|make(?:\s+(?:me|us))?|create|generate|design"
     r"|whip\s+up|cook\s+up"
     r"|throw\s+(?:me|us)|hit\s+(?:me|us)\s+with)\s+"
-    r"(?:a\s+|some\s+|another\s+|me\s+a\s+|us\s+a\s+)?memes?\b"
-    r"(?:\s+(?:about|of|on|for|regarding)\s+(?P<topic>.+))?",
+    r"(?:a\s+|some\s+|another\s+|me\s+a\s+|us\s+a\s+)?memes?(?![\w-])"
+    r"(?:\s+(?:about|of|on|for|regarding)\s+(?P<topic>.+)|" + _ASK_ENDS + r")",
     re.IGNORECASE,
 )
 # First-person desire — "i want a meme about X" / "we need some memes of
 # Y". Request semantics without imperative form.
 _MEME_WANT_RE = re.compile(
     r"\b(?:i|we)\s+(?:want|need|could\s+use|demand)\s+"
-    r"(?:a\s+|some\s+|another\s+)?memes?\b"
-    r"(?:\s+(?:about|of|on|for)\s+(?P<topic>.+))?",
+    r"(?:a\s+|some\s+|another\s+)?memes?(?![\w-])"
+    r"(?:\s+(?:about|of|on|for)\s+(?P<topic>.+)|" + _ASK_ENDS + r")",
     re.IGNORECASE,
 )
 # Bare noun-first ask, gated on imperative position so casual mentions
@@ -395,7 +407,7 @@ _MEME_BARE_RE = re.compile(
 # "make this a meme" / "turn that into a meme" — deictic transforms.
 _MEME_TRANSFORM_RE = re.compile(
     _REQ_PREFIX +
-    r"(?:make|turn)\s+(?:this|that|it)\s+(?:into\s+)?a\s+meme\b",
+    r"(?:make|turn)\s+(?:this|that|it)\s+(?:into\s+)?a\s+meme(?![\w-])",
     re.IGNORECASE,
 )
 _MEME_QUESTION_RE = re.compile(
@@ -422,7 +434,7 @@ _MEME_THIS_RE = re.compile(
 _MEME_MAKE_VERB_RE = re.compile(
     _REQ_PREFIX +
     r"(?:make|create|generate|design|whip\s+up|cook\s+up)\s+"
-    r"(?:me\s+|us\s+|a\s+|an\s+|another\s+|some\s+)*memes?\b",
+    r"(?:me\s+|us\s+|a\s+|an\s+|another\s+|some\s+)*memes?(?![\w-])",
     re.IGNORECASE,
 )
 
@@ -450,7 +462,8 @@ _DEICTIC_TOPICS = frozenset({
 # "the dude" or "pedro" survive.
 _TOPIC_FILLER_RE = re.compile(
     r"\s+(?:please|pls|plz|thanks|thx|now|rn|asap|lol|lmao"
-    r"|real\s+quick|later|tomorrow|today|tonight|soon|again)$"
+    r"|real\s+quick|later|tomorrow|today|tonight|soon|again"
+    r"|maybe|perhaps|or\s+something|i\s+guess|idk)$"
     r"|,\s*(?:man|dude|dale|pedro)$",
     re.IGNORECASE,
 )
@@ -894,18 +907,27 @@ async def _download(
         return None
 
 
+def _write_temp(data: bytes) -> str:
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as fh:
+        fh.write(data)
+        return fh.name
+
+
+def _read_file(path: str) -> bytes:
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
 async def _mux(video: bytes, audio: bytes) -> bytes | None:
-    """ffmpeg -c copy mux of separate video+audio into one MP4."""
+    """ffmpeg -c copy mux of separate video+audio into one MP4. The file
+    writes and the read-back (up to 64 MB each way) run in a thread, not on
+    the event loop every chat is being served from."""
     if not ffmpeg_available():
         return None
     vpath = apath = opath = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as vf:
-            vf.write(video)
-            vpath = vf.name
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as af:
-            af.write(audio)
-            apath = af.name
+        vpath = await asyncio.to_thread(_write_temp, video)
+        apath = await asyncio.to_thread(_write_temp, audio)
         opath = vpath + ".out.mp4"
         proc = await asyncio.create_subprocess_exec(
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
@@ -920,8 +942,7 @@ async def _mux(video: bytes, audio: bytes) -> bytes | None:
             return None
         if proc.returncode != 0 or not os.path.exists(opath):
             return None
-        with open(opath, "rb") as fh:
-            return fh.read()
+        return await asyncio.to_thread(_read_file, opath)
     except Exception as exc:  # pragma: no cover - defensive
         log.info("reddit video mux failed: %s", exc)
         return None

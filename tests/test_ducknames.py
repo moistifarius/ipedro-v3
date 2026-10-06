@@ -189,3 +189,45 @@ async def test_handler_paginates_and_shows_more_hint(monkeypatch):
     assert "Whiskers" in body and "The Don" in body
     assert "50 total" in body
     assert "/ducknames 2" in body
+
+
+# ── names are one short line, and a page number can't break the query ────────
+
+def test_a_duck_name_is_one_short_line():
+    """/ducknames prints "  • <name> — <owner>" for every chat, so a name with
+    a newline could forge a line of someone else's."""
+    from ipedro.handlers.duckhunt import _clean_duck_name
+
+    assert _clean_duck_name("  The   Don  ") == "The Don"
+    assert _clean_duck_name("x\n  • Secret duck — Alice") == "x • Secret duck — Alice"
+    assert "\n" not in _clean_duck_name("a\r\nb\tc")
+    assert len(_clean_duck_name("y" * 500)) == 60
+    assert _clean_duck_name("\n \t ") == ""
+
+
+@pytest.mark.asyncio
+async def test_a_huge_page_number_asks_for_a_sane_offset():
+    """OFFSET past int64 is a Postgres error, so /ducknames 99999999999999999999
+    crashed the handler."""
+    from ipedro.handlers.duckhunt import _MAX_NAMES_PAGE, build_router
+
+    listed = AsyncMock(return_value=([], 5))
+    rt = SimpleNamespace(
+        settings=SimpleNamespace(admin_ids=frozenset()),
+        chats=SimpleNamespace(upsert_chat=AsyncMock(), get_config=AsyncMock(),
+                              upsert_default_config=AsyncMock()),
+        users=SimpleNamespace(upsert_user=AsyncMock()),
+        duckhunt=SimpleNamespace(list_named_ducks_global=listed),
+    )
+    handler = next(h.callback for h in build_router(rt).observers["message"].handlers
+                   if h.callback.__name__ == "ducknames")
+    msg = SimpleNamespace(
+        chat=SimpleNamespace(id=42, type="group", title="t"),
+        from_user=SimpleNamespace(id=7, is_bot=False, username="u",
+                                  first_name="U", last_name=None),
+        text="/ducknames 99999999999999999999999", caption=None, message_id=1,
+        reply=AsyncMock(),
+    )
+    await handler(msg)
+    assert listed.await_args.kwargs["offset"] == (_MAX_NAMES_PAGE - 1) * 100 < 2**63
+    assert "past the end" in msg.reply.await_args.args[0]

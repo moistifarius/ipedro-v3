@@ -460,9 +460,20 @@ def categories_in_order() -> tuple[Category, ...]:
     return CATEGORIES
 
 
-def commands_in_category(category: str) -> tuple[Command, ...]:
+# Commands that only the deployment that runs the other bots registers
+# (settings.manages_bots, i.e. Dale). Another bot's /manage menu must not
+# offer buttons for commands its router doesn't have.
+MANAGER_ONLY: frozenset[str] = frozenset({"evolve", "newbot", "bot_persona", "bots"})
+
+
+def commands_in_category(
+    category: str, *, manages_bots: bool = True,
+) -> tuple[Command, ...]:
     """Every command tagged ``category``, in declaration order."""
-    return tuple(c for c in COMMANDS if c.category == category)
+    return tuple(
+        c for c in COMMANDS
+        if c.category == category and (manages_bots or c.slug not in MANAGER_ONLY)
+    )
 
 
 def command_by_slug(slug: str) -> Command | None:

@@ -98,9 +98,17 @@ def build_router(rt: Runtime) -> Router:
             if tok.startswith("@"):
                 continue
             sec = parse_duration(tok)
-            if sec is not None:
-                ttl = timedelta(seconds=sec)
-                dur_tok = tok
+            if sec is None:
+                # Not a duration, and not silently "forever": "/shutup @bob
+                # 2 hours" or a typo like "30mins" muted them indefinitely.
+                await msg.reply(
+                    f"Couldn't read {tok[:20]!r} as a duration (try 30m, 2h, "
+                    "1d). Nothing changed.",
+                    disable_notification=True,
+                )
+                return
+            ttl = timedelta(seconds=sec)
+            dur_tok = tok
             break
         await set_flag(rt.db, msg.chat.id, target_id, "shutup", ttl=ttl)
         suffix = f" for {dur_tok}" if ttl else " indefinitely"

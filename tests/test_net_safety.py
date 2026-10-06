@@ -134,3 +134,33 @@ async def test_the_reddit_media_download_refuses_a_lan_url(monkeypatch):
     media = reddit.Media(kind="photo", url="http://192.168.1.10/snapshot.jpg")
     assert await reddit.download_media(media, user_agent="t") is None
     assert hits == []
+
+
+# ── showing a configured URL back without its secrets ────────────────────────
+
+@pytest.mark.parametrize("url,shown", [
+    ("kiwi://host:8073?freq=14040&mode=lsb&password=s3cret",
+     "kiwi://host:8073?freq=14040&mode=lsb&password=***"),
+    ("kiwi://host:8073?password=s3cret&freq=14040",
+     "kiwi://host:8073?password=***&freq=14040"),
+    ("https://user:hunter2@relay.example/stream.mp3",
+     "https://***@relay.example/stream.mp3"),
+    ("https://relay.example/stream?token=abc123&x=1",
+     "https://relay.example/stream?token=***&x=1"),
+    ("https://relay.example/stream.mp3", "https://relay.example/stream.mp3"),
+    ("kiwi://host:8073?freq=14040&mode=lsb", "kiwi://host:8073?freq=14040&mode=lsb"),
+    ("", ""), (None, None),
+])
+def test_secrets_in_a_url_are_blanked_before_it_is_logged_or_shown(url, shown):
+    from ipedro.net_safety import redact_url
+
+    assert redact_url(url) == shown
+
+
+def test_the_ether_status_never_carries_a_kiwi_password(monkeypatch):
+    from ipedro import radio_fx
+
+    monkeypatch.setenv("RADIO_FX_LIVE_URLS", "kiwi://h:8073?freq=14040&mode=lsb&password=s3cret")
+    status = radio_fx.live_cache_status()
+    assert "s3cret" not in repr(status)
+    assert "password=***" in status["urls"][0]

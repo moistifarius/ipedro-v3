@@ -133,3 +133,16 @@ def test_every_category_has_at_least_one_command():
     for cat in CATEGORIES:
         cmds = commands_in_category(cat.key)
         assert cmds, f"category {cat.key!r} has no commands in the catalog"
+
+
+def test_a_bot_the_manager_runs_gets_a_menu_without_the_managers_commands():
+    """/manage is built from the catalog; its buttons must exist on the bot
+    showing them (evolve and the /newbot family are registered only where
+    settings.manages_bots)."""
+    from ipedro.handlers.command_catalog import MANAGER_ONLY
+
+    full = {c.slug for c in commands_in_category("ai_admin")}
+    child = {c.slug for c in commands_in_category("ai_admin", manages_bots=False)}
+    assert MANAGER_ONLY <= full
+    assert child == full - MANAGER_ONLY
+    assert {"ai_provider", "ai_model", "master_prompt"} <= child

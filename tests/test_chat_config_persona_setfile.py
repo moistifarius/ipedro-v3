@@ -30,6 +30,7 @@ def _rt(*, admin_ids=frozenset({1}), member_status="administrator"):
         fortune_enabled=False, voice_transcribe=True, memory_enabled=True,
         ether_enabled=False, duck_names_public=True,
         monthly_recap_enabled=True, automod_enabled=True,
+        vision_enabled=True, on_this_day_enabled=True,
     )
     chats = SimpleNamespace(
         upsert_chat=AsyncMock(),
@@ -220,3 +221,69 @@ async def test_inline_persona_text_still_works_unaffected():
     rt.chats.update_config.assert_awaited_once_with(
         -500, persona="soup", persona_custom="a short custom prompt",
     )
+
+
+
+# ── /chat_config on|off fields ───────────────────────────────────────────────
+
+async def _chat_config(text, *, rt=None):
+    rt = rt or _rt()
+    handler = _find_handler(build_router(rt), "chat_config_cmd")
+    msg = _wire_bot(_msg(text=text), rt)
+    await handler(msg)
+    return rt, msg
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("word,expected", [
+    ("on", True), ("ON", True), ("yes", True), ("true", True), ("1", True),
+    ("off", False), ("Off", False), ("no", False), ("false", False), ("0", False),
+])
+async def test_on_and_off_are_read_as_typed(word, expected):
+    rt, msg = await _chat_config(f"/chat_config memory {word}")
+    rt.chats.update_config.assert_awaited_once_with(-500, memory_enabled=expected)
+    assert msg.reply.await_args.args[0] == "Updated."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("typo", ["onn", "ofF!", "maybe", "enabledd", "2"])
+async def test_a_typo_changes_nothing_instead_of_switching_the_feature_off(typo):
+    """Anything not recognised used to count as "off": a stray letter in
+    "/chat_config memory onn" quietly turned the chat's memory off."""
+    rt, msg = await _chat_config(f"/chat_config memory {typo}")
+    rt.chats.update_config.assert_not_awaited()
+    assert "Nothing changed" in msg.reply.await_args.args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field,column", [
+    ("vision", "vision_enabled"), ("onthisday", "on_this_day_enabled"),
+    ("monthlyrecap", "monthly_recap_enabled"), ("ducknames", "duck_names_public"),
+    ("sharephoto", "share_photo_enabled"), ("voice", "voice_transcribe"),
+])
+async def test_every_wizard_toggle_has_a_command_form(field, column):
+    rt, _ = await _chat_config(f"/chat_config {field} off")
+    rt.chats.update_config.assert_awaited_once_with(-500, **{column: False})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", ["nan", "NaN", "inf", "-inf", "abc"])
+async def test_ambient_refuses_numbers_that_are_not_numbers(raw):
+    """"nan" parses as a float and was clamped to 1.0: 100% ambient."""
+    rt, msg = await _chat_config(f"/chat_config ambient {raw}")
+    rt.chats.update_config.assert_not_awaited()
+    assert "Invalid ambient probability" in msg.reply.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_ambient_is_still_clamped_into_range():
+    rt, _ = await _chat_config("/chat_config ambient 7")
+    rt.chats.update_config.assert_awaited_once_with(-500, ambient_probability=1.0)
+
+
+@pytest.mark.asyncio
+async def test_the_status_listing_shows_vision_and_on_this_day():
+    _, msg = await _chat_config("/chat_config")
+    shown = msg.reply.await_args.args[0]
+    assert "Vision: True" in shown and "On this day: True" in shown
+    assert "vision     on|off" in shown

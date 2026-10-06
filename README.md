@@ -10,7 +10,7 @@ command, and ships in a Docker container that runs comfortably on Unraid.
 
 ## Highlights
 
-- **Hybrid AI stack**: Claude Sonnet 4.6 for text completions (chat,
+- **Hybrid AI stack**: Claude Sonnet 5 for text completions (chat,
   `/a`, summaries, the duck personality, etc.); OpenAI for embeddings,
   image generation, and audio (Whisper). The text provider is
   runtime-switchable via `/ai_provider` so you can flip back to OpenAI
@@ -29,7 +29,8 @@ command, and ships in a Docker container that runs comfortably on Unraid.
   streaks, miss tracking, leaderboards, per-user cooldowns, AI-gated
   `bef` (the duck personality decides whether to be your friend), and a
   retry-challenge mechanic. State is restart-safe.
-- **Admin gating** locked to Telegram user id `315660812` and **private DM
+- **Admin gating** by numeric Telegram user id (the owner, `315660812`,
+  plus any `ADMIN_USER_IDS`) and **private DM
   only** — sensitive commands cannot be invoked from groups.
 - **Graceful degradation**: missing `pgvector`, transient OpenAI/Anthropic
   errors, failed transcription, or unreachable Telegram do not crash the
@@ -148,7 +149,7 @@ dude` as a reply to a bot message deletes that message.
 
 ## AI providers
 
-Text completions default to Claude **Sonnet 4.6**; embeddings, images,
+Text completions default to Claude **Sonnet 5**; embeddings, images,
 and audio always go to OpenAI. Both keys live in `.env`:
 
 ```
@@ -162,7 +163,7 @@ Runtime knobs (admin DM only, persisted across restarts):
 /ai_provider show              # which provider is active + both models
 /ai_provider claude            # use Claude for text
 /ai_provider openai            # use OpenAI GPT for text
-/ai_model claude-opus-4-7      # change the active provider's model
+/ai_model claude-opus-5-5      # change the active provider's model (Claude ids are tried first)
 /ai_model claude claude-haiku-4-5      # explicitly set Claude's model
 /ai_model openai gpt-4.1-mini  # explicitly set OpenAI's model
 ```
@@ -196,6 +197,9 @@ them hit Postgres, Telegram, or OpenAI for real.
 - Admin gating uses **numeric Telegram user id only** — never usernames.
 - Admin commands are private-DM only.
 - `logging_setup.py` redacts plausible secrets from log lines.
+- Who can do what, what's limited, and how `/evolve` is fenced in:
+  [`docs/SECURITY.md`](docs/SECURITY.md). The latest full review:
+  [`docs/AUDIT.md`](docs/AUDIT.md).
 
 If you previously stored secrets in `agents.md` or anywhere in this repo's
 git history, **rotate them** — they are considered leaked.

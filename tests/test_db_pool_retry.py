@@ -128,3 +128,68 @@ async def test_all_four_helpers_share_the_rule(helper):
     with pytest.raises(asyncpg.exceptions.ConnectionDoesNotExistError):
         await getattr(_db(conn), helper)("DELETE FROM t WHERE id = $1", 1)
     assert conn.calls == 1
+
+
+# ── a numbered insert takes a per-key lock first, and is never replayed ──────
+
+class _LockConn:
+    def __init__(self, log, fail=False):
+        self.log, self.fail = log, fail
+
+    def transaction(self):
+        log = self.log
+
+        class _Tx:
+            async def __aenter__(self_):
+                log.append("begin")
+
+            async def __aexit__(self_, *exc):
+                log.append("end")
+                return False
+        return _Tx()
+
+    async def execute(self, query, *args):
+        self.log.append(("execute", query, args))
+
+    async def fetchval(self, query, *args):
+        self.log.append(("fetchval", query, args))
+        if self.fail:
+            raise DEAD
+        return 7
+
+
+class _LockPool:
+    def __init__(self, conn):
+        self.conn, self.acquired = conn, 0
+
+    def acquire(self):
+        pool = self
+
+        class _Acq:
+            async def __aenter__(self_):
+                pool.acquired += 1
+                return pool.conn
+
+            async def __aexit__(self_, *exc):
+                return False
+        return _Acq()
+
+
+@pytest.mark.asyncio
+async def test_a_serialized_query_takes_its_lock_before_it_reads():
+    log: list = []
+    db = Database(_LockPool(_LockConn(log)))
+    assert await db.fetchval_serialized(-100, "INSERT ...", 1, 2) == 7
+    assert log[0] == "begin"
+    assert log[1] == ("execute", "SELECT pg_advisory_xact_lock($1)", (-100,))
+    assert log[2] == ("fetchval", "INSERT ...", (1, 2))      # a LATER statement
+    assert log[3] == "end"
+
+
+@pytest.mark.asyncio
+async def test_a_serialized_write_is_not_replayed_when_the_connection_drops():
+    pool = _LockPool(_LockConn([], fail=True))
+    db = Database(pool)
+    with pytest.raises(asyncpg.exceptions.ConnectionDoesNotExistError):
+        await db.fetchval_serialized(-100, "INSERT ...", 1)
+    assert pool.acquired == 1

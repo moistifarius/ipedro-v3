@@ -137,6 +137,20 @@ class Database:
     async def fetchval(self, query: str, *args: Any) -> Any:
         return await self._run("fetchval", query, args)
 
+    async def fetchval_serialized(self, lock_key: int, query: str, *args: Any) -> Any:
+        """`fetchval` under a per-key advisory lock, in its own transaction.
+
+        For "read the state, then write the next number" statements
+        (MAX(seq)+1): two of them running together both read the same
+        state and both wrote the same number. The lock is taken in an
+        earlier statement than the query, so the query's snapshot already
+        includes whatever the previous holder committed. Not retried: it
+        is a write, and a retry after a lost connection could double it."""
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock($1)", int(lock_key))
+                return await conn.fetchval(query, *args)
+
 
 _db_instance: Database | None = None
 

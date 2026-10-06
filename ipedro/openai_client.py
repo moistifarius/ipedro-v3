@@ -395,12 +395,29 @@ _LEAKED_INTERNALS_RE = re.compile(
 )
 
 
+_SENTENCE_END = re.compile(r"[.!?…][\"')\]]*(?=\s|$)")
+
+
+def _trim_to_sentence(text: str) -> str:
+    """A reply the token cap cut off, trimmed back to where a sentence last
+    ended, so the chat never reads one that stops mid-word (and the bot's
+    memory of its own turn doesn't either). With no sentence end worth
+    keeping, it's left whole with an ellipsis."""
+    ends = [m.end() for m in _SENTENCE_END.finditer(text)]
+    if ends and ends[-1] >= len(text) * 0.4:
+        return text[: ends[-1]].rstrip()
+    return text.rstrip() + "…"
+
+
 def _claude_text(resp: Any) -> str | None:
     parts = [
         block.text for block in resp.content
         if getattr(block, "type", None) == "text"
     ]
-    return "\n".join(parts).strip() or None
+    text = "\n".join(parts).strip()
+    if text and getattr(resp, "stop_reason", None) == "max_tokens":
+        text = _trim_to_sentence(text)
+    return text or None
 
 
 def _written_out_call(text: str, tool_names: Sequence[str]) -> bool:
@@ -503,6 +520,7 @@ class AIClient:
         self.transcription_model = transcription_model
         self.embedding_model = embedding_model
         self.embedding_dim = embedding_dim
+        self._warned_embedding_dim = False
         self.tts_model = tts_model
         self.tts_voice = tts_voice
         self._usage_db: Database | None = None
@@ -750,7 +768,10 @@ class AIClient:
         try:
             resp = await self._anthropic.messages.create(**kwargs)
             await self._log_claude_usage(resp, m, chat_id)
-            return _claude_text(resp)
+            # No tools are offered on this path (impersonation, hub replies,
+            # classifiers), so only stray markup can leak: a <thinking> block
+            # the model wrote out, say. The tool loop filters the same way.
+            return _withhold_leaked_internals(_claude_text(resp), ())
         except AnthropicAPIError:
             raise
         except Exception as exc:
@@ -1057,10 +1078,12 @@ class AIClient:
             text = text.strip()
             if not text:
                 return None
-            resp = await self._openai.embeddings.create(
-                model=self.embedding_model,
-                input=text[:8000],
-            )
+            kwargs: dict = {"model": self.embedding_model, "input": text[:8000]}
+            if self.embedding_model.startswith("text-embedding-3"):
+                # The only family that can be asked for a size. EMBEDDING_DIM
+                # sizes the database column, so the two have to agree.
+                kwargs["dimensions"] = self.embedding_dim
+            resp = await self._openai.embeddings.create(**kwargs)
             usage = getattr(resp, "usage", None)
             pt = getattr(usage, "prompt_tokens", 0) or 0
             rate = _EMBED_PRICE_PER_1K.get(self.embedding_model, 0.00002)
@@ -1068,7 +1091,19 @@ class AIClient:
                 kind="embed", model=self.embedding_model, chat_id=chat_id,
                 prompt_tokens=pt, cost_usd=(pt / 1000) * rate,
             )
-            return list(resp.data[0].embedding)
+            vector = list(resp.data[0].embedding)
+            if len(vector) != self.embedding_dim:
+                # Stored in a vector(N) column, a vector of another length
+                # fails every insert and every search, quietly. Say why, once.
+                if not self._warned_embedding_dim:
+                    self._warned_embedding_dim = True
+                    log.error(
+                        "Embedding model %s returned %d numbers but EMBEDDING_DIM "
+                        "is %d: semantic memory is off until they agree.",
+                        self.embedding_model, len(vector), self.embedding_dim,
+                    )
+                return None
+            return vector
         except OpenAIAPIError:
             # Let tenacity's @retry see this and retry; the wrapping
             # embed() catches whatever survives exhaustion.

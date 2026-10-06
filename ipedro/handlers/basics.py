@@ -138,9 +138,6 @@ HELP_TEXT_ADMIN = (
     "\n"
     "Persona & providers:\n"
     "/master_prompt show|set <text>|setfile|reset - global persona prompt\n"
-    "/newbot <token> <Name> + a short description on the next line - "
-    "(owner) add another bot; /bots lists them; /bot_persona <#n> "
-    "[description]; /bot_stop, /bot_start, /bot_remove <#n>\n"
     "/ai_provider show|claude|openai - switch text-completion provider\n"
     "/ai_model show|[provider] <model_id> - switch text model\n"
     "\n"
@@ -185,6 +182,23 @@ HELP_TEXT_ADMIN = (
     "always_fail_challenge, always_refuse_bef, bypass_cooldowns)\n"
     "/debug_clear_duck - picker → force-resolve a chat's active duck"
 )
+
+
+# Only the deployment that runs the other bots (settings.manages_bots) has
+# these commands; another bot's /help must not list them.
+_HELP_MANAGER_ADMIN = (
+    "\n\nOwner only, in DM:\n"
+    "/evolve <what you want changed> - ask me to change my own code: I show "
+    "the issue, you tap File, a build opens the pull request\n"
+    "/newbot <token> <Name> + a short description on the next line - add "
+    "another bot; /bots lists them; /bot_persona <#n> [description]; "
+    "/bot_stop, /bot_start, /bot_remove <#n>"
+)
+
+
+def help_text_admin(manages_bots: bool = True) -> str:
+    """The admin /help, with the manager-only commands only where they exist."""
+    return HELP_TEXT_ADMIN + (_HELP_MANAGER_ADMIN if manages_bots else "")
 
 
 def help_text_public(ident: identity.Identity = identity.DALE) -> str:
@@ -249,13 +263,19 @@ def build_router(rt: Runtime) -> Router:
             disable_notification=True,
         )
         # Append the admin reference as a second message when the caller
-        # is a bot admin; non-admins don't see it at all.
+        # is a bot admin, in a private chat: it is headed "DM only", and a
+        # group would be told which admin commands exist. Non-admins don't
+        # see it at all.
         is_admin = (
             msg.from_user is not None
+            and msg.chat is not None and msg.chat.type == "private"
             and is_admin_user(msg.from_user.id, rt.settings.admin_ids)
         )
         if is_admin:
-            await msg.reply(HELP_TEXT_ADMIN, disable_notification=True)
+            await msg.reply(
+                help_text_admin(bool(getattr(rt.settings, "manages_bots", True))),
+                disable_notification=True,
+            )
 
     @r.message(Command("get_chat_id"))
     async def get_chat_id(msg: Message) -> None:
