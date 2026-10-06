@@ -100,6 +100,18 @@ class DuckhuntService:
         )
         return _row_to_active_duck(row)
 
+    async def retire_unannounced(self, duck_id: int) -> None:
+        """Take back a duck whose announcement never went out. The row is
+        written before the message is sent, so a failed send used to leave
+        an active duck nobody could see: it blocked every new spawn for the
+        rest of its lifetime (up to a day) and could only be found by typing
+        `bang` blind."""
+        await self.db.execute(
+            "UPDATE duck_events SET resolved = TRUE, resolved_action = 'expired', "
+            " resolved_at = NOW() WHERE id = $1 AND resolved = FALSE",
+            duck_id,
+        )
+
     async def expire_old_ducks(self, chat_id: int | None = None) -> int:
         if chat_id is not None:
             res = await self.db.execute(

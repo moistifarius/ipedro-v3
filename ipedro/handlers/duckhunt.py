@@ -377,10 +377,14 @@ def build_router(rt: Runtime) -> Router:
             "Manual spawn in chat %s by user %s -> duck_id=%s",
             msg.chat.id, msg.from_user.id if msg.from_user else None, duck.id,
         )
-        await msg.answer(
-            await build_quack_message_for(rt.openai, duck),
-            disable_notification=True,
-        )
+        try:
+            await msg.answer(
+                await build_quack_message_for(rt.openai, duck),
+                disable_notification=True,
+            )
+        except Exception:
+            await rt.duckhunt.retire_unannounced(duck.id)     # nobody saw it
+            raise
 
     @r.message(Command("quackflag"))
     async def quackflag(msg: Message) -> None:

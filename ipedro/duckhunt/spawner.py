@@ -155,12 +155,19 @@ async def _maybe_spawn(
     duck = await service.spawn_duck(
         chat_id, settings.duckhunt_duck_lifetime_seconds,
     )
-    text = await build_quack_message_for(openai, duck)
     try:
+        text = await build_quack_message_for(openai, duck)
         sent = await bot.send_message(chat_id, text, disable_notification=True)
         track(chat_id, sent.message_id, text)
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:
+        # Nobody was told about this duck, so it mustn't exist: an invisible
+        # active duck blocks every later spawn until it expires.
         log.warning("Failed to deliver quack to %s: %s", chat_id, exc)
+        try:
+            await service.retire_unannounced(duck.id)
+        except Exception as exc2:  # pragma: no cover - defensive
+            log.warning("Couldn't retire unannounced duck %s: %s", duck.id, exc2)
+        return
     log.info(
         "Spawn announced: chat=%s event_id=%s",
         chat_id, duck.id,

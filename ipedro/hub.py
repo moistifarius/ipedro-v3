@@ -257,6 +257,24 @@ def publish_soon(
 
 # ── hearing another bot ──────────────────────────────────────────────────────
 
+# Chats Telegram told us we can't post in (kicked, or the chat is gone), and
+# until when. A chat keeps its config row after the bot is removed, so without
+# this every line another bot says there that names this one would pay for a
+# model call and then fail to send, for as long as the other bot stays.
+_LEFT_FOR_SECONDS = 3600.0
+_left_until: dict[int, float] = {}
+
+
+def _has_left(chat_id: int) -> bool:
+    until = _left_until.get(chat_id)
+    if until is None:
+        return False
+    if time.monotonic() >= until:
+        del _left_until[chat_id]
+        return False
+    return True
+
+
 def _addressed(post: Post, hub: Hub, ident) -> bool:
     return (
         post.reply_to_user_id == hub.bot_id
@@ -273,6 +291,8 @@ async def handle_post(rt, ident, hub: Hub, post: Post) -> None:
     from ipedro.memory.context_builder import build_context
     from ipedro.user_flags import has_flag
 
+    if _has_left(post.chat_id):
+        return
     cfg = await rt.chats.get_config(post.chat_id)
     if cfg is None:
         return                      # not a chat this bot has ever been in
@@ -334,8 +354,11 @@ async def handle_post(rt, ident, hub: Hub, post: Post) -> None:
             post.chat_id, reply, disable_notification=True, **kwargs,
         )
     except (TelegramForbiddenError, TelegramBadRequest) as exc:
-        # Removed from the chat, or it's gone: nothing to answer into.
+        # Removed from the chat, or it's gone: nothing to answer into. Stop
+        # spending model calls on it for a while.
         log.info("hub: can't answer in %s: %s", post.chat_id, exc)
+        if isinstance(exc, TelegramForbiddenError) or "chat not found" in str(exc).lower():
+            _left_until[post.chat_id] = time.monotonic() + _LEFT_FOR_SECONDS
         return
     track(
         post.chat_id, sent.message_id, reply,

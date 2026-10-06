@@ -144,6 +144,7 @@ def heard(monkeypatch):
         lambda *a, **k: state.tracked.append((a, k)),
     )
     state.rt, state.hub = rt, _hub()
+    hub._left_until.clear()
 
     async def hear(post):
         await hub.handle_post(rt, HANK, state.hub, post)
@@ -438,3 +439,38 @@ async def test_run_keeps_trying_when_startup_fails_once(monkeypatch):
     await asyncio.wait_for(hub.run(rt, settings, stop), 5)
     assert len(attempts) == 2
     assert attempts[-1]["max_size"] == 1           # one pooled connection
+
+
+@pytest.mark.asyncio
+async def test_a_chat_that_kicked_us_stops_costing_model_calls(heard):
+    """Dale was removed from the group but its config row remains; Hank keeps
+    saying "dale". Each line used to build a context, call the model and fail
+    to send. The first failure is enough to know."""
+    from aiogram.exceptions import TelegramForbiddenError
+
+    heard.rt.bot.send_message.side_effect = TelegramForbiddenError(
+        method=None, message="bot was kicked from the group chat")
+    await heard.hear(_post(id=1))
+    assert heard.rt.openai.chat.await_count == 1
+    heard.hub._last_bot_reply[CHAT] -= hub.MIN_GAP_SECONDS
+    await heard.hear(_post(id=2, message_id=43))
+    await heard.hear(_post(id=3, message_id=44))
+    assert heard.rt.openai.chat.await_count == 1               # nothing more spent
+    heard.rt.memory.record_message.assert_awaited_once()         # nor re-recorded
+    # ...until the hour is up, in case it was let back in
+    hub._left_until[CHAT] = hub.time.monotonic() - 1
+    heard.hub._last_bot_reply[CHAT] -= hub.MIN_GAP_SECONDS
+    await heard.hear(_post(id=4, message_id=45))
+    assert heard.rt.openai.chat.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_one_off_send_error_is_not_mistaken_for_being_kicked(heard):
+    from aiogram.exceptions import TelegramBadRequest
+
+    heard.rt.bot.send_message.side_effect = TelegramBadRequest(
+        method=None, message="message text is empty")
+    await heard.hear(_post(id=1))
+    heard.hub._last_bot_reply[CHAT] -= hub.MIN_GAP_SECONDS
+    await heard.hear(_post(id=2, message_id=43))
+    assert heard.rt.openai.chat.await_count == 2

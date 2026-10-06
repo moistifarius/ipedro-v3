@@ -53,6 +53,20 @@ async def _resolve_target_user(
 def build_router(rt: Runtime) -> Router:
     r = Router(name="mod")
 
+    async def _may_target(msg: Message, target_id: int) -> bool:
+        """A chat admin may silence anyone in THEIR chat except the people who
+        run the bot: that would let a Telegram chat admin (a tier below a bot
+        admin) switch the owner off in that chat, until they noticed."""
+        is_bot_admin = bool(msg.from_user) and is_admin_user(
+            msg.from_user.id, rt.settings.admin_ids)
+        if is_bot_admin or not is_admin_user(target_id, rt.settings.admin_ids):
+            return True
+        await msg.reply(
+            "That one's a bot admin; only another bot admin can do that.",
+            disable_notification=True,
+        )
+        return False
+
     async def _gated(msg: Message) -> bool:
         if not await _admin_or_chat_admin(rt, msg):
             await msg.reply(
@@ -74,6 +88,8 @@ def build_router(rt: Runtime) -> Router:
             )
             return
         target_id, label = target
+        if not await _may_target(msg, target_id):
+            return
         # Optional duration is the last non-@ arg.
         parts = (msg.text or "").split()
         ttl = None
@@ -121,6 +137,8 @@ def build_router(rt: Runtime) -> Router:
             )
             return
         target_id, label = target
+        if not await _may_target(msg, target_id):
+            return
         await set_flag(rt.db, msg.chat.id, target_id, "snark")
         await msg.reply(
             f"😏 Snark dialed up for {label}.",
