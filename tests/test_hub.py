@@ -486,3 +486,20 @@ def test_answering_another_bot_does_not_open_the_human_follow_up_window():
     assert not addressed.in_conversation(CHAT)
     bot_messages.track(CHAT, 91, "sh-sha, the human spoke to me", hub_depth=0)
     assert addressed.in_conversation(CHAT)
+
+
+@pytest.mark.asyncio
+async def test_the_listening_connection_has_a_command_timeout(monkeypatch):
+    """Its keepalive is a command; with no timeout a silently dropped
+    connection stalled it for the kernel's TCP timeout."""
+    import asyncpg
+
+    seen = {}
+
+    async def fake_connect(dsn, **kw):
+        seen.update(kw)
+        return "conn"
+
+    monkeypatch.setattr(asyncpg, "connect", fake_connect)
+    assert await hub._connect_listener("postgresql://x/y") == "conn"
+    assert seen["command_timeout"] == hub._LISTEN_COMMAND_TIMEOUT <= 30

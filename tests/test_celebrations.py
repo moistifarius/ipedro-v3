@@ -74,3 +74,28 @@ async def test_a_transient_failure_is_retried_next_tick_not_stamped():
     db, bot, settings = _loop_env(err)
     await _one_pass(db, bot, settings)
     db.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_greeting_that_went_out_is_not_posted_again_because_tracking_failed(monkeypatch):
+    """track() raising after a successful send read as a failed send: no stamp,
+    and the same birthday greeting five minutes later."""
+    db, bot, settings = _loop_env(None)
+    monkeypatch.setattr(celebrations, "track",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+    await _one_pass(db, bot, settings)
+    assert bot.send_message.await_count == 1
+    db.execute.assert_awaited_once()                      # stamped
+
+
+@pytest.mark.asyncio
+async def test_a_stamp_that_fails_does_not_abort_the_rest(monkeypatch):
+    db, bot, settings = _loop_env(None)
+    rows = [{"id": 5, "chat_id": -100, "user_id": 7, "label": "birthday", "month": 2,
+             "day": 28, "year": None, "note": None, "name": "Ann"},
+            {"id": 6, "chat_id": -200, "user_id": 8, "label": "birthday", "month": 2,
+             "day": 28, "year": None, "note": None, "name": "Bob"}]
+    db.fetch = AsyncMock(return_value=rows)
+    db.execute = AsyncMock(side_effect=RuntimeError("db blip"))
+    await _one_pass(db, bot, settings)
+    assert [c.args[0] for c in bot.send_message.await_args_list][:2] == [-100, -200]

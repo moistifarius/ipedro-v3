@@ -33,6 +33,10 @@ from ipedro.chat_policy import IncomingMessage, should_respond
 log = logging.getLogger(__name__)
 
 CHANNEL = "bot_posts"
+# A listening connection mostly waits, but its keepalive ("SELECT 1") is a
+# command, and with no timeout a silently dropped connection stalled that
+# probe for the kernel's TCP timeout (many minutes) instead of seconds.
+_LISTEN_COMMAND_TIMEOUT = 15.0
 MAX_DEPTH = 3
 MIN_GAP_SECONDS = 20.0
 _KEEPALIVE_SECONDS = 30.0
@@ -73,6 +77,12 @@ class Post:
             bot_name=r["bot_name"], text=r["text"],
             reply_to_user_id=r["reply_to_user_id"], depth=r["depth"],
         )
+
+
+async def _connect_listener(dsn: str):
+    import asyncpg
+
+    return await asyncpg.connect(dsn, command_timeout=_LISTEN_COMMAND_TIMEOUT)
 
 
 class Hub:
@@ -127,8 +137,7 @@ class Hub:
         with backoff; posts that land while disconnected are missed, which
         only means a bot didn't hear a line."""
         if connect is None:
-            import asyncpg
-            connect = asyncpg.connect
+            connect = _connect_listener
         backoff = 1.0
         last_prune = 0.0
         while not stop.is_set():
@@ -375,8 +384,8 @@ async def handle_post(rt, ident, hub: Hub, post: Post) -> None:
             f"answered {post.bot_name} (another bot, depth {post.depth})",
             message_id=sent.message_id,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("hub: couldn't log the answer in %s: %s", post.chat_id, exc)
 
 
 async def run(rt, settings, stop: asyncio.Event) -> None:

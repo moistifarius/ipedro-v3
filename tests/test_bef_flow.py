@@ -101,14 +101,17 @@ async def test_a_lost_resolve_race_is_not_credited():
     db.execute = losing_execute
     svc = DuckhuntService(db)  # type: ignore[arg-type]
 
-    outcome, _ = await svc.handle_bef(
+    outcome, duck = await svc.handle_bef(
         chat_id=42, user_id=1, display_name="alice",
         ai_verdict=True, ai_line="the duck nods",
         rng=AlwaysHighRng(),
     )
-    assert outcome is not None and outcome.success is True   # message still friendly
+    # The loser is told there is no duck, not "you befriended it": a success
+    # message would also bring the celebration and a prompt to NAME a duck
+    # that isn't theirs.
+    assert outcome is None and duck is None
     assert calls["n"] == 1                # the resolve attempt did happen
-    assert db.calls.bumped == []          # but the loser earned nothing
+    assert db.calls.bumped == []          # and the loser earned nothing
 
 
 @pytest.mark.asyncio
@@ -621,3 +624,35 @@ def test_clock_caption_states_the_time_limit():
         assert "on the clock" in cap
     # Trivia's clock is the headline 60s.
     assert _clock_caption("trivia") == "⏱ 60 seconds on the clock."
+
+
+class _WanderRng:
+    """random() over the 20% notice chance, so `ignore` resolves (the duck
+    wanders off); choice() takes the first line."""
+    def random(self_inner):
+        return 0.9
+
+    def choice(self_inner, seq):
+        return seq[0]
+
+
+@pytest.mark.asyncio
+async def test_a_lost_race_on_bang_and_ignore_is_no_duck_not_a_win():
+    """Same rule for the other two ways of taking a duck."""
+    for action, kwargs in (("handle_bang", {}), ("handle_ignore", {})):
+        db = FakeDB(_duck("common"))
+        real_execute = db.execute
+
+        async def losing(query, *args, _real=real_execute):
+            if "UPDATE duck_events SET resolved = TRUE" in query:
+                return "UPDATE 0"
+            return await _real(query, *args)
+
+        db.execute = losing
+        svc = DuckhuntService(db)  # type: ignore[arg-type]
+        outcome, duck = await getattr(svc, action)(
+            chat_id=42, user_id=1, display_name="alice", rng=_WanderRng(),
+            **({"forced_success": True} if action == "handle_bang" else {}),
+        )
+        assert (outcome, duck) == (None, None), action
+        assert db.calls.bumped == [], action

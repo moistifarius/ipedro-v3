@@ -94,6 +94,10 @@ class Settings(BaseSettings):
 
     # Logging
     log_level: str = "INFO"
+    # How many days of "why did / didn't it reply" records (activity_log) to
+    # keep. It gets a row per reply and per silence, in every chat, so it
+    # grows with total message volume. 0 keeps everything.
+    activity_retention_days: int = 90
 
     # Memory / context
     context_recent_messages: int = 20

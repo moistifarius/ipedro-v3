@@ -289,8 +289,12 @@ class DuckhuntService:
             claimed = await self._resolve(
                 duck.id, user_id, "bang", outcome.points_delta,
             )
-            if claimed:
-                await self._bump_stats(chat_id, user_id, display_name, "bang", outcome)
+            if not claimed:
+                # Someone else's shot landed first. Telling the loser "you
+                # shot the duck! +1" while paying nothing was the old answer;
+                # "there's no duck" is true, and isn't a miss either.
+                return None, None
+            await self._bump_stats(chat_id, user_id, display_name, "bang", outcome)
         else:
             await self._bump_stats(chat_id, user_id, display_name, "bang", outcome)
         return outcome, duck
@@ -298,11 +302,26 @@ class DuckhuntService:
     async def _handle_bang_boss(
         self, duck: ActiveDuck, user_id: int, display_name: str,
         rng: random.Random | None = None,
-    ) -> tuple[ActionOutcome, ActiveDuck]:
+    ) -> tuple[ActionOutcome, ActiveDuck] | tuple[None, None]:
         """A bang on a boss duck. Bosses always take the hit; killing blow
         awards a bonus to the killer; everyone who contributed gets credit."""
         from ipedro.duckhunt.scoring import ActionOutcome  # local import
-        # Increment boss hit counter & per-user attribution row.
+        required = duck.boss_required_hits or 1
+        # Count the hit only while the boss is still standing: unresolved AND
+        # short of its last hit. Hits that arrive together, or after the kill
+        # or the boss wandering off, get NULL back and no credit (they used to
+        # pay out on a dead duck and show "(4/3)").
+        new_hits = await self.db.fetchval(
+            "UPDATE duck_events SET boss_current_hits = boss_current_hits + 1 "
+            " WHERE id = $1 AND resolved = FALSE AND boss_current_hits < $2 "
+            " RETURNING boss_current_hits",
+            duck.id, required,
+        )
+        if new_hits is None:
+            # Not a miss (a miss can draw a challenge): the boss is simply no
+            # longer there, which is what "no active duck" already says.
+            return None, None
+        # Per-user attribution row, for the participation credit at the kill.
         await self.db.execute(
             """
             INSERT INTO duck_boss_hits (duck_id, user_id, display_name, hits)
@@ -313,12 +332,6 @@ class DuckhuntService:
             """,
             duck.id, user_id, display_name,
         )
-        new_hits = await self.db.fetchval(
-            "UPDATE duck_events SET boss_current_hits = boss_current_hits + 1 "
-            " WHERE id = $1 RETURNING boss_current_hits",
-            duck.id,
-        )
-        required = duck.boss_required_hits or 1
         small_pts = max(1, base_points(duck.rarity) // 4)
         # == , not >=: boss_current_hits increments by exactly 1 per call
         # and RETURNING is atomic per row, so exactly one call ever sees
@@ -399,8 +412,9 @@ class DuckhuntService:
             claimed = await self._resolve(
                 duck.id, user_id, "ignore", outcome.points_delta,
             )
-            if claimed:
-                await self._bump_stats(chat_id, user_id, display_name, "ignore", outcome)
+            if not claimed:
+                return None, None               # it was already gone
+            await self._bump_stats(chat_id, user_id, display_name, "ignore", outcome)
         else:
             await self._bump_stats(chat_id, user_id, display_name, "ignore", outcome)
         return outcome, duck
@@ -461,8 +475,12 @@ class DuckhuntService:
             claimed = await self._resolve(
                 duck.id, user_id, "bef", outcome.points_delta,
             )
-            if claimed:
-                await self._bump_stats(chat_id, user_id, display_name, "bef", outcome)
+            if not claimed:
+                # Befriended by someone else a moment earlier. The loser used
+                # to get the celebration and a prompt to name a duck that
+                # isn't theirs.
+                return None, None
+            await self._bump_stats(chat_id, user_id, display_name, "bef", outcome)
         # Refusal => no stat bump, duck stays.
 
         return outcome, duck

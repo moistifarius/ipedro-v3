@@ -364,8 +364,8 @@ name and `on`/`off` flips one toggle. Valid names:
 - `always_fail_challenge` — bef-challenge judge auto-fails.
 - `always_refuse_bef` — `bef` always rolls the REFUSE branch, so the
   refusal challenge fires every time.
-- `bypass_cooldowns` — skip the 15-second per-user cooldown on
-  `bang`/`bef`/`ignore`.
+- `bypass_cooldowns` — skip the per-user action cooldown on
+  `bang`/`bef`/`ignore` (`DUCKHUNT_ACTION_COOLDOWN_SECONDS`, 4s by default).
 
 `always_hit` and `always_miss` are mutually exclusive — if both are on,
 `always_hit` wins. Same for `always_pass_challenge` /

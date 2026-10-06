@@ -8,8 +8,8 @@ persist to ``kv_store`` so the state survives restarts (loaded back via
 
 Supported toggles (all default-off):
 
-* ``always_hit``               — bang/ignore: force a successful shot
-* ``always_miss``              — bang/ignore: force a miss
+* ``always_hit``               — bang: force a successful shot
+* ``always_miss``              — bang: force a miss
 * ``always_pass_challenge``    — bef-challenge judge: short-circuit to PASS
 * ``always_fail_challenge``    — bef-challenge judge: short-circuit to FAIL
 * ``always_refuse_bef``        — bef: force the AI verdict to REFUSE

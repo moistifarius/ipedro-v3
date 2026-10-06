@@ -90,8 +90,6 @@ async def run_celebrations_loop(
                         chat_id, text,
                         disable_notification=is_silenced(chat_id),
                     )
-                    track(chat_id, sent.message_id, text)
-                    await _stamp_celebrated(db, row["id"], today)
                 except (TelegramForbiddenError, TelegramBadRequest) as exc:
                     # The chat refuses us (kicked, gone). Retrying every five
                     # minutes all day can't change that; stamp it and move on.
@@ -99,10 +97,25 @@ async def run_celebrations_loop(
                         "Celebration for chat %s undeliverable: %s", chat_id, exc,
                     )
                     await _stamp_celebrated(db, row["id"], today)
+                    continue
                 except Exception as exc:
                     log.warning(
-                        "Celebration send failed for chat %s: %s",
-                        chat_id, exc,
+                        "Celebration send failed for chat %s: %s", chat_id, exc,
+                    )
+                    continue
+                # It is out. What follows is bookkeeping, and bookkeeping
+                # that goes wrong must not read as a failed send: that
+                # posted the same greeting again five minutes later.
+                try:
+                    track(chat_id, sent.message_id, text)
+                except Exception as exc:
+                    log.debug("Celebration sent but not tracked in %s: %s", chat_id, exc)
+                try:
+                    await _stamp_celebrated(db, row["id"], today)
+                except Exception as exc:
+                    log.warning(
+                        "Celebration posted in %s but not stamped (%s); it "
+                        "may post once more.", chat_id, exc,
                     )
             wait = _TICK_SECONDS
         except Exception as exc:

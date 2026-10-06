@@ -46,7 +46,8 @@ _HELP = (
     "\nFor the others, just type the trigger:\n"
     "  say 'dale' / 'dale gribble' / 'rusty shackleford' / 'idale' — Dale should reply\n"
     "  say 'cat' / 'kitty' / 🐈 — Dale drops a dubious cat fact\n"
-    "  type 'bang' twice within 15s — second one trips the cooldown challenge"
+    "  type 'bang' twice inside the action cooldown (DUCKHUNT_ACTION_COOLDOWN_SECONDS, "
+    "4s by default) — the second is turned away by the cooldown"
 )
 
 

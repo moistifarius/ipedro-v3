@@ -211,9 +211,21 @@ async def _chat_persona(db: Database, chat_id: int) -> str:
     return resolve_persona(row["persona"], row["persona_custom"])
 
 
+class RecapUnavailable(Exception):
+    """The model gave nothing for a month that has plenty of material, and it
+    is early enough in the month to try again rather than post a stand-in."""
+
+
+# The plain "Another month in the books" stand-in is only for a model that
+# stays down; for the first days of the month the loop waits and retries
+# instead, so one bad hour doesn't spend the month's recap on it.
+_FALLBACK_AFTER_DAY = 4
+
+
 async def _ai_recap(
     openai: OpenAIClient, month_label: str,
     candidates: list[tuple[str, str, bool]], chat_id: int, persona: str,
+    *, allow_fallback: bool = True,
 ) -> tuple[str, list[tuple[str, str]]]:
     """(recap, quotes). One call to the main model, in the chat's persona:
     this posts once a month, so it gets the model that can tell funny from
@@ -236,6 +248,8 @@ async def _ai_recap(
     )
     recap, picks = _parse_reply(raw, len(candidates))
     if not recap:
+        if not allow_fallback:
+            raise RecapUnavailable(month_label)
         return _FALLBACK_RECAP, []
     quotes = [
         (candidates[i - 1][0], candidates[i - 1][1]) for i in picks
@@ -246,7 +260,7 @@ async def _ai_recap(
 
 async def build_monthly_recap(
     db: Database, openai: OpenAIClient, settings: Settings, chat_id: int,
-    *, today: date | None = None,
+    *, today: date | None = None, allow_fallback: bool = True,
 ) -> MonthlyRecapResult | None:
     """Recap the calendar month before ``today``. None if the month was empty."""
     tz = settings.tzinfo
@@ -261,7 +275,7 @@ async def build_monthly_recap(
     pool = await _fetch_recap_pool(db, chat_id, start_utc, end_utc)
     recap, quotes = await _ai_recap(
         openai, month_label, _candidates(saved, pool), chat_id,
-        await _chat_persona(db, chat_id),
+        await _chat_persona(db, chat_id), allow_fallback=allow_fallback,
     )
     return MonthlyRecapResult(
         month_label=month_label, recap=recap, quotes=quotes, stats=stats,
@@ -312,6 +326,12 @@ async def _stamp(db: Database, chat_id: int, prev_first: date) -> None:
     )
 
 
+# Recaps already written this process for a chat and month, kept until they
+# are delivered: a send that fails for a moment retries the next hour with
+# the SAME text instead of paying for the model again.
+_built: dict[tuple[int, date], str] = {}
+
+
 async def _maybe_post(
     bot: Bot, db: Database, openai: OpenAIClient, settings: Settings,
     now: datetime | None = None,
@@ -323,22 +343,31 @@ async def _maybe_post(
         return
     today = now.date()
     _label, prev_first, _cur_first, _s, _e = _prev_month_bounds(today, settings.tzinfo)
+    allow_fallback = today.day >= _FALLBACK_AFTER_DAY
     for chat_id in await _eligible_chats(db, prev_first):
-        try:
-            result = await build_monthly_recap(db, openai, settings, chat_id, today=today)
-        except Exception as exc:  # pragma: no cover - defensive
-            log.warning("monthly-recap build failed for %s: %s", chat_id, exc)
-            continue
-        if result is None:
-            await _stamp(db, chat_id, prev_first)   # quiet month → don't re-query
-            continue
-        text = render_monthly_recap(result)
+        key = (chat_id, prev_first)
+        text = _built.get(key)
+        if text is None:
+            try:
+                result = await build_monthly_recap(
+                    db, openai, settings, chat_id, today=today,
+                    allow_fallback=allow_fallback,
+                )
+            except RecapUnavailable:
+                log.info("monthly-recap: model unavailable for %s; trying again.", chat_id)
+                continue
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warning("monthly-recap build failed for %s: %s", chat_id, exc)
+                continue
+            if result is None:
+                await _stamp(db, chat_id, prev_first)   # quiet month → don't re-query
+                continue
+            text = render_monthly_recap(result)
+            _built[key] = text
         try:
             sent = await bot.send_message(
                 chat_id, text, disable_notification=is_silenced(chat_id),
             )
-            track(chat_id, sent.message_id, text)
-            log.info("monthly recap posted in chat %s (%s).", chat_id, result.month_label)
         except (TelegramForbiddenError, TelegramBadRequest) as exc:
             # Permanent failure (kicked/blocked): stamp anyway so this chat
             # stops costing 4 queries + an AI call every hour for 45 days.
@@ -346,7 +375,19 @@ async def _maybe_post(
         except Exception as exc:  # pragma: no cover - defensive
             log.warning("monthly-recap send failed for %s (will retry): %s", chat_id, exc)
             continue
-        await _stamp(db, chat_id, prev_first)
+        else:
+            try:
+                track(chat_id, sent.message_id, text)
+            except Exception as exc:        # delivered: bookkeeping isn't a failed send
+                log.debug("monthly-recap sent but not tracked in %s: %s", chat_id, exc)
+            log.info("monthly recap posted in chat %s (%s).", chat_id, prev_first)
+        _built.pop(key, None)
+        try:
+            await _stamp(db, chat_id, prev_first)
+        except Exception as exc:
+            # Posted, but not recorded: it may post once more next hour. That
+            # beats aborting the rest of the chats behind it.
+            log.warning("monthly-recap posted in %s but not stamped: %s", chat_id, exc)
 
 
 async def run_monthly_recap_loop(
