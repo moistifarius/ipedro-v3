@@ -735,7 +735,10 @@ class AIClient:
                 cache_read_tokens=cached,
                 cost_usd=_openai_text_price(m, pt, ct, cached),
             )
-            return (choice.message.content or "").strip() or None
+            text = (choice.message.content or "").strip()
+            if text and getattr(choice, "finish_reason", None) == "length":
+                text = _trim_to_sentence(text)      # as _claude_text does
+            return text or None
         except OpenAIAPIError:
             # Let tenacity's @retry see this and retry; the wrapping
             # chat() catches whatever survives exhaustion.

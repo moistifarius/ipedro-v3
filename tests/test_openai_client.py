@@ -57,6 +57,30 @@ async def test_chat_returns_stripped_content(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("finish, expected", [
+    ("length", "First point made. Second point made in full."),   # cut at the cap
+    ("stop", "First point made. Second point made in full. And the third poi"),
+])
+async def test_a_reply_the_cap_cut_off_is_trimmed_to_its_last_sentence(
+    finish, expected, monkeypatch,
+):
+    """The same rule the Claude path has: nothing posts stopping mid-word."""
+    client = OpenAIClient(api_key="x", text_provider="openai")
+    ns = _FakeChatNamespace(
+        "First point made. Second point made in full. And the third poi")
+    real = ns._Completions.create
+
+    async def create(self, **kwargs):
+        resp = await real(self, **kwargs)
+        resp.choices[0].finish_reason = finish
+        return resp
+
+    monkeypatch.setattr(ns._Completions, "create", create)    # undone after
+    client._client.chat = ns
+    assert await client.chat([{"role": "user", "content": "hi"}]) == expected
+
+
+@pytest.mark.asyncio
 async def test_chat_returns_none_on_empty_content():
     client = OpenAIClient(api_key="x", text_provider="openai")
     client._client.chat = _FakeChatNamespace("   ")
