@@ -40,7 +40,7 @@ _SEMANTIC_K = 6
 _MIN_SIMILARITY = 0.30
 _NOTE_MAX_CHARS = 240
 _NOTES_MAX_CHARS = 6000
-_PERSONA_MAX_CHARS = 6000
+_PERSONA_MAX_CHARS = 1200
 
 _LIST_PREFIX_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s*")
 _NAME_SQL = (
@@ -246,7 +246,7 @@ async def build_persona(
             ),
             notes=_render(found),
         )}],
-        max_tokens=900,
+        max_tokens=300,
     )
     persona = (reply or "").strip()
     if not persona:

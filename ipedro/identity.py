@@ -37,6 +37,24 @@ class Identity:
     # their own names and nothing a stranger would have to guess.
     answers_to_bot_word: bool = True
 
+    # How much a reply may say. Dale is the standard: his persona is one line,
+    # the shared rhythm rules do the rest, and his replies come out a line or
+    # two. Any other bot is given a character to play, and a character sheet
+    # pulls the model toward theatre; it gets the length rule spelled out
+    # (context_builder._TERSE_SYSTEM) and a tighter cap behind it. Dale's
+    # numbers are the ones this code always used.
+    @property
+    def terse(self) -> bool:
+        return not self.dale_flavor
+
+    @property
+    def reply_tokens(self) -> int:
+        return 160 if self.terse else 400
+
+    @property
+    def hub_reply_tokens(self) -> int:
+        return 120 if self.terse else 300
+
 
 # Dale's names, as they've always been: the current persona (who goes by
 # Rusty Shackleford when he thinks he's being watched — the chat's display

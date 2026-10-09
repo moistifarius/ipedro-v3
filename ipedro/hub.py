@@ -347,8 +347,11 @@ async def handle_post(rt, ident, hub: Hub, post: Post) -> None:
         extra_system=None, memory_enabled=cfg.memory_enabled,
         persona_override=None,
         capabilities=capability_brief(cfg, dale_flavor=ident.dale_flavor),
+        terse=ident.terse,
     )
-    reply = await rt.openai.chat(ctx.messages, max_tokens=300, chat_id=post.chat_id)
+    reply = await rt.openai.chat(
+        ctx.messages, max_tokens=ident.hub_reply_tokens, chat_id=post.chat_id,
+    )
     if not reply or not reply.strip():
         return
     from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError

@@ -128,6 +128,26 @@ _STYLE_REMINDER = (
 )
 
 
+# For every bot that isn't Dale. A character written out at length (the
+# persona /newbot generates) pulls the model into performing it: long, busy
+# replies full of bits. Dale's one-line persona never does, and Dale is the
+# standard, so this spells out the length he gets for free. Only a bot with
+# its own identity is given it (build_context's `terse`), so Dale's prompt is
+# byte-identical to what it was.
+_TERSE_SYSTEM = (
+    "Length is the thing you get wrong most, so hold it down. One line is a "
+    "normal reply and two is plenty; a word, a reaction or a half-sentence is "
+    "often the best one, the way a person texts a group chat. Your character "
+    "is who you are, not a script to perform: don't narrate it, don't pile "
+    "bits on top of each other, don't explain the joke. Say the one thing "
+    "and stop. No opener, no wrap-up, no restating the question. Only a "
+    "direct ask for an explanation earns more than a few short sentences, "
+    "and even that wants to be shorter than you think."
+)
+
+_TERSE_REMINDER = "(Length check: one line. Two at most. Stop early.)"
+
+
 # ── the history window is anchored, not sliding ────────────────────────
 # "The last N messages" changes its first byte on every turn, so nothing
 # in it can ever be a cache prefix. Anchoring the start and letting the
@@ -325,6 +345,7 @@ async def build_context(
     now: datetime | None = None,
     persona_override: str | None = None,
     capabilities: str | None = None,
+    terse: bool = False,
 ) -> BuiltContext:
     budget = settings.context_max_tokens
     messages: list[dict[str, Any]] = []
@@ -382,6 +403,8 @@ async def build_context(
         _stable("capabilities list", capabilities)
     if not persona_override:
         _stable("style rules", _STYLE_SYSTEM)
+        if terse:
+            _stable("length rule", _TERSE_SYSTEM)
     _stable("clock rules", _CLOCK_SYSTEM)
 
     # Summary and facts change only when the summarizer runs (every ~80
@@ -432,6 +455,8 @@ async def build_context(
          label="current time")
     if not persona_override:
         _add({"role": "system", "content": _STYLE_REMINDER})
+        if terse:
+            _add({"role": "system", "content": _TERSE_REMINDER})
     if extra_system:
         _add({"role": "system", "content": extra_system},
              label="per-request instructions")

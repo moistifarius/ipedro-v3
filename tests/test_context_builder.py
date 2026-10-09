@@ -770,3 +770,54 @@ async def test_an_impersonation_turn_asks_for_no_cache_write():
     )
     assert any(m.get(CACHE_BREAKPOINT) for m in normal.messages)
     assert not any(m.get(CACHE_BREAKPOINT) for m in impersonating.messages)
+
+
+# ── the length rule for bots that aren't Dale ────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_the_length_rule_is_only_there_when_asked_for():
+    from ipedro.memory.context_builder import _TERSE_REMINDER, _TERSE_SYSTEM
+
+    store = FakeStore(recent=[_msg("hi")])
+    base = dict(store=store, settings=_settings(), chat_id=1, persona="dude",
+                persona_custom=None, latest_user_text="hi")
+    dale = await build_context(**base)
+    default = await build_context(**base, terse=False)
+    plain = await build_context(**base, terse=True)
+
+    assert _TERSE_SYSTEM not in _system_text(dale)
+    assert _TERSE_REMINDER not in _system_text(dale)
+    # Dale's prompt is byte-for-byte what it was, so his prompt cache holds
+    assert dale.messages == default.messages
+    assert _TERSE_SYSTEM in _system_text(plain)
+    assert _TERSE_REMINDER in _system_text(plain)
+    assert len(plain.messages) == len(dale.messages) + 2
+
+
+@pytest.mark.asyncio
+async def test_the_length_rule_sits_in_the_cached_prefix_and_the_reminder_after_it():
+    from ipedro.memory.context_builder import _TERSE_REMINDER, _TERSE_SYSTEM
+    from ipedro.openai_client import CACHE_BREAKPOINT
+
+    built = await build_context(
+        store=FakeStore(recent=[_msg("hi")]), settings=_settings(), chat_id=1,
+        persona="dude", persona_custom=None, latest_user_text="hi", terse=True,
+    )
+    texts = [m["content"] for m in built.messages]
+    marked = max(i for i, m in enumerate(built.messages) if m.get(CACHE_BREAKPOINT))
+    assert texts.index(_TERSE_SYSTEM) <= marked          # stable, so cached
+    assert texts.index(_TERSE_REMINDER) > marked         # right before generation
+
+
+@pytest.mark.asyncio
+async def test_an_impersonation_turn_gets_no_length_rule_either():
+    from ipedro.memory.context_builder import _TERSE_REMINDER, _TERSE_SYSTEM
+
+    built = await build_context(
+        store=FakeStore(recent=[_msg("act like Luke")]), settings=_settings(),
+        chat_id=1, persona="dude", persona_custom=None,
+        latest_user_text="act like Luke",
+        persona_override="IMPERSONATION MODE: you are Luke.", terse=True,
+    )
+    assert _TERSE_SYSTEM not in _system_text(built)
+    assert _TERSE_REMINDER not in _system_text(built)

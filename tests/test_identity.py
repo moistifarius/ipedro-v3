@@ -358,6 +358,61 @@ async def test_the_chat_handler_briefs_another_bot_as_itself(monkeypatch):
     assert briefs and "GIF of yourself" not in briefs[0]
 
 
+# ── how long a reply may run ─────────────────────────────────────────────────
+
+def test_dales_reply_length_is_what_it_always_was():
+    """Dale is the standard other bots are held to, so none of this may
+    touch him: the caps are the ones the handlers hard-coded before."""
+    assert identity.DALE.terse is False
+    assert (identity.DALE.reply_tokens, identity.DALE.hub_reply_tokens) == (400, 300)
+    unset = identity.from_settings(SimpleNamespace())
+    assert unset is identity.DALE
+
+
+def test_every_other_bot_is_held_to_a_shorter_reply():
+    assert HANK.terse is True
+    assert HANK.reply_tokens < identity.DALE.reply_tokens
+    assert HANK.hub_reply_tokens < identity.DALE.hub_reply_tokens
+    # even a bot named Dale that has been given a different flavor
+    odd = identity.from_settings(SimpleNamespace(
+        bot_name="Dale", bot_flavor="plain", manages_bots=False))
+    assert odd.terse is True
+
+
+@pytest.mark.asyncio
+async def test_another_bots_reply_gets_the_length_rule_and_a_tight_cap(monkeypatch):
+    rt = _as_hank(_mention_rt(monkeypatch))
+    seen = []
+
+    async def fake_build(**kwargs):
+        seen.append(kwargs["terse"])
+        return BuiltContext(messages=[{"role": "user", "content": "x"}], tokens=1)
+
+    monkeypatch.setattr(chat, "build_context", fake_build)
+    msg = _msg(text="hank you there")
+    msg.answer = AsyncMock(return_value=SimpleNamespace(message_id=1))
+    await _handler(rt).callback(msg)
+    assert seen == [True]
+    assert rt.openai.chat.await_args.kwargs["max_tokens"] == HANK.reply_tokens
+
+
+@pytest.mark.asyncio
+async def test_dales_reply_asks_for_no_length_rule(monkeypatch):
+    rt = _mention_rt(monkeypatch)
+    seen = []
+
+    async def fake_build(**kwargs):
+        seen.append(kwargs["terse"])
+        return BuiltContext(messages=[{"role": "user", "content": "x"}], tokens=1)
+
+    monkeypatch.setattr(chat, "build_context", fake_build)
+    msg = _msg(text="dale you there")
+    msg.answer = AsyncMock(return_value=SimpleNamespace(message_id=1))
+    await _handler(rt).callback(msg)
+    assert seen == [False]
+    assert rt.openai.chat.await_args.kwargs["max_tokens"] == 400
+
+
 # ── insults ──────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("text", [

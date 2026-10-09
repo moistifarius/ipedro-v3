@@ -189,6 +189,21 @@ async def test_named_it_answers_as_a_reply_one_level_deeper(heard):
 
 
 @pytest.mark.asyncio
+async def test_another_bots_reply_here_is_held_to_the_short_cap(heard, monkeypatch):
+    seen = []
+
+    async def fake_build(**kw):
+        seen.append(kw["terse"])
+        return context_builder.BuiltContext(
+            messages=[{"role": "user", "content": "x"}], tokens=1)
+
+    monkeypatch.setattr(context_builder, "build_context", fake_build)
+    await heard.hear(_post(depth=1))
+    assert seen == [True]
+    assert heard.rt.openai.chat.await_args.kwargs["max_tokens"] == HANK.hub_reply_tokens
+
+
+@pytest.mark.asyncio
 async def test_a_reply_to_it_counts_as_being_addressed(heard):
     await heard.hear(_post(text="no.", reply_to_user_id=HANK_ID))
     heard.rt.bot.send_message.assert_awaited_once()

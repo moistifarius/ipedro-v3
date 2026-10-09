@@ -150,6 +150,24 @@ async def test_build_persona_draws_on_every_bots_memory(other_bots):
 
 
 @pytest.mark.asyncio
+async def test_a_persona_is_asked_for_short_and_kept_short(other_bots):
+    """Dale's persona is one line and his replies are a line or two; a
+    full character sheet made a bot perform at length. The brief says short,
+    the model gets room for a short answer only, and a long one is cut."""
+    rt = _rt()
+    rt.openai.chat = AsyncMock(return_value="You are Hank. " + "Propane. " * 400)
+    draft = await persona_gen.build_persona(
+        rt, name="Hank", aliases="hank", description="sells propane",
+        connect=other_bots.connect, has_vector=other_bots.has_vector,
+    )
+    prompt = rt.openai.chat.await_args.args[0][0]["content"]
+    assert "under 100 words" in prompt and "never like an assistant" in prompt
+    assert "Short is the point" in prompt
+    assert rt.openai.chat.await_args.kwargs["max_tokens"] == 300
+    assert len(draft.persona) <= 1200
+
+
+@pytest.mark.asyncio
 async def test_no_description_writes_from_the_name_alone(other_bots):
     rt = _rt()
     draft = await persona_gen.build_persona(
