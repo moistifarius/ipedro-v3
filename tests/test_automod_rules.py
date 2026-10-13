@@ -19,14 +19,14 @@ import pytest
 from ipedro import automod_media
 from ipedro.automod_types import MediaResponse
 from ipedro.handlers.automod import _automod_response
-from ipedro.handlers.automod_bits import _AUTOMOD_TRIGGERS, _KYS_LINES
+from ipedro.handlers.automod_bits import _AUTOMOD_TRIGGERS, _KYS_LINES, _KYS_RE
 
 
 # ── the kys deflection ───────────────────────────────────────────────────────
 
 def test_kys_gets_a_deflection_and_wins_priority():
     for t in ("kys", "kill yourself", "just neck yourself",
-              "killurself", "kill ur self"):
+              "i want to kill myself", "killurself", "kill ur self"):
         assert _automod_response(t, random.Random(0)) in _KYS_LINES, t
     # kys intercepts first — a joke trigger in the same message can't win
     assert _automod_response("kys you gay loser", random.Random(0)) in _KYS_LINES
@@ -37,16 +37,27 @@ def test_kys_gets_a_deflection_and_wins_priority():
     assert _automod_response("that joke killed me lol") not in _KYS_LINES
 
 
-def test_a_first_person_statement_is_never_met_with_a_taunt():
-    """'kill yourself' is the insult the deflection exists for. 'I want to
-    kill myself' is somebody saying something true and awful; answering it
-    with 'skill issue' (and returning before any real reply could follow)
-    was the bug. It must reach the normal flow, with no canned bit."""
-    for t in ("i want to kill myself", "I'm going to kill myself tonight",
-              "gonna neck myself", "i might kill my self"):
-        assert _automod_response(t, random.Random(0)) is None, t
-        for seed in range(8):
-            assert _automod_response(t, random.Random(seed)) not in _KYS_LINES
+def test_the_kys_pattern_is_exactly_what_it_was():
+    """The owner's bit, restored to the character: 'kill myself' is in it
+    (an audit pass took it out and the owner put it back)."""
+    assert _KYS_RE.pattern == (
+        r"\bkys\b|\b(kill|neck)\s*(your|my|ur|yr)\s*self\b"
+    )
+    assert _KYS_LINES == (
+        "no ❤️", "no u", "counteroffer: no", "skill issue",
+        "have you tried logging off instead",
+    )
+    for t in ("i want to kill myself", "gonna neck myself", "kill my self"):
+        assert _automod_response(t, random.Random(0)) in _KYS_LINES, t
+
+
+def test_the_kys_bit_alone_answers_anyone_anywhere_in_the_message():
+    from ipedro.handlers.automod import _kys_response
+
+    assert _kys_response("dale kys", random.Random(0)) in _KYS_LINES
+    assert _kys_response("x" * 5000 + " kys", random.Random(0)) in _KYS_LINES
+    assert _kys_response("that joke killed me lol") is None
+    assert _kys_response("") is None and _kys_response(None) is None
 
 
 def test_kys_regex_has_word_boundaries_on_both_ends():
@@ -173,3 +184,34 @@ def test_every_pattern_finishes_fast_on_hostile_input():
 def test_only_the_start_of_a_long_message_is_scanned():
     from ipedro.handlers import chat
     assert chat._AUTOMOD_MAX_CHARS <= 1000
+
+
+# ── the handler: the kys bit answers at him, and in a long message ───────────
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", [
+    pytest.param("dale kys", id="named"),
+    pytest.param("kill yourself dale", id="named-2"),
+    pytest.param("i want to kill myself", id="kill-myself"),
+    pytest.param(("blah " * 200) + "kys", id="past-the-scan-cap"),
+])
+async def test_the_kys_bit_answers_whoever_it_is_aimed_at(monkeypatch, text):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from ipedro.handlers import chat
+    from tests.test_addressed import _mention_rt
+    from tests.test_captcha_intercept import _msg
+
+    rt = _mention_rt(monkeypatch)
+    rt.chats.get_config.return_value.automod_enabled = True
+    router = chat.build_router(rt)
+    handler = next(h for h in router.observers["message"].handlers
+                   if h.callback.__name__ == "on_message")
+    msg = _msg(text=text)
+    msg.answer = AsyncMock(return_value=SimpleNamespace(message_id=9))
+    await handler.callback(msg)
+
+    said = [c.args[0] for c in msg.reply.await_args_list if c.args]
+    assert said and said[0] in _KYS_LINES, said
+    rt.openai.chat.assert_not_awaited()          # the bit, not an AI reply

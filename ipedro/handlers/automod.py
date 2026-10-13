@@ -13,9 +13,12 @@ from __future__ import annotations
 import random
 
 from ipedro.automod_types import DaleGif, MediaResponse
-from ipedro.handlers.automod_bits import _AUTOMOD_TRIGGERS
+from ipedro.handlers.automod_bits import _AUTOMOD_TRIGGERS, _KYS_LINES, _KYS_RE
 
-__all__ = ["DaleGif", "MediaResponse", "_AUTOMOD_TRIGGERS", "_automod_response"]
+__all__ = [
+    "DaleGif", "MediaResponse", "_AUTOMOD_TRIGGERS", "_automod_response",
+    "_kys_response",
+]
 
 
 def _automod_response(
@@ -40,3 +43,13 @@ def _automod_response(
                 return response
             return response if isinstance(response, str) else r.choice(response)
     return None
+
+
+def _kys_response(text: str | None, rng: random.Random | None = None) -> str | None:
+    """The kys deflection alone. Unlike the rest of the table it answers
+    anyone, however it was said: to the room or straight at the bot, in a
+    DM, anywhere in a long message. The caller asks this first, as the table
+    always did ("kys stays first")."""
+    if not text or not _KYS_RE.search(text):
+        return None
+    return (rng or random).choice(_KYS_LINES)

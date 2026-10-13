@@ -81,7 +81,7 @@ def test_long_pastas_fire_verbatim():
 # that phrase again. Adding a row without a sample fails the meta-test.
 
 _SAMPLES: dict[str, str] = {
-    r"\bkys\b|\b(kill|neck)\s*(your|ur|yr)\s*self\b": "kys",
+    r"\bkys\b|\b(kill|neck)\s*(your|my|ur|yr)\s*self\b": "kys",
     r"\bpocket\s*sand\b": "pocket sand",
     r"\bpropane\b": "propane",
     r"\bthat boy ain'?t right\b": "that boy ain't right",

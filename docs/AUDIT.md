@@ -14,15 +14,16 @@ and the `/evolve` pipeline. The previous audit (2026-07-02) is kept at the end.
   77 low), 25 split, 4
   refuted, 8 I checked by hand.
 - After removing duplicates (the same defect reported from two angles) that is
-  **150 real defects**. **142 are fixed** (3
-  of them only in part); **8 are left alone** on purpose and listed in
+  **150 real defects**. **141 are fixed** (3
+  of them only in part); **9 are left alone** on purpose and listed in
   section 4 for you to decide.
-- **Every high finding is fixed** (7 records, 5
+- **Every high finding is fixed, bar one you chose to keep** (7 records, 5
   distinct defects): a model-name prefix match sent a parameter the current
   Claude models reject, so *every reply failed silently*; `/fixname` let any
   chat member rewrite the bot's own notes (and so write into its prompt); the
   automod "kys" bit answered a sincere "I want to kill myself" with "skill
-  issue"; stored GIFs and videos could never be sent back; and the `/evolve`
+  issue" (a joke bit you wanted kept as it was, so it is back exactly as it
+  was); stored GIFs and videos could never be sent back; and the `/evolve`
   workflow could not run at all.
 - Tests: **1315 → 1901**, green on Python 3.11 and on 3.12
   (the version the image ships). The new ones pin each fix, and several were
@@ -139,6 +140,8 @@ In plain terms:
    `PGDATA_HOST_PATH` you set in `.env` was being ignored, and now isn't.
 
 **Decide** (left alone on purpose):
+- The automod `kys` bit answers "kill myself" too, aimed at the bot or not,
+  anywhere in a message. Restored at your request; it is your bit.
 - `/unquote` is open to every member (communal by design, tested). Say if you
   want it chat-admin only.
 - `/duckhunt` is public; summoning is now limited to 6 an hour each. A summon
@@ -178,7 +181,7 @@ audited commit.
 |--:|:--|:--|:--|:--|
 | 0 | High | confirmed 3/3 | /fixname is ungated: any chat member can rewrite every summary, fact and bot message in place, injecting arbitrary text into the stable system prefix (`utility.py:841`) | **Fixed**: Chat-admin only; the replacement must look like a name (short, no markup). |
 | 1 | High | confirmed 3/3 | Prefix match sends thinking:disabled to claude-opus-5-5 / claude-sonnet-5-5; the 400 is swallowed into a silent no-reply for every chat (`openai_client.py:166`) | **Fixed**: Thinking parameter chosen by exact model id; /ai_model probes a model before saving it. |
-| 2 | High | confirmed 3/3 | Automod 'kys' row answers a sincere first-person 'kill myself' with 'skill issue' / 'no u' (`automod.py:297`) | **Fixed**: The deflection is for the second-person insult only; a sincere first-person line gets no canned bit. |
+| 2 | High | confirmed 3/3 | Automod 'kys' row answers a sincere first-person 'kill myself' with 'skill issue' / 'no u' (`automod.py:297`) | **Left as it was (owner's call)**: I had narrowed the bit to the second-person insult; you asked for it back exactly as it was, so it is. |
 | 3 | High | checked by hand | thinking:{type:disabled} is sent to claude-sonnet-5-5 / claude-opus-5-5 by prefix match; every reply 400s and the bot goes silent (`openai_client.py:157`) | **Duplicate**: Same as #1. |
 | 4 | High | confirmed 3/3 | /fixname has no authorization: any member can whole-word-rewrite every summary, fact and bot message in the chat (`utility.py:841`) | **Duplicate**: Same as #0. |
 | 5 | High | confirmed 3/3 | Media library stores the thumbnail's file_id for GIFs/videos/animated stickers, so sending them back always fails (`media_library.py:89`) | **Fixed**: The original file id is stored, so GIFs, videos and animated stickers can be sent back. |

@@ -24,7 +24,7 @@ from ipedro.duckhunt.verdicts import parse_verdict
 from ipedro import dale_gifs as dale
 from ipedro.automod_media import fetch_automod_media
 from ipedro.handlers.automod import (
-    DaleGif, MediaResponse, _automod_response,
+    DaleGif, MediaResponse, _automod_response, _kys_response,
 )
 from ipedro.handlers.common import (
     catify, display_name, fallback_cat_fact, get_or_create_chat_config,
@@ -767,14 +767,15 @@ def build_router(rt: Runtime) -> Router:
         )
         # Scan only the start of the message: the table is for short chatter,
         # and every pattern runs on the event loop against member text.
-        automod = (
-            _automod_response(typed[:_AUTOMOD_MAX_CHARS], dale_gifs=ident.dale_flavor)
-            if (
-                cfg.automod_enabled and cfg.response_policy != "commands"
-                and not aimed_at_him
-            )
-            else None
-        )
+        # …except the kys bit, which has always answered anybody: aimed at
+        # him, in a DM, or buried in a long message.
+        automod = None
+        if cfg.automod_enabled and cfg.response_policy != "commands":
+            automod = _kys_response(typed)
+            if automod is None and not aimed_at_him:
+                automod = _automod_response(
+                    typed[:_AUTOMOD_MAX_CHARS], dale_gifs=ident.dale_flavor,
+                )
         if automod is not None:
             if isinstance(automod, MediaResponse):
                 await _reply_automod_media(msg, automod)
