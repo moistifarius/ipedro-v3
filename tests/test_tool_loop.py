@@ -282,6 +282,7 @@ async def test_the_owner_dm_reply_offers_the_cross_chat_tools(monkeypatch):
     kw = rt.openai.chat_with_tools.await_args.kwargs
     assert [t["name"] for t in kw["tools"]] == [
         "check_my_records", "list_my_chats", "check_my_health",
+        "pass_it_along",        # Dale only; see tests/test_relay.py
     ]
     assert "list_my_chats" in captured["capabilities"]
 

@@ -18,7 +18,12 @@ any change to them rebuilds everything, so a set that varied with the
 speaker would throw away a group chat's whole cache every time a
 different person talked.
 
-Everything here is read-only. Quoted chat text in a result is what
+Dale alone is also offered ``pass_it_along`` (ipedro/relay.py) in a chat
+that is tuned into the ether, and in the owner's DM. That one is not
+read-only, which is why it has its own module and its own limits; whether
+it is offered still depends only on the chat, never on who is speaking.
+
+Everything else here is read-only. Quoted chat text in a result is what
 people typed — data, not instructions — and the results say so, because
 a records tool is exactly where someone's planted message would surface.
 """
@@ -28,6 +33,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ipedro import relay
 from ipedro.logging_setup import recent_log_lines
 
 log = logging.getLogger(__name__)
@@ -37,7 +43,7 @@ log = logging.getLogger(__name__)
 # event type can't ship without the model being able to ask for it.
 ACTIVITY_EVENT_TYPES: tuple[str, ...] = (
     "ai_reply", "no_reply", "automod", "thanks_pedro",
-    "ambient_gif", "credit_line", "reaction",
+    "ambient_gif", "credit_line", "reaction", "relay", "relay_in",
 )
 
 _MAX_ROWS = 50
@@ -64,7 +70,9 @@ def _records_tool(*, cross_chat: bool) -> dict[str, Any]:
                 "Only this kind of entry: ai_reply (you answered), no_reply "
                 "(you let a message pass), reaction (you reacted with an "
                 "emoji), automod / thanks_pedro / credit_line (a stock "
-                "line), ambient_gif (a GIF of yourself)."
+                "line), ambient_gif (a GIF of yourself), relay (you passed "
+                "a message on to another chat), relay_in (one reached "
+                "this chat from another)."
             ),
         },
     }
@@ -150,16 +158,24 @@ def is_owner_dm(chat_id: int, chat_type: str, owner_id: int) -> bool:
     return chat_type == "private" and chat_id == owner_id
 
 
-def tools_for(*, owner_dm: bool) -> list[dict[str, Any]]:
+def tools_for(*, owner_dm: bool, relay_on: bool = False) -> list[dict[str, Any]]:
     """The tool definitions to offer. Deterministic per chat: same inputs
-    always produce byte-identical output, which caching depends on."""
+    always produce byte-identical output, which caching depends on.
+    `relay_on` appends pass_it_along; without it the list is exactly what
+    it always was."""
     if owner_dm:
-        return [_records_tool(cross_chat=True), _LIST_CHATS_TOOL, _HEALTH_TOOL]
-    return [_records_tool(cross_chat=False)]
+        tools = [_records_tool(cross_chat=True), _LIST_CHATS_TOOL, _HEALTH_TOOL]
+    else:
+        tools = [_records_tool(cross_chat=False)]
+    if relay_on:
+        tools.append(relay.tool())
+    return tools
 
 
-def tool_names(*, owner_dm: bool) -> frozenset[str]:
-    return frozenset(t["name"] for t in tools_for(owner_dm=owner_dm))
+def tool_names(*, owner_dm: bool, relay_on: bool = False) -> frozenset[str]:
+    return frozenset(
+        t["name"] for t in tools_for(owner_dm=owner_dm, relay_on=relay_on)
+    )
 
 
 def _clamp_limit(raw: Any) -> int:
@@ -264,14 +280,19 @@ def _check_health(args: dict) -> str:
 
 async def run_tool(
     rt, *, chat_id: int, owner_dm: bool, name: str, args: dict,
+    asker: relay.Asker | None = None,
 ) -> tuple[str, bool]:
     """Execute one tool call. Returns (result_text, is_error).
 
     Re-checks the name against what THIS chat was offered — a model that
-    names an owner-only tool in a group gets an error, not the data."""
-    if name not in tool_names(owner_dm=owner_dm):
+    names an owner-only tool in a group gets an error, not the data.
+    `asker` is who is speaking, built by the handler; it is also what says
+    the relay was offered at all."""
+    if name not in tool_names(owner_dm=owner_dm, relay_on=asker is not None):
         return f"No tool called {name!r} here.", True
     try:
+        if name == relay.TOOL_NAME:
+            return await relay.pass_it_along(rt, asker, args or {})
         if name == "check_my_records":
             return await _check_records(rt, chat_id, owner_dm, args or {}), False
         if name == "list_my_chats":

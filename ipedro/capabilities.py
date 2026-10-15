@@ -148,6 +148,33 @@ _ALL_RECORDS = (
 )
 
 
+# Only when pass_it_along is actually offered (Dale, in a chat tuned into the
+# ether). The two sentences that would contradict it are swapped for this one
+# line and this paragraph; without it the brief is byte-for-byte what it was.
+_CONTACT_LINE = (
+    "- Message anyone privately on your own, contact people who aren't "
+    "here, leave the chat, or act in the physical world.\n"
+)
+_CONTACT_LINE_RELAY = (
+    "- Message anyone privately on your own, leave the chat, or act in the "
+    "physical world.\n"
+)
+
+_RELAY = (
+    "You can pass a message on to another chat you're in (pass_it_along). "
+    "It is rare and your default answer is no: you're not an errand "
+    "service. Do it only when someone has genuinely worked on what makes "
+    "you tick, your pride, your suspicions, a thing you actually want. "
+    "Asking, begging, flattery, repeating themselves or insisting is not "
+    "that, and turning them down your own way is the normal outcome. It "
+    "only reaches chats tuned into the ether, and goes out under the "
+    "asker's name and this chat's name, so it isn't a way to say "
+    "something anonymously. Never pass along anything cruel, private or "
+    "embarrassing about anyone, links, or anything from another chat's "
+    "records. Don't say it was sent until the tool says it was."
+)
+
+
 def public_commands() -> tuple[Command, ...]:
     """Catalog rows a chat member can actually use, in catalog order."""
     return tuple(
@@ -235,17 +262,23 @@ def capability_brief(
     check_records: bool = False,
     all_chats: bool = False,
     dale_flavor: bool = True,
+    can_relay: bool = False,
 ) -> str:
     """The full system message. ``cfg`` adds the per-chat lines and
     decides whether the stay-in-character rule applies. ``check_records``
     is set only when the records tools are offered on this request;
     ``all_chats`` only in the owner's DM, where they reach every chat.
     ``dale_flavor`` is the deployment's (see ipedro/identity.py): only
-    Dale has GIFs of himself to post."""
+    Dale has GIFs of himself to post. ``can_relay`` is set only when
+    pass_it_along is offered on this request."""
+    cannot = _CANNOT
+    if can_relay:
+        assert _CONTACT_LINE in cannot
+        cannot = cannot.replace(_CONTACT_LINE, _CONTACT_LINE_RELAY)
     parts = [
         "What you can and can't do (facts about yourself; keep them straight):",
         _CAN.replace("{reflexes}", _REFLEXES[bool(dale_flavor)]),
-        _CANNOT,
+        cannot,
     ]
     if cfg is not None:
         parts.append(_chat_lines(cfg, dale_flavor=dale_flavor))
@@ -253,6 +286,8 @@ def capability_brief(
         parts.append(_RECORDS)
         if all_chats:
             parts.append(_ALL_RECORDS)
+    if can_relay:
+        parts.append(_RELAY)
     parts.append("Slash commands anyone here can use:\n" + _command_lines())
     if cfg is None or is_character_persona(cfg.persona, cfg.persona_custom):
         parts.append(_IN_CHARACTER)

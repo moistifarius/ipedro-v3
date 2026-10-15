@@ -13,7 +13,9 @@ from datetime import datetime, timezone
 from aiogram import F, Router
 from aiogram.types import BufferedInputFile, Message, ReactionTypeEmoji
 
-from ipedro import addressed, identity, introspection, media_library, vision
+from ipedro import (
+    addressed, identity, introspection, media_library, relay, vision,
+)
 from ipedro.bot_messages import track
 from ipedro.capabilities import capability_brief
 from ipedro.chat_policy import IncomingMessage, should_respond
@@ -1098,6 +1100,24 @@ def build_router(rt: Runtime) -> Router:
         owner_dm = tools_on and introspection.is_owner_dm(
             msg.chat.id, msg.chat.type, rt.settings.owner_id,
         )
+        # Dale alone may pass a message on to another chat, and only from a
+        # chat tuned into the ether or the owner's DM. Decided by the chat,
+        # like the rest of the tool set, so it never varies by speaker.
+        asker = (
+            relay.Asker(
+                chat_id=msg.chat.id, chat_type=msg.chat.type,
+                chat_title=getattr(msg.chat, "title", None),
+                user_id=from_user_id,
+                user_name=display_name(msg.from_user) if msg.from_user else "",
+            )
+            if tools_on and ident.dale_flavor and (
+                owner_dm or (
+                    msg.chat.type in ("group", "supergroup")
+                    and getattr(cfg, "ether_enabled", False)
+                )
+            )
+            else None
+        )
 
         ctx = await build_context(
             store=rt.memory,
@@ -1114,7 +1134,7 @@ def build_router(rt: Runtime) -> Router:
             persona_override=persona_override,
             capabilities=capability_brief(
                 cfg, check_records=tools_on, all_chats=owner_dm,
-                dale_flavor=ident.dale_flavor,
+                dale_flavor=ident.dale_flavor, can_relay=asker is not None,
             ),
             terse=ident.terse,
         )
@@ -1130,12 +1150,14 @@ def build_router(rt: Runtime) -> Router:
             async def _run_tool(name: str, args: dict) -> tuple[str, bool]:
                 return await introspection.run_tool(
                     rt, chat_id=msg.chat.id, owner_dm=owner_dm,
-                    name=name, args=args,
+                    name=name, args=args, asker=asker,
                 )
 
             reply = await rt.openai.chat_with_tools(
                 ctx.messages,
-                tools=introspection.tools_for(owner_dm=owner_dm),
+                tools=introspection.tools_for(
+                    owner_dm=owner_dm, relay_on=asker is not None,
+                ),
                 run_tool=_run_tool, max_tokens=ident.reply_tokens,
                 chat_id=msg.chat.id,
             )
