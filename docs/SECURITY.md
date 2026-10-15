@@ -36,6 +36,17 @@ remembered fact, a recalled message, an impersonation request. So:
   never used, because the new bot speaks in groups.
 - `/confess` posts go to groups only, never into someone's DM.
 
+## Dale passing a message to another chat
+
+`pass_it_along` (ipedro/relay.py) is the one place text typed in one chat is
+posted into another by the bot. Whether Dale does it is persona and can be
+talked around, so the rules are code: both chats opted in through the ether,
+the destination a group he can post in and named by title with exactly one
+match (no listing of other chats), the message signed with the asker's name and
+chat, 500 characters, no links or @-pings, and per-person, per-chat and
+per-destination hourly limits. Only Dale is offered the tool. The record of it
+is in both chats' activity logs.
+
 ## Spend
 
 Each person gets a per-hour allowance of the commands that cost real money

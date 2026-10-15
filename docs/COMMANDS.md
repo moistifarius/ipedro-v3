@@ -74,7 +74,7 @@ bot's admin user. Switches take `on` or `off` (also `yes`/`no`,
 | `automod` | `on` / `off` — the canned copypasta / meme bits |
 | `voice` | `on` / `off` — transcribe inbound voice notes |
 | `memory` | `on` / `off` — store messages and build context from history |
-| `ether` | `on` / `off` — make this chat reachable as a destination for `/ether` radio transmissions sent from other ether-enabled chats. Off by default. Needs ≥ 2 chats opted in for a transmission to have anywhere to land. |
+| `ether` | `on` / `off` — make this chat reachable as a destination for `/ether` radio transmissions sent from other ether-enabled chats. Off by default. Needs ≥ 2 chats opted in for a transmission to have anywhere to land. Also what lets Dale pass a message to or from this chat (see "Dale passing a message on"). |
 | `ducknames` | `on` / `off` — include this chat's named befriended ducks in the global `/ducknames` listing. Default `on`. Turn off if you want your roster private (your in-chat `/duckfriends` and `/duckstats` still work either way). |
 
 **Long personas:** `/chat_config persona <name> setfile` — send a `.txt`
@@ -138,6 +138,27 @@ intensity — biased heavy, so it always sounds like genuine DX — and a
 rare one barely punches through at all. If TTS or the audio toolchain
 (ffmpeg) is unavailable, a text `/ether` falls back to a garbled text
 broadcast. Requires another chat to have `ether` enabled.
+
+### Dale passing a message on
+
+Not a command: something Dale decides. In a chat tuned into the ether, or in
+the owner's DM, he has a tool (`pass_it_along`) that posts a message into
+another chat. His default answer is no; he does it only when someone has
+really worked on what makes him tick, and begging, flattery or insisting
+doesn't count. What the code enforces whatever he decides:
+
+- Both chats must have `ether` on. The destination must be a group (never a
+  DM), not set to commands-only, and not silenced; it is found by its name, and
+  only if exactly one chat matches.
+- It goes out signed: `<name>, over in <chat>, had me pass this along:` and
+  then the message. So it is never anonymous, and never in someone else's voice.
+- At most 500 characters, no links, no @-mentions. Each person can get two
+  through an hour (bot admins aren't limited), each chat three, and each
+  destination takes two.
+- The destination's memory records it as something he said, and both chats'
+  records show it (`relay` / `relay_in` in what he can look up about himself).
+
+Only Dale is offered it; other bots made with `/newbot` never are.
 
 ### Duckhunt
 
