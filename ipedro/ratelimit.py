@@ -51,13 +51,25 @@ class Limiter:
         hits = self._hits.setdefault(key, deque())
         while hits and now - hits[0] >= window:
             hits.popleft()
+        if len(hits) >= limit:
+            wait = max(0.0, window - (now - hits[0]))
+        else:
+            hits.append(now)
+            wait = 0.0
+        # After recording, not before: the sweep drops keys with nothing live,
+        # and run first it dropped the very key being checked, so every
+        # 500th use of an idle key was never counted.
         self._calls += 1
         if self._calls % 500 == 0:
             self._forget_idle(now, window)
-        if len(hits) >= limit:
-            return max(0.0, window - (now - hits[0]))
-        hits.append(now)
-        return 0.0
+        return wait
+
+    def refund(self, key: Hashable) -> None:
+        """Give back the most recent use of `key` (an attempt that turned
+        out not to happen)."""
+        hits = self._hits.get(key)
+        if hits:
+            hits.pop()
 
     def _forget_idle(self, now: float, window: float) -> None:
         for key in [k for k, h in self._hits.items() if not h or now - h[-1] >= window]:
@@ -84,9 +96,7 @@ def wait_for(kind: str, user_id: int, chat_id: int | None = None) -> float:
         if chat_wait:
             # Their personal slot was already taken above; give it back so a
             # chat-wide refusal doesn't also burn the individual's budget.
-            hits = LIMITER._hits.get((kind, "user", user_id))
-            if hits:
-                hits.pop()
+            LIMITER.refund((kind, "user", user_id))
             return chat_wait
     return 0.0
 

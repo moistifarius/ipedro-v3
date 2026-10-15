@@ -1102,15 +1102,20 @@ def build_router(rt: Runtime) -> Router:
         )
         # Dale alone may pass a message on to another chat, and only from a
         # chat tuned into the ether or the owner's DM. Decided by the chat,
-        # like the rest of the tool set, so it never varies by speaker.
+        # like the rest of the tool set, so it never varies by speaker. Not
+        # for an anonymous admin or a channel posting as itself: there is no
+        # one to sign it with or to hold to a limit.
+        sender = msg.from_user
         asker = (
             relay.Asker(
                 chat_id=msg.chat.id, chat_type=msg.chat.type,
                 chat_title=getattr(msg.chat, "title", None),
-                user_id=from_user_id,
-                user_name=display_name(msg.from_user) if msg.from_user else "",
+                user_id=from_user_id, user_name=display_name(sender),
             )
-            if tools_on and ident.dale_flavor and (
+            if tools_on and ident.dale_flavor
+            and sender is not None and not sender.is_bot
+            and getattr(msg, "sender_chat", None) is None
+            and (
                 owner_dm or (
                     msg.chat.type in ("group", "supergroup")
                     and getattr(cfg, "ether_enabled", False)
@@ -1146,12 +1151,24 @@ def build_router(rt: Runtime) -> Router:
         # it never posts stopping mid-word. Dale's is 400; any other bot's is
         # tighter (ident.reply_tokens), because its character sheet is what
         # makes replies long.
+        relayed = False
         if tools_on:
             async def _run_tool(name: str, args: dict) -> tuple[str, bool]:
-                return await introspection.run_tool(
+                nonlocal relayed
+                # One per reply: a single model turn can name the tool
+                # several times, and each is a message into someone's chat.
+                if name == relay.TOOL_NAME and relayed:
+                    return (
+                        "You've already passed one along this turn. Nothing "
+                        "more was sent.", True,
+                    )
+                text, is_error = await introspection.run_tool(
                     rt, chat_id=msg.chat.id, owner_dm=owner_dm,
                     name=name, args=args, asker=asker,
                 )
+                if name == relay.TOOL_NAME and not is_error:
+                    relayed = True
+                return text, is_error
 
             reply = await rt.openai.chat_with_tools(
                 ctx.messages,
@@ -1165,6 +1182,11 @@ def build_router(rt: Runtime) -> Router:
             reply = await rt.openai.chat(
                 ctx.messages, max_tokens=ident.reply_tokens, chat_id=msg.chat.id,
             )
+        if not reply and relayed:
+            # The message went out, then the model's last round failed or was
+            # withheld. Say so rather than leave the asker with silence (and
+            # a second attempt, and a second message in someone's chat).
+            reply = "Done."
         if not reply:
             # He meant to answer and couldn't (the model errored or sent
             # nothing). Say so in the activity log: otherwise "why didn't

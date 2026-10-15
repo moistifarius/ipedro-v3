@@ -43,8 +43,12 @@ log = logging.getLogger(__name__)
 # event type can't ship without the model being able to ask for it.
 ACTIVITY_EVENT_TYPES: tuple[str, ...] = (
     "ai_reply", "no_reply", "automod", "thanks_pedro",
-    "ambient_gif", "credit_line", "reaction", "relay", "relay_in",
+    "ambient_gif", "credit_line", "reaction",
 )
+# What check_my_records can also be asked for when pass_it_along is offered.
+# Kept apart so a chat that isn't offered it is sent the tool definition it
+# always had, byte for byte.
+RELAY_EVENT_TYPES: tuple[str, ...] = (relay.EVENT_SENT, relay.EVENT_RECEIVED)
 
 _MAX_ROWS = 50
 _DEFAULT_ROWS = 20
@@ -55,7 +59,7 @@ _DATA_NOT_INSTRUCTIONS = (
 )
 
 
-def _records_tool(*, cross_chat: bool) -> dict[str, Any]:
+def _records_tool(*, cross_chat: bool, relay_on: bool = False) -> dict[str, Any]:
     properties: dict[str, Any] = {
         "limit": {
             "type": "integer",
@@ -70,12 +74,18 @@ def _records_tool(*, cross_chat: bool) -> dict[str, Any]:
                 "Only this kind of entry: ai_reply (you answered), no_reply "
                 "(you let a message pass), reaction (you reacted with an "
                 "emoji), automod / thanks_pedro / credit_line (a stock "
-                "line), ambient_gif (a GIF of yourself), relay (you passed "
-                "a message on to another chat), relay_in (one reached "
-                "this chat from another)."
+                "line), ambient_gif (a GIF of yourself)."
             ),
         },
     }
+    if relay_on:
+        kinds = properties["event_type"]
+        kinds["enum"] = list(ACTIVITY_EVENT_TYPES + RELAY_EVENT_TYPES)
+        kinds["description"] = kinds["description"][:-1] + (
+            f", {relay.EVENT_SENT} (you passed a message on to another "
+            f"chat), {relay.EVENT_RECEIVED} (one reached this chat from "
+            f"another)."
+        )
     if cross_chat:
         properties["chat"] = {
             "type": "string",
@@ -164,9 +174,12 @@ def tools_for(*, owner_dm: bool, relay_on: bool = False) -> list[dict[str, Any]]
     `relay_on` appends pass_it_along; without it the list is exactly what
     it always was."""
     if owner_dm:
-        tools = [_records_tool(cross_chat=True), _LIST_CHATS_TOOL, _HEALTH_TOOL]
+        tools = [
+            _records_tool(cross_chat=True, relay_on=relay_on),
+            _LIST_CHATS_TOOL, _HEALTH_TOOL,
+        ]
     else:
-        tools = [_records_tool(cross_chat=False)]
+        tools = [_records_tool(cross_chat=False, relay_on=relay_on)]
     if relay_on:
         tools.append(relay.tool())
     return tools
@@ -213,10 +226,13 @@ async def _resolve_chat(rt, raw: str) -> tuple[int | None, str | None]:
     return rows[0]["chat_id"], None
 
 
-async def _check_records(rt, chat_id: int, owner_dm: bool, args: dict) -> str:
+async def _check_records(
+    rt, chat_id: int, owner_dm: bool, args: dict, *, relay_on: bool = False,
+) -> str:
     limit = _clamp_limit(args.get("limit", _DEFAULT_ROWS))
     event_type = args.get("event_type")
-    if event_type not in ACTIVITY_EVENT_TYPES:
+    askable = ACTIVITY_EVENT_TYPES + (RELAY_EVENT_TYPES if relay_on else ())
+    if event_type not in askable:
         event_type = None
 
     target: int | None = chat_id
@@ -294,12 +310,20 @@ async def run_tool(
         if name == relay.TOOL_NAME:
             return await relay.pass_it_along(rt, asker, args or {})
         if name == "check_my_records":
-            return await _check_records(rt, chat_id, owner_dm, args or {}), False
+            return await _check_records(
+                rt, chat_id, owner_dm, args or {},
+                relay_on=asker is not None,
+            ), False
         if name == "list_my_chats":
             return await _list_chats(rt), False
         if name == "check_my_health":
             return _check_health(args or {}), False
     except Exception as exc:
         log.warning("tool %s failed in %s: %s", name, chat_id, exc)
+        if name == relay.TOOL_NAME:
+            return (
+                "Something went wrong, and it may not have gone through. "
+                "Don't say it was sent.", True,
+            )
         return "Couldn't get at your records just now.", True
     return f"No tool called {name!r} here.", True

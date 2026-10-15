@@ -43,9 +43,11 @@ posted into another by the bot. Whether Dale does it is persona and can be
 talked around, so the rules are code: both chats opted in through the ether,
 the destination a group he can post in and named by title with exactly one
 match (no listing of other chats), the message signed with the asker's name and
-chat, 500 characters, no links or @-pings, and per-person, per-chat and
-per-destination hourly limits. Only Dale is offered the tool. The record of it
-is in both chats' activity logs.
+chat (scrubbed like the message: no links, @-pings or leading slash; nothing for
+an anonymous admin or a channel), 500 characters (refused, not cut), no links,
+@-mentions or /commands, and per-person, per-chat and per-destination hourly
+limits (bot admins are exempt from the per-person one only). Only Dale is
+offered the tool. The record of it is in both chats' activity logs.
 
 ## Spend
 

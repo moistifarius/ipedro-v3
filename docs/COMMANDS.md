@@ -152,9 +152,10 @@ doesn't count. What the code enforces whatever he decides:
   only if exactly one chat matches.
 - It goes out signed: `<name>, over in <chat>, had me pass this along:` and
   then the message. So it is never anonymous, and never in someone else's voice.
-- At most 500 characters, no links, no @-mentions. Each person can get two
-  through an hour (bot admins aren't limited), each chat three, and each
-  destination takes two.
+- At most 500 characters (longer is refused, not cut), and no links, @-mentions
+  or /commands. Each person can get two through an hour (bot admins aren't held
+  to that one), each chat three, and each destination takes two. A refused
+  attempt doesn't use up anyone's allowance. One per reply.
 - The destination's memory records it as something he said, and both chats'
   records show it (`relay` / `relay_in` in what he can look up about himself).
 
