@@ -211,18 +211,26 @@ stuck challenge with `/debug_clear_challenge [chat_id]`.
 A challenge is a race. While someone is working on theirs, **anyone else can
 reply to that challenge message with the answer** and, if they are first and
 right, they take the duck: it is theirs (a befriend, no dice), they get the
-point, the naming prompt, and the owner's challenge is gone. The owner is
-gated, so they can't answer for it meanwhile.
+point and the naming prompt, and the owner's challenge is gone. The owner is
+gated, so they can't take it themselves meanwhile.
 
 - Only a **reply** to the prompt counts for anyone but its owner. Other chat is
   never judged as somebody's answer.
+- Judged **strictly**: the owner's retry is judged generously ("close enough"),
+  but a duck is the prize here, so a near miss or a list of guesses doesn't
+  win it. A wrong answer gets a plain "Not quite." and never a hint.
 - It has to be the duck the challenge was issued over (a duck that has arrived
-  since isn't), never a boss, and only while the owner's clock is running.
+  since isn't; a challenge forced by an admin has none), never a boss, and only
+  while the owner's clock is running.
+- **First means first to arrive.** Answers to one challenge are judged one at a
+  time in the order they came in, so a slow model call can't let a later answer
+  win. The owner answering at the same moment as a thief has exactly one
+  winner; the other is told they were too late.
 - Taking a duck is a duck action: if you have a challenge of your own you clear
-  that first, and the usual action cooldown applies.
-- Three tries each per challenge; a wrong answer costs only the try.
-- First correct answer wins: the challenge is claimed in one database step, so
-  the owner answering and a thief answering at the same moment can't both win.
+  that first (one that has run out of time no longer counts), and the usual
+  action cooldown applies.
+- Three tries each per challenge; a wrong answer costs only the try, and so
+  does a judge that couldn't answer.
 
 Ducks may also wander off on their own at any time — more likely as they
 hang around longer, and almost certainly gone after a day.

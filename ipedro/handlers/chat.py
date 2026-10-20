@@ -26,7 +26,9 @@ from ipedro.automod_media import fetch_automod_media
 from ipedro.handlers.automod import (
     DaleGif, MediaResponse, _automod_response, _kys_response,
 )
-from ipedro.handlers.duckhunt import attempt_steal, judge_challenge
+from ipedro.handlers.duckhunt import (
+    attempt_steal, challenge_lock, judge_challenge,
+)
 from ipedro.handlers.common import (
     catify, display_name, fallback_cat_fact, get_or_create_chat_config,
     over_limit,
@@ -609,24 +611,37 @@ def build_router(rt: Runtime) -> Router:
                     )
                     await msg.reply(over_time_line(), disable_notification=True)
                     return
-                if debug_is_on(admin_id, "always_pass_challenge"):
-                    verdict = True
-                    line = "Passed. [debug: always_pass_challenge]"
-                elif debug_is_on(admin_id, "always_fail_challenge"):
-                    verdict = False
-                    line = "Failed. [debug: always_fail_challenge]"
-                else:
-                    verdict, line = await judge_challenge(rt, challenge, answer)
-                log.info(
-                    "bef challenge judge: chat=%s user=%s kind=%s verdict=%s",
-                    msg.chat.id, msg.from_user.id, challenge.kind, verdict,
-                )
-                if verdict is True:
-                    await rt.duckhunt.clear_bef_challenge(
-                        msg.chat.id, msg.from_user.id,
+                # In arrival order against anyone trying to take the duck this
+                # challenge was issued over (challenge_lock): the answer that
+                # came first is judged first and, if right, claims it.
+                claimed = False
+                async with challenge_lock(msg.chat.id, msg.from_user.id):
+                    if debug_is_on(admin_id, "always_pass_challenge"):
+                        verdict = True
+                        line = "Passed. [debug: always_pass_challenge]"
+                    elif debug_is_on(admin_id, "always_fail_challenge"):
+                        verdict = False
+                        line = "Failed. [debug: always_fail_challenge]"
+                    else:
+                        verdict, line = await judge_challenge(rt, challenge, answer)
+                    log.info(
+                        "bef challenge judge: chat=%s user=%s kind=%s verdict=%s",
+                        msg.chat.id, msg.from_user.id, challenge.kind, verdict,
                     )
+                    if verdict is True:
+                        claimed = await rt.duckhunt.claim_bef_challenge(
+                            msg.chat.id, msg.from_user.id,
+                            challenge.prompt_message_id,
+                        )
+                if verdict is True and claimed:
                     await msg.reply(
                         line or "OK, you may try `bef` again.",
+                        disable_notification=True,
+                    )
+                elif verdict is True:
+                    # Somebody answered it first and took the duck with it.
+                    await msg.reply(
+                        "Too late: that one was taken.",
                         disable_notification=True,
                     )
                 else:

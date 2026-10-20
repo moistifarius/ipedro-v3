@@ -42,6 +42,7 @@ class PendingBefChallenge:
     kind: str
     prompt_message_id: int | None
     created_at: datetime
+    duck_id: int | None = None      # the duck it was issued over; None: none
 
 
 @dataclass
@@ -629,22 +630,15 @@ class DuckhuntService:
         self, challenge: PendingBefChallenge,
     ) -> ActiveDuck | None:
         """The duck this challenge was issued over, if it is still there to be
-        taken. A challenge is posted while a duck is in the chat, so the duck
-        it belongs to is the one that spawned before it; a duck that arrived
-        after is a different one and is not up for grabs through it. A boss
-        can't be befriended, so it can't be stolen either."""
-        duck = await self.active_duck(challenge.chat_id)
-        if duck is None or duck.is_boss:
+        taken. A challenge records the duck it was issued over; a duck that
+        spawned since is a different one, and a challenge with no duck on it
+        (an admin's forced one, or one from before this existed) has nothing
+        to steal. A boss can't be befriended, so it can't be stolen either."""
+        if challenge.duck_id is None:
             return None
-        issued = challenge.created_at
-        if issued is not None:
-            if issued.tzinfo is None:
-                issued = issued.replace(tzinfo=timezone.utc)
-            spawned = duck.spawned_at
-            if spawned.tzinfo is None:
-                spawned = spawned.replace(tzinfo=timezone.utc)
-            if spawned > issued:
-                return None
+        duck = await self.active_duck(challenge.chat_id)
+        if duck is None or duck.is_boss or duck.id != challenge.duck_id:
+            return None
         return duck
 
     async def handle_steal(
@@ -654,16 +648,20 @@ class DuckhuntService:
         """Someone other than the challenge's owner answered it correctly.
         If they are first, the duck the owner was working on is theirs.
 
-        First means first to take the challenge off the table
-        (claim_bef_challenge is one DELETE, so exactly one caller gets it),
-        then first to resolve the duck (the same row-level guard every bang
-        and bef uses). The owner clearing their own challenge, a second
-        thief, or a bang landing meanwhile each lose cleanly."""
+        The duck is claimed FIRST, by the row-level guard every bang and bef
+        uses, and the owner's challenge is cleared only once the duck is
+        really the thief's. The other order destroyed a challenge for nothing
+        whenever a bang or bef landed in between, leaving its owner un-gated.
+        Who is first between the owner and a thief is decided before this,
+        by arrival order (handlers.duckhunt.challenge_lock); the check here is
+        that the challenge is still the one that was answered."""
         duck = await self.stealable_duck(challenge)
         if duck is None:
             return StealResult("no_duck")
-        if not await self.claim_bef_challenge(
-            challenge.chat_id, challenge.user_id, challenge.prompt_message_id,
+        current = await self.get_bef_challenge(challenge.chat_id, challenge.user_id)
+        if (
+            current is None
+            or current.prompt_message_id != challenge.prompt_message_id
         ):
             return StealResult("too_late")
         outcome = bef_success_outcome(duck.rarity, ai_line)
@@ -671,6 +669,9 @@ class DuckhuntService:
             duck.id, thief_id, "bef", outcome.points_delta,
         ):
             return StealResult("no_duck")
+        await self.claim_bef_challenge(
+            challenge.chat_id, challenge.user_id, challenge.prompt_message_id,
+        )
         await self._bump_stats(
             challenge.chat_id, thief_id, thief_name, "bef", outcome,
         )
@@ -681,7 +682,8 @@ class DuckhuntService:
         self, chat_id: int, user_id: int,
     ) -> PendingBefChallenge | None:
         row = await self.db.fetchrow(
-            "SELECT chat_id, user_id, challenge, kind, prompt_message_id, created_at "
+            "SELECT chat_id, user_id, challenge, kind, prompt_message_id, "
+            "       created_at, duck_id "
             "  FROM bef_challenges WHERE chat_id = $1 AND user_id = $2",
             chat_id, user_id,
         )
@@ -689,20 +691,21 @@ class DuckhuntService:
 
     async def set_bef_challenge(
         self, chat_id: int, user_id: int, challenge: str, kind: str,
-        prompt_message_id: int | None,
+        prompt_message_id: int | None, duck_id: int | None = None,
     ) -> None:
         await self.db.execute(
             """
             INSERT INTO bef_challenges (chat_id, user_id, challenge, kind,
-                                        prompt_message_id, created_at)
-            VALUES ($1, $2, $3, $4, $5, NOW())
+                                        prompt_message_id, created_at, duck_id)
+            VALUES ($1, $2, $3, $4, $5, NOW(), $6)
             ON CONFLICT (chat_id, user_id) DO UPDATE SET
                 challenge = EXCLUDED.challenge,
                 kind = EXCLUDED.kind,
                 prompt_message_id = EXCLUDED.prompt_message_id,
-                created_at = NOW()
+                created_at = NOW(),
+                duck_id = EXCLUDED.duck_id
             """,
-            chat_id, user_id, challenge, kind, prompt_message_id,
+            chat_id, user_id, challenge, kind, prompt_message_id, duck_id,
         )
 
     async def clear_bef_challenge(self, chat_id: int, user_id: int) -> None:
@@ -746,7 +749,8 @@ class DuckhuntService:
         self, chat_id: int, prompt_message_id: int,
     ) -> PendingBefChallenge | None:
         row = await self.db.fetchrow(
-            "SELECT chat_id, user_id, challenge, kind, prompt_message_id, created_at "
+            "SELECT chat_id, user_id, challenge, kind, prompt_message_id, "
+            "       created_at, duck_id "
             "  FROM bef_challenges "
             " WHERE chat_id = $1 AND prompt_message_id = $2",
             chat_id, prompt_message_id,

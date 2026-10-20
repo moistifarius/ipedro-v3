@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
 import time
+import weakref
 from collections import deque
 
 from aiogram import F, Router
@@ -24,7 +26,7 @@ from ipedro.duckhunt.verdicts import parse_verdict
 from ipedro.handlers.common import display_name, get_or_create_chat_config, over_limit
 from ipedro.prompts import (
     DUCK_BEF_CHALLENGE_JUDGE_PROMPT, DUCK_BEF_CHALLENGE_PROMPT,
-    DUCK_BEF_DECIDE_PROMPT,
+    DUCK_BEF_DECIDE_PROMPT, DUCK_STEAL_JUDGE_PROMPT,
 )
 from ipedro.runtime import Runtime
 from ipedro.user_flags import has_flag
@@ -287,8 +289,13 @@ async def _issue_bef_challenge(
     rt: Runtime, msg: Message, who: str, *,
     from_action: str = "bef",
     force_kind: str | None = None,
+    duck_id: int | None = None,
 ) -> bool:
     """Generate a captcha/trivia/recipe challenge and store it as pending.
+
+    ``duck_id`` is the duck it is issued over: it is what lets another
+    player who answers first take that duck (see attempt_steal). Left out,
+    as the admin's forced challenges do, the challenge has nothing to steal.
 
     Captcha is a real image captcha rendered server-side; the stored
     `challenge` text IS the answer (judged by exact match later). Trivia
@@ -319,6 +326,7 @@ async def _issue_bef_challenge(
             return False
         await rt.duckhunt.set_bef_challenge(
             msg.chat.id, msg.from_user.id, answer, kind, prompt_msg.message_id,
+            duck_id=duck_id,
         )
         return True
 
@@ -348,29 +356,52 @@ async def _issue_bef_challenge(
     )
     await rt.duckhunt.set_bef_challenge(
         msg.chat.id, msg.from_user.id, challenge_text, kind,
-        prompt_msg.message_id,
+        prompt_msg.message_id, duck_id=duck_id,
     )
     return True
 
 
 async def judge_challenge(
-    rt: Runtime, challenge, answer: str,
+    rt: Runtime, challenge, answer: str, *, strict: bool = False,
 ) -> tuple[bool | None, str | None]:
     """Is `answer` right for this challenge? (verdict, optional flavor line).
-    A captcha is an exact match; trivia and recipe go to the cheap model,
-    and a verdict of None means it couldn't say."""
+    A captcha is an exact match; trivia and recipe go to the cheap model, and
+    a verdict of None means it couldn't say. The owner clearing their own
+    gate is judged generously; `strict` is for taking someone else's duck."""
     if challenge.kind == "captcha":
         return captcha_matches(challenge.challenge, answer), None
+    prompt = DUCK_STEAL_JUDGE_PROMPT if strict else DUCK_BEF_CHALLENGE_JUDGE_PROMPT
     ai_text = await rt.openai.cheap_chat(
         [{
             "role": "user",
-            "content": DUCK_BEF_CHALLENGE_JUDGE_PROMPT.format(
+            "content": prompt.format(
                 challenge=challenge.challenge, answer=answer,
             ),
         }],
         max_tokens=120, temperature=1.0,
     )
     return parse_verdict(ai_text, "PASS", "FAIL")
+
+
+# One at a time per challenge, in the order the answers ARRIVED. Judging takes
+# a model call of a second or two, so without this the winner was whichever
+# judge call happened to finish first: an owner who answered first could lose
+# to a thief whose answer was judged quicker. Both the owner's own path
+# (handlers/chat.py) and attempt_steal hold this around judge-then-claim;
+# asyncio.Lock wakes its waiters in order. Weakly held, so an idle challenge's
+# lock goes away on its own.
+_challenge_locks: "weakref.WeakValueDictionary[tuple[int, int], asyncio.Lock]" = (
+    weakref.WeakValueDictionary()
+)
+
+
+def challenge_lock(chat_id: int, owner_id: int) -> asyncio.Lock:
+    key = (chat_id, owner_id)
+    lock = _challenge_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _challenge_locks[key] = lock
+    return lock
 
 
 # ── stealing a duck by answering someone else's challenge ────────────────────
@@ -400,6 +431,12 @@ def _spend_steal_try(chat_id: int, prompt_id: int | None, user_id: int) -> bool:
         return False
     _steal_tries[key] = used + 1
     return True
+
+
+def _refund_steal_try(chat_id: int, prompt_id: int | None, user_id: int) -> None:
+    key = (chat_id, prompt_id or 0, user_id)
+    if _steal_tries.get(key):
+        _steal_tries[key] -= 1
 
 
 async def _name_of(rt: Runtime, user_id: int) -> str:
@@ -432,12 +469,17 @@ async def attempt_steal(rt: Runtime, msg: Message, challenge) -> bool:
         return False
 
     # Taking a duck is a duck action: the same gate and the same cooldown.
-    if await rt.duckhunt.get_bef_challenge(chat_id, thief.id) is not None:
-        await msg.reply(
-            "Solve your own challenge first (reply to the prompt above).",
-            disable_notification=True,
-        )
-        return True
+    # A challenge of their own that has already run out of time is no gate.
+    own = await rt.duckhunt.get_bef_challenge(chat_id, thief.id)
+    if own is not None:
+        if challenge_is_over_time(own.kind, own.created_at):
+            await rt.duckhunt.clear_bef_challenge(chat_id, thief.id)
+        else:
+            await msg.reply(
+                "Solve your own challenge first (reply to the prompt above).",
+                disable_notification=True,
+            )
+            return True
     if not debug_is_on(thief.id, "bypass_cooldowns") and not await rt.duckhunt.cooldown_ok(
         chat_id, thief.id, rt.settings.duckhunt_action_cooldown_seconds,
     ):
@@ -450,23 +492,42 @@ async def attempt_steal(rt: Runtime, msg: Message, challenge) -> bool:
         return True
 
     answer = (msg.text or msg.caption or "").strip()
-    verdict, line = await judge_challenge(rt, challenge, answer)
-    if verdict is None:
-        await msg.reply(
-            "Couldn't judge that one. Try again.", disable_notification=True,
+    async with challenge_lock(chat_id, challenge.user_id):
+        # Whoever got here first has been judged first. If that settled it
+        # (the owner passed, or another thief won), or the clock ran out
+        # while this waited, there is nothing left to take.
+        if challenge_is_over_time(challenge.kind, challenge.created_at):
+            _refund_steal_try(chat_id, challenge.prompt_message_id, thief.id)
+            return False
+        current = await rt.duckhunt.get_bef_challenge(chat_id, challenge.user_id)
+        if (
+            current is None
+            or current.prompt_message_id != challenge.prompt_message_id
+        ):
+            _refund_steal_try(chat_id, challenge.prompt_message_id, thief.id)
+            await msg.reply(
+                "Too late: that challenge is already closed.",
+                disable_notification=True,
+            )
+            return True
+        verdict, _ = await judge_challenge(rt, challenge, answer, strict=True)
+        if verdict is None:
+            _refund_steal_try(chat_id, challenge.prompt_message_id, thief.id)
+            await msg.reply(
+                "Couldn't judge that one. Try again.", disable_notification=True,
+            )
+            return True
+        if verdict is False:
+            # Not the judge's own line: it is read by everyone still racing.
+            await msg.reply("Not quite.", disable_notification=True)
+            return True
+        who = display_name(thief)
+        result = await rt.duckhunt.handle_steal(
+            challenge=challenge, thief_id=thief.id, thief_name=who, ai_line=None,
         )
-        return True
-    if verdict is False:
-        await msg.reply(line or "Not quite.", disable_notification=True)
-        return True
-
-    who = display_name(thief)
-    result = await rt.duckhunt.handle_steal(
-        challenge=challenge, thief_id=thief.id, thief_name=who, ai_line=None,
-    )
     if result.status == "too_late":
         await msg.reply(
-            "Too late: that one's already been taken.",
+            "Too late: that challenge is already closed.",
             disable_notification=True,
         )
         return True
@@ -752,13 +813,13 @@ def build_router(rt: Runtime) -> Router:
                 forced = True
             elif debug_is_on(admin_id, "always_miss"):
                 forced = False
-            outcome, _ = await rt.duckhunt.handle_bang(
+            outcome, shot_at = await rt.duckhunt.handle_bang(
                 chat_id=msg.chat.id, user_id=msg.from_user.id,
                 display_name=display_name(msg.from_user),
                 forced_success=forced,
             )
         else:
-            outcome, _ = await rt.duckhunt.handle_ignore(
+            outcome, shot_at = await rt.duckhunt.handle_ignore(
                 chat_id=msg.chat.id, user_id=msg.from_user.id,
                 display_name=display_name(msg.from_user),
             )
@@ -788,6 +849,7 @@ def build_router(rt: Runtime) -> Router:
             await _issue_bef_challenge(
                 rt, msg, display_name(msg.from_user),
                 from_action="bang_miss",
+                duck_id=getattr(shot_at, "id", None),
             )
 
     @r.message(F.text.lower() == "bef")
@@ -842,7 +904,9 @@ def build_router(rt: Runtime) -> Router:
             who = display_name(msg.from_user)
             # Cooldown branch — reuse the bef flavor pool, not the
             # bang_miss one (still a bef attempt the user fired).
-            issued = await _issue_bef_challenge(rt, msg, who, from_action="bef")
+            issued = await _issue_bef_challenge(
+                rt, msg, who, from_action="bef", duck_id=duck.id,
+            )
             if not issued:
                 await msg.reply(_cooldown_line(), disable_notification=True)
             return
@@ -922,7 +986,9 @@ def build_router(rt: Runtime) -> Router:
         # retrying. The challenge's own intro carries the refusal flavor
         # (we suppressed outcome.message above to avoid the duplicate).
         if not outcome.success:
-            await _issue_bef_challenge(rt, msg, who, from_action="bef")
+            await _issue_bef_challenge(
+                rt, msg, who, from_action="bef", duck_id=duck.id,
+            )
 
     @r.message(_is_naming_reply)
     async def name_on_reply(msg: Message) -> None:

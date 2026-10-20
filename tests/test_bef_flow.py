@@ -335,8 +335,9 @@ async def test_bang_miss_triggers_challenge_when_dice_says_so(monkeypatch):
     monkeypatch.setattr(dh, "should_challenge_on_miss", lambda *a, **k: True)
 
     issued: list[dict] = []
-    async def fake_issue(rt_, msg_, who, *, from_action="bef", force_kind=None):
-        issued.append({"from_action": from_action, "who": who})
+    async def fake_issue(rt_, msg_, who, *, from_action="bef", force_kind=None,
+                         duck_id=None):
+        issued.append({"from_action": from_action, "who": who, "duck_id": duck_id})
         return True
     monkeypatch.setattr(dh, "_issue_bef_challenge", fake_issue)
 
@@ -363,6 +364,9 @@ async def test_bang_miss_triggers_challenge_when_dice_says_so(monkeypatch):
     # passing a literal intro string; the helper picks flavor from the
     # per-action pool.
     assert issued[0]["from_action"] == "bang_miss"
+    # …and it is issued over the duck that was shot at, which is what makes
+    # that duck the prize for whoever answers it first.
+    assert issued[0]["duck_id"] == duck.id
 
 
 @pytest.mark.asyncio

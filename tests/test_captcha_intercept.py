@@ -87,6 +87,7 @@ def _rt_with(
         find_bef_challenge_by_prompt=AsyncMock(return_value=find_by_prompt),
         get_bef_challenge=AsyncMock(return_value=get_by_user),
         clear_bef_challenge=AsyncMock(),
+        claim_bef_challenge=AsyncMock(return_value=True),
         active_duck=AsyncMock(return_value=None),
     )
     bot = SimpleNamespace(
@@ -126,8 +127,8 @@ async def test_intercept_matches_formal_reply():
     # Lookup-by-prompt was used; the fallback lookup was NOT.
     rt.duckhunt.find_bef_challenge_by_prompt.assert_awaited_once()
     rt.duckhunt.get_bef_challenge.assert_not_called()
-    # The challenge cleared (captcha matched) and the user was replied to.
-    rt.duckhunt.clear_bef_challenge.assert_awaited_once()
+    # The challenge was claimed (captcha matched) and the user was replied to.
+    rt.duckhunt.claim_bef_challenge.assert_awaited_once_with(42, 7, 99)
     msg.reply.assert_awaited()
 
 
@@ -147,8 +148,8 @@ async def test_intercept_matches_free_text_when_pending():
     # Free-text path: no prompt lookup, fallback to user lookup.
     rt.duckhunt.find_bef_challenge_by_prompt.assert_not_called()
     rt.duckhunt.get_bef_challenge.assert_awaited_once()
-    # Captcha matched the free-text answer → challenge cleared.
-    rt.duckhunt.clear_bef_challenge.assert_awaited_once()
+    # Captcha matched the free-text answer → challenge claimed.
+    rt.duckhunt.claim_bef_challenge.assert_awaited_once()
     msg.reply.assert_awaited()
 
 

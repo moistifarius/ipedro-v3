@@ -489,6 +489,13 @@ CREATE TABLE IF NOT EXISTS bef_challenges (
 CREATE INDEX IF NOT EXISTS bef_challenges_prompt_idx
     ON bef_challenges (chat_id, prompt_message_id);
 
+-- The duck a challenge was issued over (duck_events.id). Another player who
+-- answers it first can take THAT duck, and no other: a duck that has spawned
+-- since is a different one. NULL (older rows, admin-forced challenges) means
+-- nothing to steal.
+ALTER TABLE bef_challenges
+    ADD COLUMN IF NOT EXISTS duck_id BIGINT;
+
 -- Disgust personality test -------------------------------------------------
 -- In-progress quiz state: one session per (chat, user), so concurrent takers
 -- never collide and re-taking simply overwrites. `answers` accumulates the
