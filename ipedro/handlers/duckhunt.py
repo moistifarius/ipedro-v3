@@ -13,17 +13,21 @@ from aiogram.types import BufferedInputFile, Message
 
 from ipedro.bot_messages import track
 from ipedro.duckhunt.captcha_gen import make_captcha
+from ipedro.duckhunt.captcha_gen import matches as captcha_matches
 from ipedro.duckhunt.debug_toggles import is_on as debug_is_on
 from ipedro.duckhunt.scoring import (
-    challenge_time_limit_seconds, should_challenge_on_miss,
+    challenge_is_over_time, challenge_time_limit_seconds,
+    should_challenge_on_miss,
 )
 from ipedro.duckhunt.spawner import build_quack_message_for
 from ipedro.duckhunt.verdicts import parse_verdict
 from ipedro.handlers.common import display_name, get_or_create_chat_config, over_limit
 from ipedro.prompts import (
-    DUCK_BEF_CHALLENGE_PROMPT, DUCK_BEF_DECIDE_PROMPT,
+    DUCK_BEF_CHALLENGE_JUDGE_PROMPT, DUCK_BEF_CHALLENGE_PROMPT,
+    DUCK_BEF_DECIDE_PROMPT,
 )
 from ipedro.runtime import Runtime
+from ipedro.user_flags import has_flag
 
 log = logging.getLogger(__name__)
 
@@ -346,6 +350,147 @@ async def _issue_bef_challenge(
         msg.chat.id, msg.from_user.id, challenge_text, kind,
         prompt_msg.message_id,
     )
+    return True
+
+
+async def judge_challenge(
+    rt: Runtime, challenge, answer: str,
+) -> tuple[bool | None, str | None]:
+    """Is `answer` right for this challenge? (verdict, optional flavor line).
+    A captcha is an exact match; trivia and recipe go to the cheap model,
+    and a verdict of None means it couldn't say."""
+    if challenge.kind == "captcha":
+        return captcha_matches(challenge.challenge, answer), None
+    ai_text = await rt.openai.cheap_chat(
+        [{
+            "role": "user",
+            "content": DUCK_BEF_CHALLENGE_JUDGE_PROMPT.format(
+                challenge=challenge.challenge, answer=answer,
+            ),
+        }],
+        max_tokens=120, temperature=1.0,
+    )
+    return parse_verdict(ai_text, "PASS", "FAIL")
+
+
+# ── stealing a duck by answering someone else's challenge ────────────────────
+#
+# When a bef is refused (or a bang spooks the duck) the shooter gets a
+# challenge to clear before trying again, and the duck stays where it is.
+# Anyone else may reply to that prompt and answer it: the first correct
+# answer, while the owner's clock is still running, takes the duck. The owner
+# is gated, so they can't answer for it in the meantime; this is what makes
+# the challenge a race and not a private lock.
+#
+# Only a REPLY to the prompt counts for anyone but its owner. Plain chatter
+# is never judged as somebody's answer (that would put a model call behind
+# every message in a busy chat), and a few tries each keeps a wrong-answer
+# volley from running up the bill.
+STEAL_TRIES = 3
+_steal_tries: dict[tuple[int, int, int], int] = {}
+
+
+def _spend_steal_try(chat_id: int, prompt_id: int | None, user_id: int) -> bool:
+    """Count one try at this challenge; False once they've used their few."""
+    if len(_steal_tries) > 2000:
+        _steal_tries.clear()          # a restart-sized reset, not a leak
+    key = (chat_id, prompt_id or 0, user_id)
+    used = _steal_tries.get(key, 0)
+    if used >= STEAL_TRIES:
+        return False
+    _steal_tries[key] = used + 1
+    return True
+
+
+async def _name_of(rt: Runtime, user_id: int) -> str:
+    try:
+        name = await rt.db.fetchval(
+            "SELECT COALESCE(NULLIF(TRIM(CONCAT_WS(' ', first_name, last_name)), ''), "
+            "       username) FROM users WHERE user_id = $1",
+            user_id,
+        )
+    except Exception:
+        name = None
+    return (name or "").strip()[:40] or "the other player"
+
+
+async def attempt_steal(rt: Runtime, msg: Message, challenge) -> bool:
+    """`msg` replies to somebody else's open challenge. True when this
+    message was a try at it (and so is handled); False when it was ordinary
+    chatter that should carry on through the normal handlers."""
+    thief = msg.from_user
+    if thief is None or thief.is_bot or thief.id == challenge.user_id:
+        return False
+    chat_id = msg.chat.id
+    # Their clock is the window. After it, nobody can take the duck through
+    # this challenge, and a reply to it is just a reply.
+    if challenge_is_over_time(challenge.kind, challenge.created_at):
+        return False
+    if await has_flag(rt.db, chat_id, thief.id, "shutup"):
+        return False
+    if await rt.duckhunt.stealable_duck(challenge) is None:
+        return False
+
+    # Taking a duck is a duck action: the same gate and the same cooldown.
+    if await rt.duckhunt.get_bef_challenge(chat_id, thief.id) is not None:
+        await msg.reply(
+            "Solve your own challenge first (reply to the prompt above).",
+            disable_notification=True,
+        )
+        return True
+    if not debug_is_on(thief.id, "bypass_cooldowns") and not await rt.duckhunt.cooldown_ok(
+        chat_id, thief.id, rt.settings.duckhunt_action_cooldown_seconds,
+    ):
+        await msg.reply(_cooldown_line(), disable_notification=True)
+        return True
+    if not _spend_steal_try(chat_id, challenge.prompt_message_id, thief.id):
+        await msg.reply(
+            "You've had your tries at that one.", disable_notification=True,
+        )
+        return True
+
+    answer = (msg.text or msg.caption or "").strip()
+    verdict, line = await judge_challenge(rt, challenge, answer)
+    if verdict is None:
+        await msg.reply(
+            "Couldn't judge that one. Try again.", disable_notification=True,
+        )
+        return True
+    if verdict is False:
+        await msg.reply(line or "Not quite.", disable_notification=True)
+        return True
+
+    who = display_name(thief)
+    result = await rt.duckhunt.handle_steal(
+        challenge=challenge, thief_id=thief.id, thief_name=who, ai_line=None,
+    )
+    if result.status == "too_late":
+        await msg.reply(
+            "Too late: that one's already been taken.",
+            disable_notification=True,
+        )
+        return True
+    if result.status != "stolen":
+        await msg.reply(
+            "That duck's already gone.", disable_notification=True,
+        )
+        return True
+
+    victim = await _name_of(rt, challenge.user_id)
+    announce = (
+        f"🦆 {who} got the answer in first, so {victim}'s duck is {who}'s "
+        f"now. +{result.outcome.points_delta}"
+    )
+    sent = await msg.reply(announce, disable_notification=True)
+    track(chat_id, sent.message_id, announce)
+    try:
+        total = await rt.duckhunt.friend_count(chat_id, thief.id)
+        follow_up = _bef_celebration_message(result.duck.id, total)
+        named = await msg.answer(follow_up, disable_notification=True)
+        track(chat_id, named.message_id, follow_up)
+        _register_pending_name(chat_id, named.message_id, thief.id, result.duck.id)
+    except Exception as exc:
+        log.warning("steal follow-up failed: %s", exc)
     return True
 
 

@@ -19,15 +19,14 @@ from ipedro import (
 from ipedro.bot_messages import track
 from ipedro.capabilities import capability_brief
 from ipedro.chat_policy import IncomingMessage, should_respond
-from ipedro.duckhunt.captcha_gen import matches as captcha_matches
 from ipedro.duckhunt.debug_toggles import is_on as debug_is_on
 from ipedro.duckhunt.scoring import challenge_is_over_time, over_time_line
-from ipedro.duckhunt.verdicts import parse_verdict
 from ipedro import dale_gifs as dale
 from ipedro.automod_media import fetch_automod_media
 from ipedro.handlers.automod import (
     DaleGif, MediaResponse, _automod_response, _kys_response,
 )
+from ipedro.handlers.duckhunt import attempt_steal, judge_challenge
 from ipedro.handlers.common import (
     catify, display_name, fallback_cat_fact, get_or_create_chat_config,
     over_limit,
@@ -39,7 +38,7 @@ from ipedro.meme_finder import (
 )
 from ipedro.memory.context_builder import build_context, reaction_note
 from ipedro.memory.summarizer import maybe_summarize
-from ipedro.prompts import CAT_FACT_PROMPT, DUCK_BEF_CHALLENGE_JUDGE_PROMPT
+from ipedro.prompts import CAT_FACT_PROMPT
 from ipedro.reddit import (
     detect_meme_request, fetch_meme, is_meme_generation_request,
 )
@@ -558,6 +557,7 @@ def build_router(rt: Runtime) -> Router:
                 challenge = await rt.duckhunt.find_bef_challenge_by_prompt(
                     msg.chat.id, msg.reply_to_message.message_id,
                 )
+            by_prompt = challenge is not None
             if challenge is None:
                 challenge = await rt.duckhunt.get_bef_challenge(
                     msg.chat.id, msg.from_user.id,
@@ -573,6 +573,15 @@ def build_router(rt: Runtime) -> Router:
                     msg.chat.id, challenge.user_id,
                 )
                 challenge = None
+            # Somebody else's challenge, answered by replying to its prompt:
+            # a try at stealing the duck it was issued over. Not for free
+            # text, which is only ever the sender's own answer.
+            if (
+                challenge and by_prompt
+                and challenge.user_id != msg.from_user.id
+                and await attempt_steal(rt, msg, challenge)
+            ):
+                return
             if challenge and challenge.user_id == msg.from_user.id:
                 answer = (msg.text or msg.caption or "").strip()
                 verdict: bool | None
@@ -606,21 +615,8 @@ def build_router(rt: Runtime) -> Router:
                 elif debug_is_on(admin_id, "always_fail_challenge"):
                     verdict = False
                     line = "Failed. [debug: always_fail_challenge]"
-                elif challenge.kind == "captcha":
-                    verdict = captcha_matches(challenge.challenge, answer)
-                    line = None
                 else:
-                    # PASS/FAIL judge — classification, not creative work.
-                    ai_text = await rt.openai.cheap_chat(
-                        [{
-                            "role": "user",
-                            "content": DUCK_BEF_CHALLENGE_JUDGE_PROMPT.format(
-                                challenge=challenge.challenge, answer=answer,
-                            ),
-                        }],
-                        max_tokens=120, temperature=1.0,
-                    )
-                    verdict, line = parse_verdict(ai_text, "PASS", "FAIL")
+                    verdict, line = await judge_challenge(rt, challenge, answer)
                 log.info(
                     "bef challenge judge: chat=%s user=%s kind=%s verdict=%s",
                     msg.chat.id, msg.from_user.id, challenge.kind, verdict,

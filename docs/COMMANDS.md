@@ -206,6 +206,24 @@ as answers, and a challenge auto-expires after 1h (the next message
 clears it and is handled normally). An admin can also force-clear a
 stuck challenge with `/debug_clear_challenge [chat_id]`.
 
+#### Stealing a duck
+
+A challenge is a race. While someone is working on theirs, **anyone else can
+reply to that challenge message with the answer** and, if they are first and
+right, they take the duck: it is theirs (a befriend, no dice), they get the
+point, the naming prompt, and the owner's challenge is gone. The owner is
+gated, so they can't answer for it meanwhile.
+
+- Only a **reply** to the prompt counts for anyone but its owner. Other chat is
+  never judged as somebody's answer.
+- It has to be the duck the challenge was issued over (a duck that has arrived
+  since isn't), never a boss, and only while the owner's clock is running.
+- Taking a duck is a duck action: if you have a challenge of your own you clear
+  that first, and the usual action cooldown applies.
+- Three tries each per challenge; a wrong answer costs only the try.
+- First correct answer wins: the challenge is claimed in one database step, so
+  the owner answering and a thief answering at the same moment can't both win.
+
 Ducks may also wander off on their own at any time — more likely as they
 hang around longer, and almost certainly gone after a day.
 

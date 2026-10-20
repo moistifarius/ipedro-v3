@@ -44,6 +44,18 @@ class PendingBefChallenge:
     created_at: datetime
 
 
+@dataclass
+class StealResult:
+    """How a try at taking someone else's duck came out.
+
+    ``status`` is ``stolen`` (the duck is the thief's now), ``too_late`` (the
+    challenge's owner, or someone faster, had already cleared it) or
+    ``no_duck`` (there is no duck of that challenge left to take)."""
+    status: str
+    outcome: ActionOutcome | None = None
+    duck: ActiveDuck | None = None
+
+
 def _row_to_active_duck(row) -> ActiveDuck:
     return ActiveDuck(
         id=row["id"], chat_id=row["chat_id"], rarity=row["rarity"],
@@ -612,6 +624,58 @@ class DuckhuntService:
     async def quack_flag(self, chat_id: int) -> bool:
         return await self.active_duck(chat_id) is not None
 
+    # ------------------------------------------------------------ stealing
+    async def stealable_duck(
+        self, challenge: PendingBefChallenge,
+    ) -> ActiveDuck | None:
+        """The duck this challenge was issued over, if it is still there to be
+        taken. A challenge is posted while a duck is in the chat, so the duck
+        it belongs to is the one that spawned before it; a duck that arrived
+        after is a different one and is not up for grabs through it. A boss
+        can't be befriended, so it can't be stolen either."""
+        duck = await self.active_duck(challenge.chat_id)
+        if duck is None or duck.is_boss:
+            return None
+        issued = challenge.created_at
+        if issued is not None:
+            if issued.tzinfo is None:
+                issued = issued.replace(tzinfo=timezone.utc)
+            spawned = duck.spawned_at
+            if spawned.tzinfo is None:
+                spawned = spawned.replace(tzinfo=timezone.utc)
+            if spawned > issued:
+                return None
+        return duck
+
+    async def handle_steal(
+        self, *, challenge: PendingBefChallenge, thief_id: int,
+        thief_name: str, ai_line: str | None = None,
+    ) -> StealResult:
+        """Someone other than the challenge's owner answered it correctly.
+        If they are first, the duck the owner was working on is theirs.
+
+        First means first to take the challenge off the table
+        (claim_bef_challenge is one DELETE, so exactly one caller gets it),
+        then first to resolve the duck (the same row-level guard every bang
+        and bef uses). The owner clearing their own challenge, a second
+        thief, or a bang landing meanwhile each lose cleanly."""
+        duck = await self.stealable_duck(challenge)
+        if duck is None:
+            return StealResult("no_duck")
+        if not await self.claim_bef_challenge(
+            challenge.chat_id, challenge.user_id, challenge.prompt_message_id,
+        ):
+            return StealResult("too_late")
+        outcome = bef_success_outcome(duck.rarity, ai_line)
+        if not await self._resolve(
+            duck.id, thief_id, "bef", outcome.points_delta,
+        ):
+            return StealResult("no_duck")
+        await self._bump_stats(
+            challenge.chat_id, thief_id, thief_name, "bef", outcome,
+        )
+        return StealResult("stolen", outcome, duck)
+
     # ------------------------------------------------------------ bef challenges
     async def get_bef_challenge(
         self, chat_id: int, user_id: int,
@@ -646,6 +710,23 @@ class DuckhuntService:
             "DELETE FROM bef_challenges WHERE chat_id = $1 AND user_id = $2",
             chat_id, user_id,
         )
+
+    async def claim_bef_challenge(
+        self, chat_id: int, user_id: int, prompt_message_id: int | None,
+    ) -> bool:
+        """Take THIS challenge (the one posted as `prompt_message_id`) out of
+        play. True only for the one caller that actually removed it; a second
+        caller, or one holding a challenge that has since been replaced by a
+        newer one, gets False."""
+        status = await self.db.execute(
+            "DELETE FROM bef_challenges WHERE chat_id = $1 AND user_id = $2 "
+            "   AND prompt_message_id IS NOT DISTINCT FROM $3",
+            chat_id, user_id, prompt_message_id,
+        )
+        try:
+            return int(status.split()[-1]) > 0
+        except (AttributeError, ValueError, IndexError):
+            return False
 
     async def clear_all_bef_challenges(self, chat_id: int) -> int:
         """Drop every pending bef challenge in a chat. Returns the count.
