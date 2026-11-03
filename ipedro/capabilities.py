@@ -119,7 +119,9 @@ _WATCH_LINE_VIDEO = (
     "- Watch a video play start to finish. You get a handful of frames "
     "from across it, and what was said in it as text where voice "
     "transcription is on here, so say what you caught; don't claim to "
-    "have seen every moment, or to hear music or tone.\n"
+    "have seen every moment, or to hear music or tone. A video noted as 'one "
+    "frame only' was too big, too long or past a limit to watch: all you have "
+    "of it is one picture.\n"
 )
 
 _IN_CHARACTER = (
@@ -254,8 +256,8 @@ def _chat_lines(cfg: ChatConfig, *, dale_flavor: bool = True) -> str:
     if not cfg.vision_enabled:
         lines.append(
             "- Looking at pictures is OFF here: photos, stickers, GIFs and videos "
-            "reach you as a bare note that something was posted, with no "
-            "idea what's in it. Don't pretend otherwise."
+            "don't reach you at all (only a caption, if they carry one), so you "
+            "have no idea what's in them. Don't pretend otherwise."
         )
     # The shared photo is Dale's own bit (ipedro/sharephoto.py); another bot
     # doesn't post one, whatever the chat's switch says.

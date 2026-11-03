@@ -1356,7 +1356,7 @@ class AIClient:
     # ----------------------------------------------------------- audio (OpenAI only)
     async def transcribe(
         self, audio: BinaryIO, filename: str = "audio.ogg",
-        chat_id: int | None = None,
+        chat_id: int | None = None, seconds: float | None = None,
     ) -> str | None:
         if self._openai is None:
             log.error("Transcribe requested but no openai_api_key.")
@@ -1370,7 +1370,13 @@ class AIClient:
             )
             await self._log_usage(
                 kind="transcribe", model=self.transcription_model,
-                chat_id=chat_id, cost_usd=_AUDIO_PER_MINUTE,
+                chat_id=chat_id,
+                # Billed by the minute: a five-minute video is five of them.
+                # Without a length (a voice note) it is the flat one it was.
+                cost_usd=(
+                    _AUDIO_PER_MINUTE * max(seconds, 1.0) / 60.0
+                    if seconds else _AUDIO_PER_MINUTE
+                ),
             )
             return (getattr(resp, "text", "") or "").strip() or None
         except Exception as exc:

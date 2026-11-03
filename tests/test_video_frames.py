@@ -247,7 +247,7 @@ async def test_the_limits_really_are_in_force_inside_the_process():
     code, out, _ = await vf._run(["sh", "-c", "ulimit -v; ulimit -t; ulimit -f"])
     assert code == 0
     mem, cpu, fsize = out.decode().split()
-    assert (mem, cpu, fsize) == ("3145728", "60", "131072")
+    assert (mem, cpu, fsize) == ("1572864", "60", "131072")
 
 
 @pytest.mark.asyncio

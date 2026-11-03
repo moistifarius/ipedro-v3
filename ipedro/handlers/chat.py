@@ -243,13 +243,17 @@ async def _reply_automod_media(msg: Message, media: MediaResponse) -> None:
 
 
 def _has_bot_mention(msg: Message, bot_username: str | None) -> bool:
-    if not msg.text:
+    # A photo or video's text is its CAPTION, and a mention in it counts: "@bot
+    # what is he saying" under a video is addressed to him.
+    text = msg.text or getattr(msg, "caption", None)
+    if not text:
         return False
-    if bot_username and f"@{bot_username.lower()}" in msg.text.lower():
+    if bot_username and f"@{bot_username.lower()}" in text.lower():
         return True
-    for ent in (msg.entities or []):
+    entities = msg.entities or getattr(msg, "caption_entities", None) or []
+    for ent in entities:
         if ent.type == "mention":
-            if bot_username and msg.text[ent.offset:ent.offset + ent.length].lower() == f"@{bot_username.lower()}":
+            if bot_username and text[ent.offset:ent.offset + ent.length].lower() == f"@{bot_username.lower()}":
                 return True
     return False
 
@@ -692,7 +696,17 @@ def build_router(rt: Runtime) -> Router:
         text = typed
         seen = None
         if cfg.vision_enabled and cfg.response_policy != "commands":
-            seen = await vision.look(rt, msg, transcribe=cfg.voice_transcribe)
+            # "typing…" only while he is likely to answer: a video in a busy
+            # group that he'll just read shouldn't look like a reply coming.
+            seen = await vision.look(
+                rt, msg, transcribe=cfg.voice_transcribe,
+                typing=(
+                    _has_bot_mention(msg, bot_username)
+                    or _mentions_pedro(typed, ident)
+                    or _is_reply_to_bot(msg, bot_id)
+                    or msg.chat.type == "private"
+                ),
+            )
             if seen:
                 text = f"{seen.note}\n{typed}" if typed else seen.note
 
@@ -1070,8 +1084,12 @@ def build_router(rt: Runtime) -> Router:
         # it already has its own history row from when it arrived, and the
         # description is cached by file id, so this is almost always free.
         if cfg.vision_enabled and msg.reply_to_message is not None:
+            # Only what is already known about it (cached) or its thumbnail:
+            # replying to a video must not start a paid watch charged to
+            # whoever posted it.
             quoted = await vision.describe(
                 rt, msg.reply_to_message, transcribe=cfg.voice_transcribe,
+                watch=False,
             )
             if quoted:
                 extra_bits.append(

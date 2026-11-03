@@ -16,7 +16,12 @@ of untrusted bytes, so this is deliberately narrow:
 * each process runs with a time limit, a CPU limit, a memory limit and a
   limit on what it may write, with no stdin and an environment that carries
   none of the bot's secrets;
-* two videos at a time, size and length capped by the caller.
+* the REAL picture size (what ffprobe reads from the stream, not what the
+  container claims) is capped: a 750 KB clip of 16000x16000 black frames
+  decodes into gigabytes, and the memory limit is the backstop, not the gate;
+* two videos at a time, and a video that can't get a turn within a few
+  seconds is turned away, not queued behind someone's slow file; size and
+  length capped by the caller.
 
 Every failure returns None, never an exception: a video we couldn't open is a
 missing sentence, not a dropped message.
@@ -45,6 +50,10 @@ SILENCE_DB = -45.0
 
 _STEP_TIMEOUT = 30                # seconds, per ffmpeg/ffprobe process
 _TOTAL_TIMEOUT = 90               # seconds, for one whole video
+_QUEUE_TIMEOUT = 15               # seconds to wait for one of the two slots
+# 4096x2160. A phone's 4K is under this; an 8K or a bomb is not worth the
+# memory, and a model reads frames scaled to 768 wide anyway.
+MAX_PIXELS = 4096 * 2160
 _slots_loop: asyncio.AbstractEventLoop | None = None
 _slots: asyncio.Semaphore | None = None
 
@@ -107,7 +116,7 @@ def timestamps(seconds: float, n: int) -> list[float]:
 _ULIMITS = (
     'cap() { ulimit "$1" "$2" 2>/dev/null; v=$(ulimit "$1"); '
     '[ "$v" != unlimited ] && [ "$v" -le "$2" ] 2>/dev/null || exit 126; }; '
-    'cap -v 3145728; cap -t 60; cap -f 131072; exec "$@"'
+    'cap -v 1572864; cap -t 60; cap -f 131072; exec "$@"'
 )
 
 
@@ -131,10 +140,14 @@ _COMMON = ["-nostdin", "-hide_banner", "-protocol_whitelist", "file"]
 
 
 async def _probe(path: str, fmt: str) -> tuple[float, bool] | None:
-    """(seconds, has an audio track) for a file with a video stream."""
+    """(seconds, has an audio track) for a file with a video stream of a size
+    worth decoding, else None. The duration is the picture's: a file whose
+    audio runs past its last frame would otherwise have frames sampled from
+    time that has no picture."""
     code, out, _ = await _run([
         "ffprobe", "-v", "error", "-protocol_whitelist", "file", "-f", fmt,
-        "-of", "json", "-show_entries", "format=duration:stream=codec_type",
+        "-of", "json", "-show_entries",
+        "format=duration:stream=codec_type,width,height,duration",
         "-i", path,
     ])
     if code != 0:
@@ -142,12 +155,22 @@ async def _probe(path: str, fmt: str) -> tuple[float, bool] | None:
     try:
         info = json.loads(out)
         seconds = float((info.get("format") or {}).get("duration") or 0)
-        kinds = [s.get("codec_type") for s in info.get("streams") or []]
+        streams = info.get("streams") or []
+        video = next((s for s in streams if s.get("codec_type") == "video"), None)
+        if video is None:
+            return None
+        width, height = int(video.get("width") or 0), int(video.get("height") or 0)
+        shown = video.get("duration")
+        if shown not in (None, "N/A") and 0 < float(shown) < seconds:
+            seconds = float(shown)
+        has_audio = any(s.get("codec_type") == "audio" for s in streams)
     except (ValueError, TypeError):
         return None
-    if "video" not in kinds or not (seconds > 0):
+    if not (seconds > 0) or width * height > MAX_PIXELS:
+        if width * height > MAX_PIXELS:
+            log.info("video too big to decode: %sx%s", width, height)
         return None
-    return seconds, "audio" in kinds
+    return seconds, has_audio
 
 
 async def _frame(path: str, fmt: str, at: float) -> bytes | None:
@@ -191,17 +214,23 @@ async def extract(
     fmt = container(data)
     if fmt is None or max_frames < 1 or not available():
         return None
+    gate = _gate()
+    try:
+        await asyncio.wait_for(gate.acquire(), _QUEUE_TIMEOUT)
+    except asyncio.TimeoutError:
+        log.info("video skipped: no free slot within %ss", _QUEUE_TIMEOUT)
+        return None
     workdir = tempfile.mkdtemp(prefix="ipedro-video-")
     try:
-        async with _gate():
-            return await asyncio.wait_for(
-                _extract(workdir, data, fmt, max_frames, want_audio, max_seconds),
-                _TOTAL_TIMEOUT,
-            )
+        return await asyncio.wait_for(
+            _extract(workdir, data, fmt, max_frames, want_audio, max_seconds),
+            _TOTAL_TIMEOUT,
+        )
     except Exception as exc:
         log.info("video extraction failed: %s: %s", type(exc).__name__, exc)
         return None
     finally:
+        gate.release()
         await asyncio.to_thread(shutil.rmtree, workdir, True)
 
 
@@ -221,7 +250,11 @@ async def _extract(
     frames: list[bytes] = []
     for at in timestamps(seconds, frame_count(seconds, max_frames)):
         frame = await _frame(path, fmt, at)
-        if frame is not None:
+        if frame is None:
+            # Seeking lands on the frame AFTER the time asked for, so a clip
+            # with one still picture, or a slow frame rate, has none there.
+            frame = await _frame(path, fmt, 0.0)
+        if frame is not None and (not frames or frame != frames[-1]):
             frames.append(frame)
     if not frames:
         return None

@@ -28,6 +28,7 @@ import logging
 import time
 from dataclasses import dataclass
 
+from ipedro import vision
 from ipedro.chat_policy import IncomingMessage, should_respond
 
 log = logging.getLogger(__name__)
@@ -346,7 +347,13 @@ async def handle_post(rt, ident, hub: Hub, post: Post) -> None:
         latest_user_text=post.text, latest_user_name=post.bot_name,
         extra_system=None, memory_enabled=cfg.memory_enabled,
         persona_override=None,
-        capabilities=capability_brief(cfg, dale_flavor=ident.dale_flavor),
+        capabilities=capability_brief(
+            cfg, dale_flavor=ident.dale_flavor,
+            # Said only where videos really are watched, like the chat path.
+            **({"video": True} if (
+                getattr(cfg, "vision_enabled", False) and vision.watching(rt)
+            ) else {}),
+        ),
         terse=ident.terse,
     )
     reply = await rt.openai.chat(

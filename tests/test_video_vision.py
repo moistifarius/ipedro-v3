@@ -223,15 +223,23 @@ async def test_the_old_thumbnail_description_does_not_shadow_a_deep_look(patched
 @pytest.mark.asyncio
 async def test_typing_shows_while_a_video_is_worked_on(patched_extract):
     rt = patched_extract(_rt())
-    await vision.describe(rt, _vmsg(), transcribe=True)
+    await vision.look(rt, _vmsg(), transcribe=True, typing=True)
     rt.bot.send_chat_action.assert_awaited()
     assert rt.bot.send_chat_action.await_args.args == (42, "typing")
 
 
 @pytest.mark.asyncio
+async def test_no_typing_when_he_is_not_about_to_answer(patched_extract):
+    rt = patched_extract(_rt())
+    await vision.look(rt, _vmsg(), transcribe=True, typing=False)
+    rt.bot.send_chat_action.assert_not_awaited()
+    rt.extract.assert_awaited_once()                        # still watched
+
+
+@pytest.mark.asyncio
 async def test_the_typing_pulse_is_stopped_even_when_the_look_fails(patched_extract):
     rt = patched_extract(_rt(parts=None))
-    await vision.describe(rt, _vmsg(), transcribe=True)
+    await vision.look(rt, _vmsg(), transcribe=True, typing=True)
     before = rt.bot.send_chat_action.await_count
     await asyncio.sleep(0.05)
     assert rt.bot.send_chat_action.await_count == before
@@ -239,9 +247,13 @@ async def test_the_typing_pulse_is_stopped_even_when_the_look_fails(patched_extr
 
 # ── when it falls back to the thumbnail ──────────────────────────────────────
 
-async def _falls_back(rt, msg=None, **kw):
+async def _falls_back(rt, msg=None, *, glimpse=True, **kw):
+    """The thumbnail description, marked as the one frame it is where a look
+    was attempted and fell short; plain where videos aren't watched at all."""
     note = await vision.describe(rt, msg or _vmsg(), **kw)
-    assert note == "[video: a blurry thumbnail]"
+    assert note == (
+        "[video, one frame only: a blurry thumbnail]" if glimpse
+        else "[video: a blurry thumbnail]")
     rt.openai.describe_images.assert_not_awaited()
 
 
@@ -268,7 +280,7 @@ async def test_a_video_too_long_is_not_even_downloaded(patched_extract, monkeypa
 async def test_switched_off_means_the_thumbnail_only(patched_extract, monkeypatch, settings):
     rt = patched_extract(_rt(settings=settings))
     monkeypatch.setattr(vision, "_describe_media", AsyncMock(return_value="a blurry thumbnail"))
-    await _falls_back(rt)
+    await _falls_back(rt, glimpse=False)
     rt.extract.assert_not_awaited()
 
 
@@ -277,7 +289,7 @@ async def test_no_ffmpeg_means_the_thumbnail_only(patched_extract, monkeypatch):
     monkeypatch.setattr(video_frames, "available", lambda: False)
     rt = patched_extract(_rt())
     monkeypatch.setattr(vision, "_describe_media", AsyncMock(return_value="a blurry thumbnail"))
-    await _falls_back(rt)
+    await _falls_back(rt, glimpse=False)
     rt.extract.assert_not_awaited()
 
 
@@ -297,7 +309,7 @@ async def test_any_failure_along_the_way_is_the_thumbnail(patched_extract, monke
         rt.openai.transcribe.side_effect = RuntimeError("whisper")
     monkeypatch.setattr(vision, "_describe_media", AsyncMock(return_value="a blurry thumbnail"))
     note = await vision.describe(rt, _vmsg(), transcribe=True)
-    assert note == "[video: a blurry thumbnail]"
+    assert note == "[video, one frame only: a blurry thumbnail]"
 
 
 @pytest.mark.asyncio
@@ -318,7 +330,7 @@ async def test_a_person_gets_eight_videos_an_hour_then_thumbnails(patched_extrac
     for i in range(10):
         notes.append(await vision.describe(rt, _vmsg(_video(file_unique_id=f"u{i}")), transcribe=True))
     assert notes[:8] == ["[video: a man runs from a duck]"] * 8
-    assert notes[8:] == ["[video: a blurry thumbnail]"] * 2
+    assert notes[8:] == ["[video, one frame only: a blurry thumbnail]"] * 2
     assert rt.extract.await_count == 8
 
 
@@ -400,7 +412,8 @@ async def test_the_chat_looks_with_its_own_voice_transcription_setting(monkeypat
     msg.caption = None
     msg.answer = AsyncMock(return_value=SimpleNamespace(message_id=9))
     await _handler(rt)(msg)
-    assert vision.look.await_args.kwargs == {"transcribe": voice}
+    kw = vision.look.await_args.kwargs
+    assert kw["transcribe"] is voice and "watch" not in kw
 
 
 @pytest.mark.asyncio
@@ -415,5 +428,7 @@ async def test_the_reply_to_a_video_is_described_with_the_same_setting(monkeypat
     msg.reply_to_message = replied
     msg.answer = AsyncMock(return_value=SimpleNamespace(message_id=9))
     await _handler(rt)(msg)
-    kwargs = [c.kwargs for c in vision.look.await_args_list]
-    assert {"transcribe": True} in kwargs
+    own, quoted = [c.kwargs for c in vision.look.await_args_list]
+    assert own["transcribe"] is True and "watch" not in own
+    # the video he is asked about: cached or thumbnail, never a fresh paid watch
+    assert quoted["transcribe"] is True and quoted["watch"] is False

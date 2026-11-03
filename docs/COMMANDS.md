@@ -519,20 +519,34 @@ Stop, restart or remove one. A removed bot's database is kept, and
 With `vision` on, a video, a GIF or a round video note is watched when it
 arrives:
 
-- **What he gets:** up to 8 frames spread evenly across it (4 for a short
-  clip) and, in a chat with `voice` transcription on, a transcript of what was
-  said in the first five minutes. Both go to the vision model together, and
-  the description is stored as the transcript line (`[video: …]`), so he can
-  talk about it, and recall it later, like anything typed. Silence is not
-  transcribed, and music mostly won't come through as words.
-- **Limits:** videos over 20 MB (Telegram's limit for bots) or over
-  `VIDEO_VISION_MAX_SECONDS` (default 300) get the one-frame thumbnail look
-  instead, as does everything while a person is over their limit (8 videos an
-  hour each, 20 a chat; bot admins are exempt) or when `ffmpeg` is missing or
-  `VIDEO_VISION_FRAMES=0`.
+- **What he gets:** up to `VIDEO_VISION_FRAMES` frames (default 6, never more
+  than 8; 4 for a clip under 8 seconds) spread evenly across it and, in a chat
+  with `voice` transcription on, a transcript of what was said in the first five
+  minutes. Both go to the vision model together, and the description is stored
+  as the transcript line (`[video: …]`), so he can talk about it, and recall it
+  later, like anything typed. Silence is not transcribed, and neither is the
+  filler a transcriber invents for music and noise ("Thanks for watching",
+  "[Music]", a looping line). Music mostly won't come through as words.
+- **A glimpse says so:** a video that could only be glimpsed (too big, too long,
+  over a limit, `ffmpeg` couldn't open it) is noted `[video, one frame only: …]`,
+  and he is told what that means, so a one-picture description is never taken
+  for a watched video.
+- **Limits:** videos over 20 MB (Telegram's limit for bots), over
+  `VIDEO_VISION_MAX_SECONDS` (default 300), or bigger than 4K by the real picture
+  size (not the size the file claims) get the one-frame thumbnail look instead,
+  as does everything while a person is over their limit (8 videos an hour each,
+  20 a chat; GIFs and round notes count; bot admins are exempt), when `ffmpeg`
+  can't give a video a turn within 15 seconds (two run at a time), when `ffmpeg`
+  is missing, or with `VIDEO_VISION_FRAMES=0`. A video that was turned away before
+  anything was done doesn't use up your limit. The same file posted twice at once
+  is watched once.
+- **Replying to a video** ("rusty what is this") uses only what is already known
+  about it, or its thumbnail. It never starts a fresh watch, which would be
+  charged to whoever posted it.
 - **Safety:** only real MP4/MOV/WebM files are opened (a text file posing as a
   video, like a playlist, never reaches `ffmpeg`), with only local files
   allowed, a time, CPU, memory and output limit per process, and none of the
   bot's secrets in its environment.
 - What was said, and any text on screen, is treated as data in the prompt, never
-  as an instruction.
+  as an instruction. Each bot process (Dale and every `/newbot`) watches for
+  itself, with its own limits and its own `/cost`.

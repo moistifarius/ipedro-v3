@@ -41,7 +41,7 @@ added with `/newbot` has its own, `ipedro_bot_<id>`, on the same server.)
 
 Pictures and videos are described once, when they arrive, and from then on
 are just text. A video is described from a few frames sampled across it
-(`VIDEO_VISION_FRAMES`, up to 8) and, in a chat with voice transcription on,
+(`VIDEO_VISION_FRAMES`, default 6, up to 8) and, in a chat with voice transcription on,
 what was said in its first five minutes; the description is cached by the
 file's Telegram identity (`media_descriptions`, under `v2:` for a look with
 the sound and `v2n:` for one without, so an older one-frame description never
