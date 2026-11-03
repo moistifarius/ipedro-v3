@@ -140,13 +140,15 @@ async def test_the_advisors_output_is_capped_and_never_below_the_floor():
 
 
 @pytest.mark.asyncio
-async def test_max_uses_is_the_configured_cap_and_zero_means_uncapped():
-    c, _, beta = _client(beta=[_resp(_text("a")), _resp(_text("b"))], advisor_max_uses=3)
+async def test_max_uses_is_the_configured_cap_and_is_never_unlimited():
+    c, _, beta = _client(beta=[_resp(_text("a")), _resp(_text("b")), _resp(_text("c"))],
+                         advisor_max_uses=3)
     await c.chat(MESSAGES, advisor=True, max_tokens=50)
     assert beta.sent[0]["tools"][0]["max_uses"] == 3
-    c.advisor_max_uses = 0
-    await c.chat(MESSAGES, advisor=True, max_tokens=50)
-    assert "max_uses" not in beta.sent[1]["tools"][0]
+    for nonsense in (0, -5):
+        c.advisor_max_uses = nonsense
+        await c.chat(MESSAGES, advisor=True, max_tokens=50)
+        assert beta.sent[-1]["tools"][0]["max_uses"] == 1
 
 
 @pytest.mark.asyncio
@@ -322,17 +324,84 @@ async def test_a_request_that_fails_without_the_advisor_too_is_not_blamed_on_it(
     assert not c.advisor_turned_down
 
 
-@pytest.mark.asyncio
-async def test_only_a_bad_request_triggers_the_fallback():
+def _api_error(cls, status):
     req = httpx.Request("POST", "https://x")
-    boom = anthropic.InternalServerError("down", response=httpx.Response(500, request=req), body=None)
-    c, plain, _ = _client(beta=[boom])
-    with pytest.raises(anthropic.InternalServerError):
-        await c._claude_create(c._claude_kwargs(
-            model="claude-sonnet-5", system=None,
-            chat_messages=[{"role": "user", "content": "x"}], max_tokens=5,
-            temperature=1.0, tools=[c._advisor_tool("claude-sonnet-5")]))
+    return cls("boom", response=httpx.Response(status, request=req), body=None)
+
+
+async def _create_with_advisor(c):
+    return await c._claude_create(c._claude_kwargs(
+        model="claude-sonnet-5", system=None,
+        chat_messages=[{"role": "user", "content": "x"}], max_tokens=5,
+        temperature=1.0, tools=[c._advisor_tool("claude-sonnet-5")]))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("make", [
+    lambda: _api_error(anthropic.InternalServerError, 500),
+    lambda: _api_error(anthropic.InternalServerError, 529),
+    lambda: anthropic.APITimeoutError(request=httpx.Request("POST", "https://x")),
+    lambda: anthropic.APIConnectionError(request=httpx.Request("POST", "https://x")),
+])
+async def test_a_slow_or_failed_consult_is_answered_again_without_the_advisor(make):
+    """A consult that doesn't come back must not mean a quiet chat. Transient,
+    so the pairing is NOT blocked."""
+    c, plain, beta = _client(plain=[_resp(_text("fine"))], beta=[make()])
+    resp = await _create_with_advisor(c)
+    assert resp.content[0].text == "fine"
+    assert len(beta.sent) == 1 and len(plain.sent) == 1
+    assert "tools" not in plain.sent[0]
+    assert not c.advisor_turned_down and c.advisor_available()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("make", [
+    lambda: _api_error(anthropic.AuthenticationError, 401),
+    lambda: _api_error(anthropic.PermissionDeniedError, 403),
+    lambda: _api_error(anthropic.RateLimitError, 429),
+])
+async def test_other_errors_are_not_the_advisors_and_are_not_retried_without_it(make):
+    c, plain, _ = _client(beta=[make()])
+    with pytest.raises(anthropic.APIStatusError):
+        await _create_with_advisor(c)
     assert plain.sent == [] and not c.advisor_turned_down
+
+
+@pytest.mark.asyncio
+async def test_a_consult_is_given_longer_than_a_plain_reply():
+    c, plain, beta = _client(beta=[_resp(_text("a"))], plain=[_resp(_text("b"))])
+    await c.chat(MESSAGES, max_tokens=50, advisor=True)
+    assert beta.sent[0]["timeout"] == 90.0
+    assert "timeout" not in (await _noop(c, plain))
+    
+
+async def _noop(c, plain):
+    await c.chat(MESSAGES, max_tokens=50)
+    return plain.sent[-1]
+
+
+@pytest.mark.asyncio
+async def test_with_advisor_blocks_already_in_the_conversation_the_fallback_is_not_tried():
+    """Dropping the advisor from a request that carries its blocks is itself a
+    400 (and a refused pairing is always refused on the first request)."""
+    c, plain, beta = _client(beta=[_bad_request("model: nope")])
+    kwargs = c._claude_kwargs(
+        model="claude-sonnet-5", system=None,
+        chat_messages=[{"role": "user", "content": "x"},
+                       {"role": "assistant", "content": [_asked_dict(), _advice_dict()]}],
+        max_tokens=5, temperature=1.0, tools=[c._advisor_tool("claude-sonnet-5")])
+    with pytest.raises(anthropic.BadRequestError, match="model: nope"):
+        await c._claude_create(kwargs)
+    assert plain.sent == [] and not c.advisor_turned_down
+
+
+def _asked_dict():
+    return {"type": "server_tool_use", "id": "srvtoolu_1", "name": "advisor", "input": {}}
+
+
+def _advice_dict():
+    return {"type": "advisor_tool_result", "tool_use_id": "srvtoolu_1",
+            "content": {"type": "advisor_redacted_result", "encrypted_content": "x"}}
 
 
 @pytest.mark.asyncio
@@ -561,7 +630,7 @@ async def test_show_says_who_advises_whom_and_what_it_costs(kv):
     await _ai_advisor(_admin_rt())(msg)
     out = msg.reply.await_args.args[0]
     assert "claude-opus-5-5" in out and "claude-sonnet-5" in out
-    assert "1 consult a reply" in out and "1024 tokens" in out
+    assert "1 consult(s) per request" in out and "1024 tokens" in out
     assert "/cost" in out and kv == {}
 
 

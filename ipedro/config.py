@@ -62,8 +62,10 @@ class Settings(BaseSettings):
     # and consult a stronger one mid-reply, inside the same request, and the
     # stronger model's tokens bill at ITS rates. Dale's main replies only. He
     # is told to ask rarely (hard questions, not banter) and `max_uses` caps
-    # it at one consult per request; `advisor_max_tokens` caps what the
-    # advisor may write (the API's floor is 1024). Empty turns it off.
+    # it at one consult per REQUEST (a reply that also uses a tool takes a few
+    # requests); `advisor_max_tokens` caps what the advisor may write (the
+    # API's floor is 1024); `advisor_max_uses` below 1 is read as 1, never as
+    # unlimited. Empty (or "off") turns it off.
     # /ai_advisor changes it live. The pairing has to be one the API allows
     # (the advisor at least as capable as the model it advises); one it
     # refuses is dropped and replies carry on without it.

@@ -57,7 +57,8 @@ def resolve_advisor_model(saved: str | None, configured: str | None) -> str | No
     "off" for none), else the configured one. Empty means none."""
     if saved == "off":
         return None
-    return (saved or configured or "").strip() or None
+    chosen = (saved or configured or "").strip()
+    return None if chosen.lower() in ("", "off", "none", "false", "0") else chosen
 
 
 def install_flavor(bot: Bot, settings: Settings) -> None:

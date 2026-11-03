@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import logging
 import random
@@ -1195,37 +1196,46 @@ def build_router(rt: Runtime) -> Router:
         # makes replies long.
         advisor_kw = {"advisor": True} if advisor_on else {}
         relayed = False
-        if tools_on:
-            async def _run_tool(name: str, args: dict) -> tuple[str, bool]:
-                nonlocal relayed
-                # One per reply: a single model turn can name the tool
-                # several times, and each is a message into someone's chat.
-                if name == relay.TOOL_NAME and relayed:
-                    return (
-                        "You've already passed one along this turn. Nothing "
-                        "more was sent.", True,
+        # A consult runs a second model inside the request and can take half a
+        # minute: keep "typing…" up for it, or the chat looks dead and people
+        # ask again (each a full-price call).
+        async def _ask() -> str | None:
+            if tools_on:
+                async def _run_tool(name: str, args: dict) -> tuple[str, bool]:
+                    nonlocal relayed
+                    # One per reply: a single model turn can name the tool
+                    # several times, and each is a message into someone's chat.
+                    if name == relay.TOOL_NAME and relayed:
+                        return (
+                            "You've already passed one along this turn. Nothing "
+                            "more was sent.", True,
+                        )
+                    text, is_error = await introspection.run_tool(
+                        rt, chat_id=msg.chat.id, owner_dm=owner_dm,
+                        name=name, args=args, asker=asker,
                     )
-                text, is_error = await introspection.run_tool(
-                    rt, chat_id=msg.chat.id, owner_dm=owner_dm,
-                    name=name, args=args, asker=asker,
-                )
-                if name == relay.TOOL_NAME and not is_error:
-                    relayed = True
-                return text, is_error
+                    if name == relay.TOOL_NAME and not is_error:
+                        relayed = True
+                    return text, is_error
 
-            reply = await rt.openai.chat_with_tools(
-                ctx.messages,
-                tools=introspection.tools_for(
-                    owner_dm=owner_dm, relay_on=asker is not None,
-                ),
-                run_tool=_run_tool, max_tokens=ident.reply_tokens,
-                chat_id=msg.chat.id, **advisor_kw,
-            )
-        else:
-            reply = await rt.openai.chat(
+                return await rt.openai.chat_with_tools(
+                    ctx.messages,
+                    tools=introspection.tools_for(
+                        owner_dm=owner_dm, relay_on=asker is not None,
+                    ),
+                    run_tool=_run_tool, max_tokens=ident.reply_tokens,
+                    chat_id=msg.chat.id, **advisor_kw,
+                )
+            return await rt.openai.chat(
                 ctx.messages, max_tokens=ident.reply_tokens, chat_id=msg.chat.id,
                 **advisor_kw,
             )
+
+        async with (
+            vision._typing(rt.bot, msg.chat.id) if advisor_on
+            else contextlib.nullcontext()
+        ):
+            reply = await _ask()
         if not reply and relayed:
             # The message went out, then the model's last round failed or was
             # withheld. Say so rather than leave the asker with silence (and

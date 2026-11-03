@@ -27,14 +27,19 @@ from tests.test_captcha_intercept import _find_message_handler, _msg, _rt_with
 
 CHAT, OWNER, THIEF = 42, 999, 7
 PROMPT, DUCK = 99, 5
-NOW = datetime.now(timezone.utc)
+
+
+def _now():
+    """Read at use, not at import: a suite that takes a while to collect would
+    otherwise age every challenge in it past its clock."""
+    return datetime.now(timezone.utc)
 
 
 def _challenge(kind="captcha", *, user_id=OWNER, answer="RMY4X", age=5,
                duck_id=DUCK, prompt=PROMPT):
     return PendingBefChallenge(
         chat_id=CHAT, user_id=user_id, challenge=answer, kind=kind,
-        prompt_message_id=prompt, created_at=NOW - timedelta(seconds=age),
+        prompt_message_id=prompt, created_at=_now() - timedelta(seconds=age),
         duck_id=duck_id,
     )
 
@@ -42,8 +47,8 @@ def _challenge(kind="captcha", *, user_id=OWNER, answer="RMY4X", age=5,
 def _duck(*, boss=None, id=DUCK, spawned_ago=600):
     return ActiveDuck(
         id=id, chat_id=CHAT, rarity="common",
-        spawned_at=NOW - timedelta(seconds=spawned_ago),
-        expires_at=NOW + timedelta(hours=1), boss_required_hits=boss,
+        spawned_at=_now() - timedelta(seconds=spawned_ago),
+        expires_at=_now() + timedelta(hours=1), boss_required_hits=boss,
     )
 
 
@@ -530,8 +535,8 @@ class _MemDB:
     def __init__(self):
         self.duck = {
             "id": DUCK, "chat_id": CHAT, "rarity": "common",
-            "spawned_at": NOW - timedelta(minutes=10),
-            "expires_at": NOW + timedelta(hours=1),
+            "spawned_at": _now() - timedelta(minutes=10),
+            "expires_at": _now() + timedelta(hours=1),
             "boss_required_hits": None, "boss_current_hits": 0,
             "resolved": False, "resolved_by": None,
         }

@@ -412,8 +412,12 @@ tool, a beta; default `ADVISOR_MODEL=claude-opus-5-5`). It runs inside the same
 request, reads the whole conversation, and tells him what it would do; the reply
 is still his, in his voice. He is told to ask rarely, for a question where being
 wrong would matter and never for banter, and to ask at most
-`ADVISOR_MAX_USES` (1) times a reply; the advisor writes at most
-`ADVISOR_MAX_TOKENS` (1024, the API's floor) tokens. Its tokens bill at its own
+`ADVISOR_MAX_USES` (1) times per request (a reply that also uses a tool takes a
+few requests); the advisor writes at most `ADVISOR_MAX_TOKENS` (1024, the API's
+floor) tokens. `ADVISOR_MODEL=off` (or empty) turns it off, and a max below 1
+is read as 1. A consult that is slow (it gets 90 seconds), or fails in a way a
+plain reply wouldn't, is answered again without it, so the chat doesn't go quiet.
+While it runs "typing…" stays up. Its tokens bill at its own
 rates, logged as `advisor` in `/cost`. Only Dale's own chat replies use it
 (not `/a`, summaries, other bots, impersonations or the cheap classifiers). A
 `<model_id>` is tried against Anthropic before it is saved, and a pairing the API

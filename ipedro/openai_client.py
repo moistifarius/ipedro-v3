@@ -275,6 +275,12 @@ def _openai_text_price(
     )
 
 
+def has_claude_price(model: str) -> bool:
+    """Is there a price on file for this model (else /cost counts it at the
+    default rate)?"""
+    return any(model.startswith(k) for k in _CLAUDE_TEXT_PRICE_PER_1K)
+
+
 def _claude_text_price(
     model: str, prompt_tokens: int, completion_tokens: int,
     cache_write_tokens: int = 0, cache_read_tokens: int = 0,
@@ -423,16 +429,44 @@ _ADVISOR_MIN_TOKENS = 1024            # the API's floor for the tool's max_token
 # A turn can pause while the advisor runs ("pause_turn"); the answer is to send
 # it back as it came. A few times at most, never forever.
 _MAX_PAUSE_RESUMES = 3
+# A consult runs a second, stronger model inside the request, so it is given
+# longer than a plain reply (45 s). If it still doesn't come back, or the
+# request fails some other way that a plain one wouldn't, the reply is written
+# again WITHOUT the advisor rather than the chat going quiet.
+_ADVISOR_TIMEOUT_SECONDS = 90.0
+
+
+def _is_advisor_block(block: Any) -> bool:
+    kind = getattr(block, "type", None)
+    return kind == "advisor_tool_result" or (
+        kind == "server_tool_use" and getattr(block, "name", None) == ADVISOR_TOOL_NAME
+    )
+
+
+def _has_advisor_blocks(messages: Sequence[dict[str, Any]]) -> bool:
+    """Does this conversation already carry an advisor call or its result?
+    (Then the tool can't be dropped from the next request: that is a 400.)"""
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, list) and any(
+            _is_advisor_block(b) if not isinstance(b, dict) else (
+                b.get("type") == "advisor_tool_result"
+                or (b.get("type") == "server_tool_use" and b.get("name") == ADVISOR_TOOL_NAME)
+            )
+            for b in content
+        ):
+            return True
+    return False
 
 
 def _claude_text(resp: Any) -> str | None:
     blocks = list(resp.content)
-    # After an advisor call only what was written once the advice was in is
-    # the reply. Text before the call is the model thinking out loud.
-    asked = [
-        i for i, b in enumerate(blocks)
-        if getattr(b, "type", None) == "advisor_tool_result"
-    ]
+    # Once the advisor has been called, only what was written after it is the
+    # reply; what came before is the model thinking out loud ("let me check
+    # with my guy"). That holds for a call still pending as well (the turn
+    # paused, or was cut off, before the advice came back): then there is no
+    # reply at all, and the narration is not made into one.
+    asked = [i for i, b in enumerate(blocks) if _is_advisor_block(b)]
     if asked:
         blocks = blocks[asked[-1] + 1:]
     parts = [
@@ -998,10 +1032,18 @@ class AIClient:
         # Last in the list, always: the tools are the head of the cache
         # prefix, and a chat's list has to be byte-identical from reply to
         # reply (the advisor is the same for every chat).
-        advisor_tool = self._advisor_tool(m) if advisor else None
-        if advisor_tool:
-            tools = [*tools, advisor_tool]
+        own_tools = tools
+        asked_for = self._advisor_tool(m) if advisor else None
         for round_no in range(_MAX_TOOL_ROUNDS + 1):
+            # Decided afresh each round: a pairing the API refused in round 0
+            # is not asked for again in round 1 (unless the conversation
+            # already holds advisor blocks, which have to keep their tool).
+            advisor_tool = asked_for if (
+                asked_for is not None
+                and ((m, asked_for["model"]) not in self._advisor_blocked
+                     or _has_advisor_blocks(convo))
+            ) else None
+            tools = [*own_tools, advisor_tool] if advisor_tool else own_tools
             kwargs = self._claude_kwargs(
                 model=m, system=system, chat_messages=convo,
                 max_tokens=max_tokens, temperature=temperature, tools=tools,
@@ -1074,8 +1116,8 @@ class AIClient:
             "model": self.advisor_model,
             "max_tokens": max(_ADVISOR_MIN_TOKENS, self.advisor_max_tokens),
         }
-        if self.advisor_max_uses > 0:
-            tool["max_uses"] = self.advisor_max_uses
+        # Never unlimited: 0 or less would otherwise leave the cap off.
+        tool["max_uses"] = max(1, self.advisor_max_uses)
         return tool
 
     @property
@@ -1114,20 +1156,33 @@ class AIClient:
 
     async def _claude_create(self, kwargs: dict[str, Any]) -> Any:
         """One messages.create. A request that carries the advisor goes to the
-        beta endpoint; if the API rejects it (an invalid executor/advisor
-        pairing after an /ai_model change, a beta that isn't on for this key)
-        the same request is made without it, and the pairing is left alone
-        from then on rather than failing every reply. The retry's own failure
-        is the real error and propagates."""
+        beta endpoint, with longer to answer. If that fails in a way a plain
+        request wouldn't, the same request is made without it so the reply
+        still goes out:
+
+        * a 400 (an invalid executor/advisor pairing after an /ai_model
+          change, a beta that isn't on for this key): the pairing is also left
+          alone from then on, once the plain request shows it was the advisor;
+        * a timeout, a dropped connection, a 5xx/overloaded: transient, so
+          nothing is blocked.
+
+        Not when the conversation already holds advisor blocks: the advisor
+        can't be dropped from a request that carries them, and a pairing the
+        API refuses is always refused on a reply's first request, before any
+        exist. The retry's own failure is the real error and propagates."""
         tools = kwargs.get("tools") or []
         advisor = next((t for t in tools if t.get("type") == ADVISOR_TOOL_TYPE), None)
         if advisor is None:
             return await self._anthropic.messages.create(**kwargs)
         try:
             return await self._anthropic.beta.messages.create(
-                betas=[ADVISOR_BETA], **kwargs,
+                betas=[ADVISOR_BETA], timeout=_ADVISOR_TIMEOUT_SECONDS, **kwargs,
             )
-        except AnthropicBadRequestError as exc:
+        except (AnthropicBadRequestError, AnthropicAPITimeoutError,
+                AnthropicAPIConnectionError, AnthropicInternalServerError,
+                AnthropicOverloadedError) as exc:
+            if _has_advisor_blocks(kwargs.get("messages") or ()):
+                raise
             plain = {**kwargs}
             rest = [t for t in tools if t is not advisor]
             if rest:
@@ -1135,11 +1190,17 @@ class AIClient:
             else:
                 plain.pop("tools", None)
             resp = await self._anthropic.messages.create(**plain)
-            self._advisor_blocked.add((kwargs["model"], advisor["model"]))
-            log.warning(
-                "Advisor %s turned down for %s (%s); replying without it from "
-                "now on.", advisor["model"], kwargs["model"], str(exc)[:160],
-            )
+            if isinstance(exc, AnthropicBadRequestError):
+                self._advisor_blocked.add((kwargs["model"], advisor["model"]))
+                log.warning(
+                    "Advisor %s turned down for %s (%s); replying without it "
+                    "from now on.", advisor["model"], kwargs["model"], str(exc)[:160],
+                )
+            else:
+                log.warning(
+                    "The advisor request failed (%s); replied without it this "
+                    "time.", type(exc).__name__,
+                )
             return resp
 
     # ----------------------------------------------------------- vision

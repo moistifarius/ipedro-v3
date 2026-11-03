@@ -36,6 +36,7 @@ from ipedro.kv import kv_delete, kv_set
 from ipedro.logging_setup import recent_log_lines
 from ipedro.memory.summarizer import force_summarize
 from ipedro.memory.tokens import count_tokens
+from ipedro.openai_client import has_claude_price
 from ipedro.personas import (
     current_master_prompt, default_prompt, set_master_prompt_override,
 )
@@ -1905,10 +1906,21 @@ def build_router(rt: Runtime) -> Router:
         """
         if not await require_admin(msg, admin_ids):
             return
+        ai = rt.openai
+        # The setting is saved either way, but only Dale, on the Claude path,
+        # ever consults one: say so wherever it would otherwise look like it
+        # did something.
+        notes = ""
+        if not identity.from_settings(rt.settings).dale_flavor:
+            notes += "\n(Only Dale consults an advisor; this bot never does.)"
+        if getattr(ai, "text_provider", "claude") != "claude":
+            notes += (
+                f"\n(Inactive while the text provider is {ai.text_provider}: "
+                "only the Claude path has an advisor.)"
+            )
         parts = (msg.text or "").split()
         sub = parts[1] if len(parts) > 1 else "show"
         if sub.lower() == "show":
-            ai = rt.openai
             if not ai.advisor_model:
                 state = "off"
             elif ai.advisor_turned_down:
@@ -1918,45 +1930,50 @@ def build_router(rt: Runtime) -> Router:
                 )
             else:
                 state = ai.advisor_model
-            who = (
-                "" if identity.from_settings(rt.settings).dale_flavor
-                else "\n(Only Dale consults an advisor; this bot never does.)"
-            )
             await msg.reply(
                 f"Advisor: {state}\n"
                 f"  writes the replies: {ai.claude_model}\n"
-                f"  at most {ai.advisor_max_uses} consult a reply, "
+                f"  at most {max(1, ai.advisor_max_uses)} consult(s) per request "
+                f"(a reply that also uses a tool takes a few requests), "
                 f"{max(1024, ai.advisor_max_tokens)} tokens each\n"
                 "He is told to ask rarely: hard questions, not banter. Its "
                 "tokens bill at its own rates (/cost, kind 'advisor').\n"
                 "Change with: /ai_advisor <model_id>  or  /ai_advisor off"
-                + who,
+                + notes,
                 disable_notification=True,
             )
             return
         if sub.lower() in ("off", "none", "disable", "disabled"):
-            rt.openai.set_advisor_model(None)
+            ai.set_advisor_model(None)
             await kv_set(rt.db, "advisor_model", "off")
             await msg.reply(
-                "No advisor. Replies are written without one.",
+                "No advisor. Replies are written without one." + notes,
                 disable_notification=True,
             )
             return
         # Ask Anthropic first: a pairing it refuses is dropped at the first
         # reply, but the saved setting outlives a restart.
-        problem = await rt.openai.probe_advisor_model(sub)
+        problem = await ai.probe_advisor_model(sub)
         if problem:
             await msg.reply(
                 f"Anthropic won't take {sub} as the advisor for "
-                f"{rt.openai.claude_model}, so nothing changed (still "
-                f"{rt.openai.advisor_model or 'off'}):\n{problem}",
+                f"{ai.claude_model}, so nothing changed (still "
+                f"{ai.advisor_model or 'off'}):\n{problem}",
                 disable_notification=True,
             )
             return
-        rt.openai.set_advisor_model(sub)
+        ai.set_advisor_model(sub)
         await kv_set(rt.db, "advisor_model", sub)
+        priced = ""
+        if not has_claude_price(sub):
+            priced = (
+                f"\nNo price on file for {sub}, so /cost counts it at the "
+                "default $3/$15 per million tokens until a row is added to "
+                "_CLAUDE_TEXT_PRICE_PER_1K."
+            )
         await msg.reply(
-            f"Advisor is now {sub}.", disable_notification=True,
+            f"Advisor is now {sub}." + priced + notes,
+            disable_notification=True,
         )
 
     async def _store_master_prompt(msg: Message, new_text: str) -> None:
@@ -2131,9 +2148,13 @@ def build_router(rt: Runtime) -> Router:
         for r in rows:
             c = float(r["cost"] or 0)
             total += c
-            cached_total += int(r["cached"] or 0)
-            written_total += int(r["written"] or 0)
-            prompt_total += int(r["prompt"] or 0)
+            if r["kind"] != "advisor":
+                # The advisor's prompts are read in full and never cached (it
+                # is a different model reading a different transcript): in
+                # this line they would read as the main prompt cache failing.
+                cached_total += int(r["cached"] or 0)
+                written_total += int(r["written"] or 0)
+                prompt_total += int(r["prompt"] or 0)
             lines.append(
                 f"  {r['kind']:<10}  {r['calls']:>5} calls  "
                 f"{int(r['tokens']):>8} tokens  ${c:.4f}"
