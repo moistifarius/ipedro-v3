@@ -692,7 +692,7 @@ def build_router(rt: Runtime) -> Router:
         text = typed
         seen = None
         if cfg.vision_enabled and cfg.response_policy != "commands":
-            seen = await vision.look(rt, msg)
+            seen = await vision.look(rt, msg, transcribe=cfg.voice_transcribe)
             if seen:
                 text = f"{seen.note}\n{typed}" if typed else seen.note
 
@@ -1070,7 +1070,9 @@ def build_router(rt: Runtime) -> Router:
         # it already has its own history row from when it arrived, and the
         # description is cached by file id, so this is almost always free.
         if cfg.vision_enabled and msg.reply_to_message is not None:
-            quoted = await vision.describe(rt, msg.reply_to_message)
+            quoted = await vision.describe(
+                rt, msg.reply_to_message, transcribe=cfg.voice_transcribe,
+            )
             if quoted:
                 extra_bits.append(
                     f"The message being replied to contains {quoted}"
@@ -1151,6 +1153,7 @@ def build_router(rt: Runtime) -> Router:
             capabilities=capability_brief(
                 cfg, check_records=tools_on, all_chats=owner_dm,
                 dale_flavor=ident.dale_flavor, can_relay=asker is not None,
+                video=cfg.vision_enabled and vision.watching(rt),
             ),
             terse=ident.terse,
         )

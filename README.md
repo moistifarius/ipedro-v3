@@ -15,6 +15,13 @@ command, and ships in a Docker container that runs comfortably on Unraid.
   image generation, and audio (Whisper). The text provider is
   runtime-switchable via `/ai_provider` so you can flip back to OpenAI
   GPT without a redeploy.
+- **Sees pictures and watches videos**: photos, stickers and GIFs are
+  described by a vision model; a video (or GIF, or round video note) is
+  watched, meaning a few frames sampled across it plus, where the chat has
+  voice transcription on, a transcript of what was said, described together
+  and remembered like anything typed. Needs `ffmpeg` (the Docker image has
+  it); without it, or past the size/length/rate limits, it falls back to the
+  thumbnail.
 - **Postgres + pgvector** memory: raw messages, rolling summaries, durable
   facts, embeddings — assembled on demand and token-budgeted.
 - **Per-chat config**: response policy, persona, ambient probability,

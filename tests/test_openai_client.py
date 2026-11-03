@@ -520,3 +520,59 @@ async def test_a_vector_of_the_wrong_size_is_refused_with_a_reason(caplog):
         assert await client.embed("again") is None          # still refused...
     errors = [r for r in caplog.records if "EMBEDDING_DIM" in r.getMessage()]
     assert len(errors) == 1                                  # ...but said once
+
+
+# ── describing several images at once (the frames of a video) ────────────────
+
+@pytest.mark.asyncio
+async def test_describe_images_sends_every_frame_in_order_then_the_prompt():
+    import base64
+    msgs = _FakeAnthropicMessages(text="a man waves, then leaves")
+    client = _claude_client(msgs)
+    frames = [b"\xff\xd8\xffone", b"\xff\xd8\xfftwo", b"\xff\xd8\xffthree"]
+
+    out = await client.describe_images(frames, prompt="what happens", max_tokens=400)
+
+    assert out == "a man waves, then leaves"
+    call = msgs.calls[0]
+    assert call["model"] == client.cheap_claude_model and call["max_tokens"] == 400
+    content = call["messages"][0]["content"]
+    assert [c["type"] for c in content] == ["image", "image", "image", "text"]
+    assert [base64.b64decode(c["source"]["data"]) for c in content[:3]] == frames
+    assert content[3]["text"] == "what happens"
+
+
+@pytest.mark.asyncio
+async def test_a_single_image_request_is_exactly_what_it_always_was():
+    msgs_a, msgs_b = _FakeAnthropicMessages(text="x"), _FakeAnthropicMessages(text="x")
+    await _claude_client(msgs_a).describe_image(b"\xff\xd8\xffz", prompt="p")
+    await _claude_client(msgs_b).describe_images([b"\xff\xd8\xffz"], prompt="p")
+    assert msgs_a.calls == msgs_b.calls
+    assert [c["type"] for c in msgs_a.calls[0]["messages"][0]["content"]] == ["image", "text"]
+
+
+@pytest.mark.asyncio
+async def test_describe_images_with_nothing_to_look_at_makes_no_call():
+    msgs = _FakeAnthropicMessages(text="x")
+    assert await _claude_client(msgs).describe_images([], prompt="p") is None
+    assert msgs.calls == []
+
+
+@pytest.mark.asyncio
+async def test_describe_images_falls_back_to_openai_with_every_frame():
+    seen = {}
+
+    class _Comp:
+        async def create(self, **kw):
+            seen.update(kw)
+            return type("R", (), {
+                "choices": [type("C", (), {"message": type("M", (), {"content": " ok "})()})()],
+                "usage": type("U", (), {"prompt_tokens": 1, "completion_tokens": 1})(),
+            })()
+
+    msgs = _FakeAnthropicMessages(error=RuntimeError("anthropic down"))
+    client = _claude_client(msgs)
+    client._openai = type("O", (), {"chat": type("Ch", (), {"completions": _Comp()})()})()
+    assert await client.describe_images([b"a", b"b"], prompt="p") == "ok"
+    kinds = [c["type"] for c in seen["messages"][0]["content"]]
+    assert kinds == ["text", "image_url", "image_url"]

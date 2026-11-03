@@ -39,6 +39,14 @@ added with `/newbot` has its own, `ipedro_bot_<id>`, on the same server.)
    prompt. The similarity floor is **0.25 and fixed in code**
    (`memory/context_builder.py`), not an environment setting.
 
+Pictures and videos are described once, when they arrive, and from then on
+are just text. A video is described from a few frames sampled across it
+(`VIDEO_VISION_FRAMES`, up to 8) and, in a chat with voice transcription on,
+what was said in its first five minutes; the description is cached by the
+file's Telegram identity (`media_descriptions`, under `v2:` for a look with
+the sound and `v2n:` for one without, so an older one-frame description never
+shadows it).
+
 Alongside these, `media_library` keeps the pictures people post (described
 by a vision model) so they can be sent back, and `activity_log` keeps the
 "why did / didn't it reply" records the bot reads when asked

@@ -108,6 +108,20 @@ _CANNOT = (
     "- Know what goes on in other chats, beyond what arrives by ether."
 )
 
+# Where videos are watched (ipedro/vision.py): the line above is swapped for
+# this one, so the brief never says "one frame" about a video it actually
+# sampled, and never claims the sound when the chat has it switched off.
+_WATCH_LINE = (
+    "- Watch a video or a GIF play, or hear its sound. You see one frame "
+    "of it, so talk about what's in the picture, not what happens next.\n"
+)
+_WATCH_LINE_VIDEO = (
+    "- Watch a video play start to finish. You get a handful of frames "
+    "from across it, and what was said in it as text where voice "
+    "transcription is on here, so say what you caught; don't claim to "
+    "have seen every moment, or to hear music or tone.\n"
+)
+
 _IN_CHARACTER = (
     "You are exactly who your persona says: a person in this chat who "
     "happens to do the things above. You are NOT a bot, AI, assistant, "
@@ -220,7 +234,7 @@ def _chat_lines(cfg: ChatConfig, *, dale_flavor: bool = True) -> str:
     )
     if not cfg.vision_enabled:
         lines.append(
-            "- Looking at pictures is OFF here: photos, stickers and GIFs "
+            "- Looking at pictures is OFF here: photos, stickers, GIFs and videos "
             "reach you as a bare note that something was posted, with no "
             "idea what's in it. Don't pretend otherwise."
         )
@@ -263,6 +277,7 @@ def capability_brief(
     all_chats: bool = False,
     dale_flavor: bool = True,
     can_relay: bool = False,
+    video: bool = False,
 ) -> str:
     """The full system message. ``cfg`` adds the per-chat lines and
     decides whether the stay-in-character rule applies. ``check_records``
@@ -270,8 +285,12 @@ def capability_brief(
     ``all_chats`` only in the owner's DM, where they reach every chat.
     ``dale_flavor`` is the deployment's (see ipedro/identity.py): only
     Dale has GIFs of himself to post. ``can_relay`` is set only when
-    pass_it_along is offered on this request."""
+    pass_it_along is offered on this request. ``video`` is set when videos
+    are watched here (frames across them, not just a thumbnail)."""
     cannot = _CANNOT
+    if video:
+        assert _WATCH_LINE in cannot
+        cannot = cannot.replace(_WATCH_LINE, _WATCH_LINE_VIDEO)
     if can_relay:
         assert _CONTACT_LINE in cannot
         cannot = cannot.replace(_CONTACT_LINE, _CONTACT_LINE_RELAY)

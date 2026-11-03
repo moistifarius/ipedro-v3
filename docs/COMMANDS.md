@@ -70,7 +70,7 @@ bot's admin user. Switches take `on` or `off` (also `yes`/`no`,
 | `fortune` | `on` / `off` — the daily fortune |
 | `monthlyrecap` | `on` / `off` — the month-in-review post |
 | `onthisday` | `on` / `off` — the daily look back |
-| `vision` | `on` / `off` — look at photos, stickers and GIFs |
+| `vision` | `on` / `off` — look at photos, stickers, GIFs and videos. A video is watched, not just glanced at: a few frames from across it, and (where `voice` is on) a transcript of what was said, described together. See "Watching videos". |
 | `automod` | `on` / `off` — the canned copypasta / meme bits |
 | `voice` | `on` / `off` — transcribe inbound voice notes |
 | `memory` | `on` / `off` — store messages and build context from history |
@@ -497,3 +497,27 @@ The other bots, whether each is running, and why one died.
 Stop, restart or remove one. A removed bot's database is kept, and
 `/newbot` with its token brings it back (with a freshly written persona).
 
+
+
+### Watching videos
+
+With `vision` on, a video, a GIF or a round video note is watched when it
+arrives:
+
+- **What he gets:** up to 8 frames spread evenly across it (4 for a short
+  clip) and, in a chat with `voice` transcription on, a transcript of what was
+  said in the first five minutes. Both go to the vision model together, and
+  the description is stored as the transcript line (`[video: …]`), so he can
+  talk about it, and recall it later, like anything typed. Silence is not
+  transcribed, and music mostly won't come through as words.
+- **Limits:** videos over 20 MB (Telegram's limit for bots) or over
+  `VIDEO_VISION_MAX_SECONDS` (default 300) get the one-frame thumbnail look
+  instead, as does everything while a person is over their limit (8 videos an
+  hour each, 20 a chat; bot admins are exempt) or when `ffmpeg` is missing or
+  `VIDEO_VISION_FRAMES=0`.
+- **Safety:** only real MP4/MOV/WebM files are opened (a text file posing as a
+  video, like a playlist, never reaches `ffmpeg`), with only local files
+  allowed, a time, CPU, memory and output limit per process, and none of the
+  bot's secrets in its environment.
+- What was said, and any text on screen, is treated as data in the prompt, never
+  as an instruction.

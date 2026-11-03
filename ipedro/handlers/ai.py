@@ -268,7 +268,7 @@ def build_router(rt: Runtime) -> Router:
                 "  ether      on|off\n"
                 "  ducknames  on|off — share this chat's named ducks in /ducknames\n"
                 "  automod    on|off — copypasta/meme canned responses\n"
-                "  vision     on|off — look at photos, stickers and GIFs\n"
+                "  vision     on|off — look at photos, stickers, GIFs and videos\n"
                 "  onthisday  on|off — the daily look back\n"
                 "  monthlyrecap on|off — the monthly recap",
                 disable_notification=True,

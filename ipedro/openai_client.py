@@ -982,7 +982,26 @@ class AIClient:
         Returns None when no provider can see, or the call fails — every
         caller degrades to a text label.
         """
-        b64 = base64.b64encode(image).decode("ascii")
+        return await self.describe_images(
+            [image], media_type=media_type, prompt=prompt,
+            max_tokens=max_tokens, chat_id=chat_id,
+        )
+
+    async def describe_images(
+        self,
+        images: Sequence[bytes],
+        *,
+        media_type: str = "image/jpeg",
+        prompt: str,
+        max_tokens: int = 300,
+        chat_id: int | None = None,
+    ) -> str | None:
+        """Look at one or several images together (the frames of a video, in
+        order) and return one plain-text description. Same routing and same
+        None-on-failure contract as describe_image."""
+        encoded = [base64.b64encode(i).decode("ascii") for i in images]
+        if not encoded:
+            return None
         if self._anthropic is not None:
             try:
                 resp = await self._anthropic.messages.create(
@@ -991,14 +1010,17 @@ class AIClient:
                     messages=[{
                         "role": "user",
                         "content": [
-                            {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": media_type,
-                                    "data": b64,
-                                },
-                            },
+                            *(
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": media_type,
+                                        "data": b64,
+                                    },
+                                }
+                                for b64 in encoded
+                            ),
                             {"type": "text", "text": prompt},
                         ],
                     }],
@@ -1028,12 +1050,15 @@ class AIClient:
                         "role": "user",
                         "content": [
                             {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{media_type};base64,{b64}",
-                                },
-                            },
+                            *(
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:{media_type};base64,{b64}",
+                                    },
+                                }
+                                for b64 in encoded
+                            ),
                         ],
                     }],
                 )
@@ -1049,7 +1074,7 @@ class AIClient:
             except Exception as exc:
                 log.warning("OpenAI vision error: %s", exc)
                 return None
-        log.debug("describe_image called with no vision-capable provider.")
+        log.debug("describe_images called with no vision-capable provider.")
         return None
 
     # ----------------------------------------------------------- embeddings (OpenAI only)

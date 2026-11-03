@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     openai_text_model: str = "gpt-4o-mini"
     openai_image_model: str = "gpt-image-1"
     openai_transcription_model: str = "whisper-1"
+    # Watching videos (ipedro/vision.py, ipedro/video_frames.py): how many
+    # frames to sample from a video, at most (0 = look at the thumbnail only,
+    # as before), and how long a video may be before it isn't worth the
+    # tokens. Telegram won't let a bot download more than 20 MB anyway. The
+    # sound is transcribed only in chats that have voice transcription on.
+    video_vision_frames: int = 6
+    video_vision_max_seconds: int = 300
     openai_embedding_model: str = "text-embedding-3-small"
     openai_embedding_dim: int = 1536
     # Text-to-speech for the /ether radio-voice broadcast. The synthesized

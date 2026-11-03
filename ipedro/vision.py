@@ -13,6 +13,11 @@ Three tiers, by how much we can actually see:
 
   * a still image we can look at (photo, static sticker, or the thumbnail
     Telegram generates for a GIF/video)  → a real description;
+  * a video, GIF or video note (small enough to download, short enough to
+    be worth it) → a handful of frames sampled across it, plus a transcript
+    of what was said where the chat has voice transcription on, described
+    together. Anything that stops that (no ffmpeg, too big, too long, a rate
+    limit, a file that isn't really a video) falls back to the thumbnail;
   * media with no still frame (animated stickers are Lottie JSON, voice
     notes are audio)                     → a label, so the bot at least
     knows something arrived and what it was;
@@ -26,11 +31,18 @@ reaction sticker it costs nothing.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import io
 import logging
 from dataclasses import dataclass
 
 from aiogram.types import Message
+
+from ipedro import ratelimit, video_frames
+from ipedro.prompts import (
+    VIDEO_DESCRIBE_PROMPT, VIDEO_SPEECH_ABSENT, VIDEO_SPEECH_PRESENT,
+)
 
 log = logging.getLogger(__name__)
 
@@ -85,10 +97,20 @@ class Media:
     # THUMBNAIL's id, which Telegram will only send as a photo. The picture
     # library files this one, so "send that gif" can actually send the gif.
     source_file_id: str | None = None
+    seconds: int | None = None  # as Telegram reports it, for video-like media
 
     @property
     def viewable(self) -> bool:
         return self.file_id is not None
+
+    @property
+    def watchable(self) -> bool:
+        """Is this something to sample frames from (the file itself, not
+        its thumbnail)?"""
+        return (
+            self.kind in ("video", "gif", "video note")
+            and self.source_file_id is not None
+        )
 
     @property
     def sendable_id(self) -> str | None:
@@ -147,6 +169,7 @@ def extract_media(msg: Message) -> Media | None:
         return Media(
             kind="gif", file_unique_id=a.file_unique_id,
             label="a GIF", file_id=_thumb_id(a), source_file_id=a.file_id,
+            seconds=getattr(a, "duration", None),
         )
 
     if msg.video:
@@ -154,7 +177,7 @@ def extract_media(msg: Message) -> Media | None:
         return Media(
             kind="video", file_unique_id=v.file_unique_id,
             label=f"a video{_clock(v.duration)}", file_id=_thumb_id(v),
-            source_file_id=v.file_id,
+            source_file_id=v.file_id, seconds=getattr(v, "duration", None),
         )
 
     if msg.video_note:
@@ -162,7 +185,7 @@ def extract_media(msg: Message) -> Media | None:
         return Media(
             kind="video note", file_unique_id=v.file_unique_id,
             label=f"a video note{_clock(v.duration)}", file_id=_thumb_id(v),
-            source_file_id=v.file_id,
+            source_file_id=v.file_id, seconds=getattr(v, "duration", None),
         )
 
     if msg.document:
@@ -172,6 +195,12 @@ def extract_media(msg: Message) -> Media | None:
         # An image sent as a file (uncompressed) is still an image.
         is_image = mime.startswith("image/")
         still = d.file_id if is_image else _thumb_id(d)
+        if mime.startswith("video/"):               # a video sent as a file
+            return Media(
+                kind="video", file_unique_id=d.file_unique_id,
+                label=f"a video ({name})", file_id=still,
+                source_file_id=d.file_id,
+            )
         return Media(
             kind="image" if is_image else "file",
             file_unique_id=d.file_unique_id,
@@ -216,12 +245,12 @@ async def _cached(db, file_unique_id: str) -> str | None:
     return row["description"] if row else None
 
 
-async def _remember(db, media: Media, description: str) -> None:
+async def _remember(db, media: Media, description: str, *, key: str | None = None) -> None:
     try:
         await db.execute(
             "INSERT INTO media_descriptions (file_unique_id, kind, description) "
             "VALUES ($1, $2, $3) ON CONFLICT (file_unique_id) DO NOTHING",
-            media.file_unique_id, media.kind, description,
+            key or media.file_unique_id, media.kind, description,
         )
     except Exception as exc:                      # pragma: no cover - defensive
         log.warning("media cache write failed: %s", exc)
@@ -270,9 +299,123 @@ async def _describe_media(rt, msg: Message, media: Media) -> str | None:
     return description or None
 
 
-async def look(rt, msg: Message) -> Seen | None:
+# ── watching a video ─────────────────────────────────────────────────────────
+#
+# A deep look is cached under its own key, so the one-frame description an
+# older version stored for the same file doesn't shadow it, and one made
+# without the sound ("v2n:") doesn't pretend to include it ("v2:").
+_MAX_VIDEO_BYTES = 20_000_000     # what Telegram lets a bot download at all
+_MAX_TRANSCRIPT_CHARS = 2500
+
+
+def watching(rt) -> bool:
+    """Is this deployment set up to watch videos (frames wanted, ffmpeg here)?"""
+    return (
+        getattr(rt.settings, "video_vision_frames", 0) >= 1
+        and video_frames.available()
+    )
+
+
+@contextlib.asynccontextmanager
+async def _typing(bot, chat_id: int | None):
+    """Keep "typing…" showing while a slow look is under way; a video takes
+    seconds and the chat should not look dead."""
+    async def pulse() -> None:
+        while True:
+            await asyncio.sleep(4)
+            try:
+                await bot.send_chat_action(chat_id, "typing")
+            except Exception:                    # cosmetic; never fail a look
+                pass
+
+    if chat_id is not None:
+        try:                                     # shown at once, then kept up
+            await bot.send_chat_action(chat_id, "typing")
+        except Exception:
+            pass
+    task = asyncio.create_task(pulse()) if chat_id is not None else None
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+
+
+async def _download_video(bot, file_id: str) -> bytes | None:
+    file = await bot.get_file(file_id)
+    if (file.file_size or 0) > _MAX_VIDEO_BYTES:
+        return None
+    buf = io.BytesIO()
+    await bot.download_file(file.file_path, destination=buf)
+    return buf.getvalue()
+
+
+async def _watch_media(
+    rt, msg: Message, media: Media, *, transcribe: bool,
+) -> str | None:
+    """A description of the whole video, or None to fall back to the
+    thumbnail. Never raises."""
+    keys = ("v2:",) if transcribe else ("v2n:", "v2:")
+    for prefix in keys:
+        cached = await _cached(rt.db, prefix + media.file_unique_id)
+        if cached:
+            return cached
+    max_seconds = getattr(rt.settings, "video_vision_max_seconds", 300)
+    if media.seconds and media.seconds > max_seconds:
+        return None
+    chat_id = msg.chat.id if msg.chat else None
+    user_id = msg.from_user.id if msg.from_user else None
+    # A person posting a stream of videos shouldn't be able to run up a bill
+    # of frames and transcripts; past the limit it's the thumbnail again.
+    if user_id not in getattr(rt.settings, "admin_ids", ()):
+        wait = ratelimit.wait_for("video", user_id or 0, chat_id)
+        if wait:
+            log.info("Not watching a %s: rate limited for %.0fs.", media.kind, wait)
+            return None
+    try:
+        async with _typing(rt.bot, chat_id):
+            data = await _download_video(rt.bot, media.source_file_id)
+            if not data:
+                return None
+            parts = await video_frames.extract(
+                data, max_frames=rt.settings.video_vision_frames,
+                want_audio=transcribe, max_seconds=max_seconds,
+            )
+            if parts is None:
+                return None
+            transcript = None
+            if transcribe and parts.audio:
+                transcript = await rt.openai.transcribe(
+                    io.BytesIO(parts.audio), filename="video.mp3", chat_id=chat_id,
+                )
+            speech = (
+                VIDEO_SPEECH_PRESENT.format(
+                    transcript=transcript[:_MAX_TRANSCRIPT_CHARS])
+                if transcript else VIDEO_SPEECH_ABSENT
+            )
+            description = await rt.openai.describe_images(
+                parts.frames, media_type="image/jpeg", max_tokens=400,
+                prompt=VIDEO_DESCRIBE_PROMPT.format(
+                    frames=len(parts.frames), seconds=round(parts.seconds),
+                    speech=speech,
+                ),
+                chat_id=chat_id,
+            )
+    except Exception as exc:
+        log.warning("Watching a %s failed: %s", media.kind, exc)
+        return None
+    if description:
+        await _remember(
+            rt.db, media, description,
+            key=("v2:" if transcribe else "v2n:") + media.file_unique_id,
+        )
+    return description or None
+
+
+async def look(rt, msg: Message, *, transcribe: bool = False) -> Seen | None:
     """Everything the bot can say about the media on ``msg``, or None if
-    there is none.
+    there is none. ``transcribe`` is whether the chat allows the sound of a
+    video to be turned into text (its voice-transcription setting).
 
     Never raises: a blind spot is a missing sentence, not a dropped
     message. Every failure path falls back to the plain label so the bot
@@ -281,11 +424,15 @@ async def look(rt, msg: Message) -> Seen | None:
     media = extract_media(msg)
     if media is None:
         return None
-    description = await _describe_media(rt, msg, media) if media.viewable else None
+    description = None
+    if media.watchable and watching(rt):
+        description = await _watch_media(rt, msg, media, transcribe=transcribe)
+    if description is None and media.viewable:
+        description = await _describe_media(rt, msg, media)
     return Seen(media=media, description=description, note=note(media, description))
 
 
-async def describe(rt, msg: Message) -> str | None:
+async def describe(rt, msg: Message, *, transcribe: bool = False) -> str | None:
     """The transcript line for whatever media is on ``msg``, or None."""
-    seen = await look(rt, msg)
+    seen = await look(rt, msg, transcribe=transcribe)
     return seen.note if seen else None
