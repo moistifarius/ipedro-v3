@@ -364,6 +364,10 @@ COMMANDS: tuple[Command, ...] = (
     Command("ai_model",     "ai_admin", "/ai_model",
             "/ai_model show | [provider] <model_id>",
             "Show or switch the active text model."),
+    Command("ai_advisor",   "ai_admin", "/ai_advisor",
+            "/ai_advisor show | off | <model_id>",
+            "Show, set or turn off the stronger model Dale may consult "
+            "mid-reply on a hard question."),
     Command("master_prompt","ai_admin", "/master_prompt",
             "/master_prompt show | set <text> | setfile | reset",
             "Inspect or override the global persona prompt."),

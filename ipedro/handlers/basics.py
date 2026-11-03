@@ -140,6 +140,8 @@ HELP_TEXT_ADMIN = (
     "/master_prompt show|set <text>|setfile|reset - global persona prompt\n"
     "/ai_provider show|claude|openai - switch text-completion provider\n"
     "/ai_model show|[provider] <model_id> - switch text model\n"
+    "/ai_advisor show|off|<model_id> - the stronger model he may consult "
+    "on a hard question\n"
     "\n"
     "Memory repair:\n"
     "/unlearn <the false belief> - scrub something the chat gaslit me into "

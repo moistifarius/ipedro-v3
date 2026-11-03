@@ -58,6 +58,18 @@ class Settings(BaseSettings):
     # with a separate rate-limit quota). Override via env if you want a
     # different cheap default.
     claude_cheap_model: str = "claude-haiku-4-5"
+    # The advisor (Anthropic beta): the model writing a chat reply may stop
+    # and consult a stronger one mid-reply, inside the same request, and the
+    # stronger model's tokens bill at ITS rates. Dale's main replies only. He
+    # is told to ask rarely (hard questions, not banter) and `max_uses` caps
+    # it at one consult per request; `advisor_max_tokens` caps what the
+    # advisor may write (the API's floor is 1024). Empty turns it off.
+    # /ai_advisor changes it live. The pairing has to be one the API allows
+    # (the advisor at least as capable as the model it advises); one it
+    # refuses is dropped and replies carry on without it.
+    advisor_model: str = "claude-opus-5-5"
+    advisor_max_tokens: int = 1024
+    advisor_max_uses: int = 1
     openai_cheap_model: str = "gpt-4o-mini"
     text_provider: Literal["claude", "openai"] = "claude"
 

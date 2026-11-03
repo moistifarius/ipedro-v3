@@ -52,6 +52,14 @@ from ipedro.silenced_chats import load_all as load_silenced_chats
 log = logging.getLogger(__name__)
 
 
+def resolve_advisor_model(saved: str | None, configured: str | None) -> str | None:
+    """The advisor to start with: what /ai_advisor last saved (a model id, or
+    "off" for none), else the configured one. Empty means none."""
+    if saved == "off":
+        return None
+    return (saved or configured or "").strip() or None
+
+
 def install_flavor(bot: Bot, settings: Settings) -> None:
     """A bot that isn't Dale never says his catchphrases, wherever the
     canned line that holds one lives (see ipedro/plain_flavor.py)."""
@@ -76,6 +84,7 @@ async def build_runtime(settings: Settings) -> Runtime:
     saved_provider = await kv_get(db, "text_provider")
     saved_claude_model = await kv_get(db, "claude_text_model")
     saved_openai_model = await kv_get(db, "openai_text_model")
+    saved_advisor = await kv_get(db, "advisor_model")      # a model id, or "off"
 
     text_provider = saved_provider if saved_provider in ("claude", "openai") else settings.text_provider
     if text_provider == "claude" and not settings.anthropic_api_key:
@@ -97,11 +106,15 @@ async def build_runtime(settings: Settings) -> Runtime:
         embedding_dim=settings.openai_embedding_dim,
         tts_model=settings.openai_tts_model,
         tts_voice=settings.openai_tts_voice,
+        advisor_model=resolve_advisor_model(saved_advisor, settings.advisor_model),
+        advisor_max_tokens=settings.advisor_max_tokens,
+        advisor_max_uses=settings.advisor_max_uses,
     )
     openai.attach_usage_db(db)
     log.info(
-        "AI text provider: %s (claude=%s, openai=%s)",
+        "AI text provider: %s (claude=%s, openai=%s, advisor=%s)",
         openai.text_provider, openai.claude_model, openai.text_model,
+        openai.advisor_model or "off",
     )
 
     # Who this bot starts as with no /master_prompt override: Dale, unless

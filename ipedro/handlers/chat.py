@@ -1137,6 +1137,15 @@ def build_router(rt: Runtime) -> Router:
             else None
         )
 
+        # A stronger model he may consult mid-reply: Dale's, on the Claude
+        # path, and not for an impersonation turn (that is somebody else's
+        # voice). Whether to ask is up to him (the brief says: rarely).
+        advisor_check = getattr(rt.openai, "advisor_available", None)
+        advisor_on = bool(
+            ident.dale_flavor and persona_override is None
+            and callable(advisor_check) and advisor_check()
+        )
+
         ctx = await build_context(
             store=rt.memory,
             settings=rt.settings,
@@ -1154,6 +1163,7 @@ def build_router(rt: Runtime) -> Router:
                 cfg, check_records=tools_on, all_chats=owner_dm,
                 dale_flavor=ident.dale_flavor, can_relay=asker is not None,
                 video=cfg.vision_enabled and vision.watching(rt),
+                advisor=advisor_on,
             ),
             terse=ident.terse,
         )
@@ -1165,6 +1175,7 @@ def build_router(rt: Runtime) -> Router:
         # it never posts stopping mid-word. Dale's is 400; any other bot's is
         # tighter (ident.reply_tokens), because its character sheet is what
         # makes replies long.
+        advisor_kw = {"advisor": True} if advisor_on else {}
         relayed = False
         if tools_on:
             async def _run_tool(name: str, args: dict) -> tuple[str, bool]:
@@ -1190,11 +1201,12 @@ def build_router(rt: Runtime) -> Router:
                     owner_dm=owner_dm, relay_on=asker is not None,
                 ),
                 run_tool=_run_tool, max_tokens=ident.reply_tokens,
-                chat_id=msg.chat.id,
+                chat_id=msg.chat.id, **advisor_kw,
             )
         else:
             reply = await rt.openai.chat(
                 ctx.messages, max_tokens=ident.reply_tokens, chat_id=msg.chat.id,
+                **advisor_kw,
             )
         if not reply and relayed:
             # The message went out, then the model's last round failed or was

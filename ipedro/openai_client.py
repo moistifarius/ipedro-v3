@@ -30,6 +30,7 @@ from anthropic import (
     APIError as AnthropicAPIError,
     APITimeoutError as AnthropicAPITimeoutError,
     AsyncAnthropic,
+    BadRequestError as AnthropicBadRequestError,
     InternalServerError as AnthropicInternalServerError,
     OverloadedError as AnthropicOverloadedError,
 )
@@ -390,7 +391,8 @@ ToolRunner = Callable[[str, dict], Awaitable[tuple[str, bool]]]
 # would land in a group chat in the persona's mouth. Anthropic documents
 # this failure mode; the prompt-side mitigation lives in capabilities.py.
 _LEAKED_INTERNALS_RE = re.compile(
-    r"</?\s*(?:antml:)?(?:invoke|function_calls|parameter|tool_use|thinking)\b",
+    r"</?\s*(?:antml:)?(?:invoke|function_calls|parameter|tool_use|thinking"
+    r"|server_tool_use|advisor_tool_result|advisor)\b",
     re.IGNORECASE,
 )
 
@@ -409,9 +411,32 @@ def _trim_to_sentence(text: str) -> str:
     return text.rstrip() + "…"
 
 
+# The advisor tool (https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool):
+# the model writing the reply can stop and consult a stronger one mid-turn,
+# inside the same request. It is a beta, hence a different endpoint and a
+# header. The executor's text that comes BEFORE the call ("let me check with
+# my guy") is narration, never part of the reply.
+ADVISOR_BETA = "advisor-tool-2026-03-01"
+ADVISOR_TOOL_TYPE = "advisor_20260301"
+ADVISOR_TOOL_NAME = "advisor"
+_ADVISOR_MIN_TOKENS = 1024            # the API's floor for the tool's max_tokens
+# A turn can pause while the advisor runs ("pause_turn"); the answer is to send
+# it back as it came. A few times at most, never forever.
+_MAX_PAUSE_RESUMES = 3
+
+
 def _claude_text(resp: Any) -> str | None:
+    blocks = list(resp.content)
+    # After an advisor call only what was written once the advice was in is
+    # the reply. Text before the call is the model thinking out loud.
+    asked = [
+        i for i, b in enumerate(blocks)
+        if getattr(b, "type", None) == "advisor_tool_result"
+    ]
+    if asked:
+        blocks = blocks[asked[-1] + 1:]
     parts = [
-        block.text for block in resp.content
+        block.text for block in blocks
         if getattr(block, "type", None) == "text"
     ]
     text = "\n".join(parts).strip()
@@ -480,6 +505,12 @@ class AIClient:
         embedding_dim: int = 1536,
         tts_model: str = "gpt-4o-mini-tts",
         tts_voice: str = "onyx",
+        # A stronger model the reply-writing one may consult mid-turn (see
+        # ADVISOR_BETA). None: off. Only requests that ask for it (advisor=True)
+        # carry it, and only the Claude text path can.
+        advisor_model: str | None = None,
+        advisor_max_tokens: int = _ADVISOR_MIN_TOKENS,
+        advisor_max_uses: int = 1,
     ) -> None:
         # max_retries=0: tenacity (above) owns retrying. Timeouts are real:
         # the SDK default is ten minutes per attempt, which let one stalled
@@ -523,6 +554,12 @@ class AIClient:
         self._warned_embedding_dim = False
         self.tts_model = tts_model
         self.tts_voice = tts_voice
+        self.advisor_model = (advisor_model or "").strip() or None
+        self.advisor_max_tokens = advisor_max_tokens
+        self.advisor_max_uses = advisor_max_uses
+        # (executor, advisor) pairs the API turned down and that work without
+        # the advisor: not asked again until the models change.
+        self._advisor_blocked: set[tuple[str, str]] = set()
         self._usage_db: Database | None = None
 
     # back-compat property alias so callers can still poke _client.* in tests
@@ -609,8 +646,12 @@ class AIClient:
         max_tokens: int = 600,
         temperature: float = 1.0,
         chat_id: int | None = None,
+        advisor: bool = False,
     ) -> str | None:
         """Route a chat completion to the active text provider.
+
+        ``advisor`` lets the Claude model consult the advisor model mid-reply
+        (see ADVISOR_BETA); ignored wherever it can't (OpenAI, no advisor set).
 
         The inner provider methods are decorated with tenacity; on
         exhausted retries tenacity raises a RetryError (and the inner
@@ -622,7 +663,7 @@ class AIClient:
             if self._text_provider == "claude" and self._anthropic is not None:
                 return await self._chat_claude(
                     messages, model=model, max_tokens=max_tokens,
-                    temperature=temperature, chat_id=chat_id,
+                    temperature=temperature, chat_id=chat_id, advisor=advisor,
                 )
             return await self._chat_openai(
                 messages, model=model, max_tokens=max_tokens,
@@ -756,6 +797,7 @@ class AIClient:
         max_tokens: int,
         temperature: float,
         chat_id: int | None,
+        advisor: bool = False,
     ) -> str | None:
         if self._anthropic is None:
             log.error("Claude chat requested but no anthropic_api_key.")
@@ -764,16 +806,31 @@ class AIClient:
         system, chat_messages = _normalize_for_claude(
             messages, model=m, ttl=self.cache_ttl,
         )
+        advisor_tool = self._advisor_tool(m) if advisor else None
         kwargs = self._claude_kwargs(
             model=m, system=system, chat_messages=chat_messages,
             max_tokens=max_tokens, temperature=temperature,
+            tools=[advisor_tool] if advisor_tool else None,
         )
         try:
-            resp = await self._anthropic.messages.create(**kwargs)
+            resp = await self._claude_create(kwargs)
             await self._log_claude_usage(resp, m, chat_id)
-            # No tools are offered on this path (impersonation, hub replies,
-            # classifiers), so only stray markup can leak: a <thinking> block
-            # the model wrote out, say. The tool loop filters the same way.
+            # A turn that paused while the advisor ran is sent back as it
+            # came, and carries on.
+            for _ in range(_MAX_PAUSE_RESUMES):
+                if getattr(resp, "stop_reason", None) != "pause_turn":
+                    break
+                kwargs = {**kwargs, "messages": [
+                    *kwargs["messages"],
+                    {"role": "assistant", "content": resp.content},
+                ]}
+                resp = await self._claude_create(kwargs)
+                await self._log_claude_usage(resp, m, chat_id)
+            # Only stray markup can leak on this path: a <thinking> block the
+            # model wrote out, say, or the advisor's markup. (Not the word
+            # "advisor" followed by a bracket: "my tax advisor (Gary) says" is
+            # a sentence, and the advisor is a server tool the model never
+            # has to write out.) The tool loop filters the same way.
             return _withhold_leaked_internals(_claude_text(resp), ())
         except AnthropicAPIError:
             raise
@@ -862,6 +919,23 @@ class AIClient:
             cache_write_tokens=cw, cache_read_tokens=cr,
             cost_usd=_claude_text_price(model, pt, ct, cw, cr, w1h),
         )
+        # The top-level usage above is the model writing the reply only. What
+        # the advisor model spent is billed at ITS rates and reported apart,
+        # one iteration per call.
+        for it in getattr(usage, "iterations", None) or ():
+            if getattr(it, "type", None) != "advisor_message":
+                continue
+            am = getattr(it, "model", None) or self.advisor_model or model
+            ipt = getattr(it, "input_tokens", 0) or 0
+            ict = getattr(it, "output_tokens", 0) or 0
+            icw = getattr(it, "cache_creation_input_tokens", 0) or 0
+            icr = getattr(it, "cache_read_input_tokens", 0) or 0
+            await self._log_usage(
+                kind="advisor", model=am, chat_id=chat_id,
+                prompt_tokens=ipt + icw + icr, completion_tokens=ict,
+                cache_write_tokens=icw, cache_read_tokens=icr,
+                cost_usd=_claude_text_price(am, ipt, ict, icw, icr),
+            )
 
     # ----------------------------------------------------------- tools
     @property
@@ -880,6 +954,7 @@ class AIClient:
         max_tokens: int = 600,
         temperature: float = 1.0,
         chat_id: int | None = None,
+        advisor: bool = False,
     ) -> str | None:
         """``chat()`` plus a bounded tool loop: the model may call one of
         ``tools``, ``run_tool(name, args)`` answers it, and the model
@@ -888,13 +963,13 @@ class AIClient:
         if not tools or not self.supports_tools:
             return await self.chat(
                 messages, max_tokens=max_tokens, temperature=temperature,
-                chat_id=chat_id,
+                chat_id=chat_id, advisor=advisor,
             )
         try:
             return await self._chat_claude_tools(
                 messages, tools=tools, run_tool=run_tool,
                 max_tokens=max_tokens, temperature=temperature,
-                chat_id=chat_id,
+                chat_id=chat_id, advisor=advisor,
             )
         except Exception as exc:
             log.error("chat_with_tools() final failure: %s", exc)
@@ -909,6 +984,7 @@ class AIClient:
         max_tokens: int,
         temperature: float,
         chat_id: int | None,
+        advisor: bool = False,
     ) -> str | None:
         m = self.claude_model
         system, chat_messages = _normalize_for_claude(
@@ -919,12 +995,28 @@ class AIClient:
         # would mangle.
         convo: list[dict[str, Any]] = list(chat_messages)
         offered = [t["name"] for t in tools]
+        # Last in the list, always: the tools are the head of the cache
+        # prefix, and a chat's list has to be byte-identical from reply to
+        # reply (the advisor is the same for every chat).
+        advisor_tool = self._advisor_tool(m) if advisor else None
+        if advisor_tool:
+            tools = [*tools, advisor_tool]
         for round_no in range(_MAX_TOOL_ROUNDS + 1):
             kwargs = self._claude_kwargs(
                 model=m, system=system, chat_messages=convo,
                 max_tokens=max_tokens, temperature=temperature, tools=tools,
             )
             resp = await self._claude_tool_round(kwargs, m, chat_id)
+            # Paused while the advisor ran: send the turn back as it came.
+            for _ in range(_MAX_PAUSE_RESUMES):
+                if getattr(resp, "stop_reason", None) != "pause_turn":
+                    break
+                convo.append({"role": "assistant", "content": resp.content})
+                kwargs = self._claude_kwargs(
+                    model=m, system=system, chat_messages=convo,
+                    max_tokens=max_tokens, temperature=temperature, tools=tools,
+                )
+                resp = await self._claude_tool_round(kwargs, m, chat_id)
             calls = [
                 b for b in resp.content
                 if getattr(b, "type", None) == "tool_use"
@@ -960,9 +1052,95 @@ class AIClient:
     ) -> Any:
         """One request of the tool loop, retried on its own — retrying the
         whole loop instead would re-bill every round before the failure."""
-        resp = await self._anthropic.messages.create(**kwargs)
+        resp = await self._claude_create(kwargs)
         await self._log_claude_usage(resp, model, chat_id)
         return resp
+
+    # ----------------------------------------------------------- advisor
+    def advisor_available(self) -> bool:
+        """Would a reply that asks for the advisor get one? (Claude is the
+        text provider, an advisor model is set, and the API hasn't turned
+        that pairing down.)"""
+        return self._advisor_tool(self.claude_model) is not None and self.supports_tools
+
+    def _advisor_tool(self, executor: str) -> dict[str, Any] | None:
+        if not self.advisor_model:
+            return None
+        if (executor, self.advisor_model) in self._advisor_blocked:
+            return None
+        tool: dict[str, Any] = {
+            "type": ADVISOR_TOOL_TYPE,
+            "name": ADVISOR_TOOL_NAME,
+            "model": self.advisor_model,
+            "max_tokens": max(_ADVISOR_MIN_TOKENS, self.advisor_max_tokens),
+        }
+        if self.advisor_max_uses > 0:
+            tool["max_uses"] = self.advisor_max_uses
+        return tool
+
+    @property
+    def advisor_turned_down(self) -> bool:
+        """Has the API refused the current executor/advisor pairing?"""
+        return (self.claude_model, self.advisor_model) in self._advisor_blocked
+
+    def set_advisor_model(self, model: str | None) -> None:
+        self.advisor_model = (model or "").strip() or None
+        self._advisor_blocked.clear()
+
+    async def probe_advisor_model(self, model: str) -> str | None:
+        """None when the API accepts ``model`` as the advisor for the model
+        that writes replies; otherwise why not. An invalid pairing is a 400,
+        so /ai_advisor asks before it saves one. One eight-token request."""
+        if self._anthropic is None:
+            return "No Anthropic key, so there is no advisor to set."
+        executor = self.claude_model
+        kwargs = self._claude_kwargs(
+            model=executor, system=None,
+            chat_messages=[{"role": "user", "content": "ping"}],
+            max_tokens=8, temperature=1.0,
+            tools=[{
+                "type": ADVISOR_TOOL_TYPE, "name": ADVISOR_TOOL_NAME,
+                "model": model, "max_tokens": _ADVISOR_MIN_TOKENS,
+                "max_uses": 1,
+            }],
+        )
+        try:
+            await self._anthropic.beta.messages.create(betas=[ADVISOR_BETA], **kwargs)
+        except AnthropicAPIError as exc:
+            return str(exc)[:300]
+        except Exception as exc:                  # pragma: no cover - defensive
+            return f"{type(exc).__name__}: {exc}"[:300]
+        return None
+
+    async def _claude_create(self, kwargs: dict[str, Any]) -> Any:
+        """One messages.create. A request that carries the advisor goes to the
+        beta endpoint; if the API rejects it (an invalid executor/advisor
+        pairing after an /ai_model change, a beta that isn't on for this key)
+        the same request is made without it, and the pairing is left alone
+        from then on rather than failing every reply. The retry's own failure
+        is the real error and propagates."""
+        tools = kwargs.get("tools") or []
+        advisor = next((t for t in tools if t.get("type") == ADVISOR_TOOL_TYPE), None)
+        if advisor is None:
+            return await self._anthropic.messages.create(**kwargs)
+        try:
+            return await self._anthropic.beta.messages.create(
+                betas=[ADVISOR_BETA], **kwargs,
+            )
+        except AnthropicBadRequestError as exc:
+            plain = {**kwargs}
+            rest = [t for t in tools if t is not advisor]
+            if rest:
+                plain["tools"] = rest
+            else:
+                plain.pop("tools", None)
+            resp = await self._anthropic.messages.create(**plain)
+            self._advisor_blocked.add((kwargs["model"], advisor["model"]))
+            log.warning(
+                "Advisor %s turned down for %s (%s); replying without it from "
+                "now on.", advisor["model"], kwargs["model"], str(exc)[:160],
+            )
+            return resp
 
     # ----------------------------------------------------------- vision
     async def describe_image(

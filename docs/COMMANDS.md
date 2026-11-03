@@ -405,6 +405,21 @@ Examples: `/ai_model claude-opus-5-5`, `/ai_model openai gpt-4.1-mini`.
 A Claude id is sent to Anthropic first and refused if it can't answer, so a
 typo never gets saved. Persisted in `kv_store`.
 
+### `/ai_advisor show | off | <model_id>`
+The advisor: a stronger model that the model writing Dale's replies may
+consult in the middle of a reply, on a hard question (Anthropic's advisor
+tool, a beta; default `ADVISOR_MODEL=claude-opus-5-5`). It runs inside the same
+request, reads the whole conversation, and tells him what it would do; the reply
+is still his, in his voice. He is told to ask rarely, for a question where being
+wrong would matter and never for banter, and to ask at most
+`ADVISOR_MAX_USES` (1) times a reply; the advisor writes at most
+`ADVISOR_MAX_TOKENS` (1024, the API's floor) tokens. Its tokens bill at its own
+rates, logged as `advisor` in `/cost`. Only Dale's own chat replies use it
+(not `/a`, summaries, other bots, impersonations or the cheap classifiers). A
+`<model_id>` is tried against Anthropic before it is saved, and a pairing the API
+later turns down (say after `/ai_model`) is dropped, replies carrying on without
+it. Persisted in `kv_store`; `off` survives a restart.
+
 ### `/debug_toggle [<name> on|off]`
 Admin-scoped duckhunt cheats for testing flows end-to-end without
 waiting on dice / AI. Toggles are keyed by the admin's user id so two

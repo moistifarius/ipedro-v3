@@ -153,6 +153,25 @@ _RECORDS = (
     "tags in your response."
 )
 
+# Only when the advisor is actually offered on this reply (Dale's, with an
+# advisor model set). The model also sees the advisor tool's own description,
+# which nudges it to call early and often; for a chat that is wrong, because
+# most of what is said here is banter. The last sentence is addressed to the
+# advisor, which reads this prompt too: that is the form it follows best.
+_ADVISOR = (
+    "You can stop and think a hard one over with someone sharper than you "
+    "(advisor). It reads everything you've seen here and tells you what it "
+    "would do; the reply is still yours, in your voice. Ask rarely: when "
+    "the answer matters and you could get it wrong (a real factual, "
+    "technical, money, health or legal question, or reasoning that has to "
+    "come out right, or someone leaning on you for serious advice). Never "
+    "for banter, reactions, jokes, opinions, or anything you'd answer in a "
+    "breath, and not twice. Don't mention it, quote it, or say you asked. "
+    "Write the reply the length you normally would, not the length of the "
+    "advice. (Advisor: this is a chat message, not an essay. Keep your "
+    "guidance under 100 words.)"
+)
+
 _ALL_RECORDS = (
     "This is a private line with the one person you answer to. Here your "
     "records cover every chat you're in, not just this one "
@@ -278,6 +297,7 @@ def capability_brief(
     dale_flavor: bool = True,
     can_relay: bool = False,
     video: bool = False,
+    advisor: bool = False,
 ) -> str:
     """The full system message. ``cfg`` adds the per-chat lines and
     decides whether the stay-in-character rule applies. ``check_records``
@@ -286,7 +306,8 @@ def capability_brief(
     ``dale_flavor`` is the deployment's (see ipedro/identity.py): only
     Dale has GIFs of himself to post. ``can_relay`` is set only when
     pass_it_along is offered on this request. ``video`` is set when videos
-    are watched here (frames across them, not just a thumbnail)."""
+    are watched here (frames across them, not just a thumbnail). ``advisor``
+    is set when this reply may consult the advisor model."""
     cannot = _CANNOT
     if video:
         assert _WATCH_LINE in cannot
@@ -307,6 +328,8 @@ def capability_brief(
             parts.append(_ALL_RECORDS)
     if can_relay:
         parts.append(_RELAY)
+    if advisor:
+        parts.append(_ADVISOR)
     parts.append("Slash commands anyone here can use:\n" + _command_lines())
     if cfg is None or is_character_persona(cfg.persona, cfg.persona_custom):
         parts.append(_IN_CHARACTER)

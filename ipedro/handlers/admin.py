@@ -14,6 +14,7 @@ from aiogram.types import (
 import asyncpg
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 
+from ipedro import identity
 from ipedro.auth import is_admin_user
 from ipedro.bot_messages import (
     TrackedMessage, forget as forget_tracked, recent as recent_tracked,
@@ -1891,6 +1892,71 @@ def build_router(rt: Runtime) -> Router:
         await msg.reply(
             f"{slot} text model is now {new_model}.",
             disable_notification=True,
+        )
+
+    @r.message(Command("ai_advisor"))
+    async def ai_advisor(msg: Message) -> None:
+        """The stronger model Dale may consult mid-reply (Anthropic's advisor
+        tool, a beta).
+
+        /ai_advisor show
+        /ai_advisor off
+        /ai_advisor <model_id>
+        """
+        if not await require_admin(msg, admin_ids):
+            return
+        parts = (msg.text or "").split()
+        sub = parts[1] if len(parts) > 1 else "show"
+        if sub.lower() == "show":
+            ai = rt.openai
+            if not ai.advisor_model:
+                state = "off"
+            elif ai.advisor_turned_down:
+                state = (
+                    f"{ai.advisor_model}, but the API turned the pairing with "
+                    f"{ai.claude_model} down, so replies go without it"
+                )
+            else:
+                state = ai.advisor_model
+            who = (
+                "" if identity.from_settings(rt.settings).dale_flavor
+                else "\n(Only Dale consults an advisor; this bot never does.)"
+            )
+            await msg.reply(
+                f"Advisor: {state}\n"
+                f"  writes the replies: {ai.claude_model}\n"
+                f"  at most {ai.advisor_max_uses} consult a reply, "
+                f"{max(1024, ai.advisor_max_tokens)} tokens each\n"
+                "He is told to ask rarely: hard questions, not banter. Its "
+                "tokens bill at its own rates (/cost, kind 'advisor').\n"
+                "Change with: /ai_advisor <model_id>  or  /ai_advisor off"
+                + who,
+                disable_notification=True,
+            )
+            return
+        if sub.lower() in ("off", "none", "disable", "disabled"):
+            rt.openai.set_advisor_model(None)
+            await kv_set(rt.db, "advisor_model", "off")
+            await msg.reply(
+                "No advisor. Replies are written without one.",
+                disable_notification=True,
+            )
+            return
+        # Ask Anthropic first: a pairing it refuses is dropped at the first
+        # reply, but the saved setting outlives a restart.
+        problem = await rt.openai.probe_advisor_model(sub)
+        if problem:
+            await msg.reply(
+                f"Anthropic won't take {sub} as the advisor for "
+                f"{rt.openai.claude_model}, so nothing changed (still "
+                f"{rt.openai.advisor_model or 'off'}):\n{problem}",
+                disable_notification=True,
+            )
+            return
+        rt.openai.set_advisor_model(sub)
+        await kv_set(rt.db, "advisor_model", sub)
+        await msg.reply(
+            f"Advisor is now {sub}.", disable_notification=True,
         )
 
     async def _store_master_prompt(msg: Message, new_text: str) -> None:
