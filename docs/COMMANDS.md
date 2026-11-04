@@ -43,14 +43,15 @@ answering you anyway: "make a poll from this", "poll this: pizza or tacos",
 "turn this into a poll", "can you make us a poll about friday". Talk *about*
 polls ("did you make a poll", "i hate polls", "get the poll results") makes
 nothing, and a poll typed whole after the ask ("make a poll: where | pizza |
-tacos") is posted as typed. The poll is posted as a reply to your message, in
-the same topic of a forum group. When asked in plain words it is also written
-into the chat's history, so he knows it exists. `/poll` with nothing to go on
-says what to give it.
+tacos") is posted as typed. A drafted poll, or one typed whole in plain words,
+is posted as a reply to your message, in the same topic of a forum group (the
+typed `/poll Q | A | B` posts as it always has). When asked in plain words it is
+also written into the chat's history, so he knows it exists. `/poll` with
+nothing to go on says what to give it.
 
 The drafted poll is one cheap model call, checked against Telegram's limits in
 code (question 300 characters, options 100 each, no duplicates, numbering a
-model added taken off),
+model put on the whole list taken off),
 so a model that ignores the limits still can't make Telegram refuse the poll.
 Whatever is in the material is treated as data in the prompt, never as an
 instruction, and nothing from any other chat is used.

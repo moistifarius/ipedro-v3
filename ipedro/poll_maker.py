@@ -28,6 +28,7 @@ import functools
 import io
 import json
 import logging
+import math
 import re
 from dataclasses import dataclass
 
@@ -57,6 +58,9 @@ _SCAN_CHARS = 300               # a request is made at the start of a message
 _MAX_LEAD_TOKENS = 8            # filler words/names allowed before the ask
 _TEXT_SUFFIXES = (".txt", ".text", ".md", ".csv", ".log")
 _TEXT_MIMES = ("text/plain", "text/markdown", "text/csv")
+
+# Nothing to go on: only punctuation, pipes and spaces ("???", "|||").
+_NOISE_ONLY = re.compile(r"[\s|.,;:!?\-–—_*#~`'\"()\[\]{}<>/\\@&%$^+=]*")
 
 HINT = (
     "Poll of what? Give me the choices (/poll Question | A | B | C), reply to "
@@ -143,23 +147,25 @@ _ALL_DEICTIC = re.compile(
     re.IGNORECASE,
 )
 # "this: where | pizza | tacos". A pointer opens a typed poll only when a colon
-# or dash follows it; "this or that | a | b" is a question about this and that.
+# or a spaced dash follows it; "this or that | a | b" is a question about this and that.
 _POINTER_LEAD = re.compile(
     r"^(?:(?:from|about|on|for|of|with|using|based\s+on|out\s+of|over)\s+)?"
-    r"(?:this|that|it|these|those|them|here|the\s+above|above)\s*[:\-–—]\s*",
+    r"(?:this|that|it|these|those|them|here|the\s+above|above)\s*(?::\s*|[\-–—]\s+)",
     re.IGNORECASE,
 )
 
 
 # The lead-in is a repeated group over an alternation that can match two ways
 # ("rusty shackleford" is "rusty shackleford", or "rusty" then "shackleford"),
-# which is exponential on a message built to fail: so the repeat is BOUNDED
-# (a few filler words or names, never a long run) and only the first
-# _SCAN_CHARS of a message are ever read. Eight repeats cost a few hundred
-# steps at worst.
+# which is exponential on a message built to fail. So the repeat is BOUNDED (a
+# few filler words or names, never a long run), the gap between tokens is
+# possessive (it never gives characters back, so a name made of punctuation or
+# an emoji can't also be read as a gap), and only the first _SCAN_CHARS of a
+# message are ever read. The "@" is left out of the gap so an @mention can
+# follow a word ("hey @dale_bot make a poll").
 @functools.lru_cache(maxsize=32)
 def _ask_re(names: str) -> re.Pattern:
-    lead = rf"(?:(?:@\w+|{names}|{_FILLER})(?![\w'’])\W*){{0,{_MAX_LEAD_TOKENS}}}"
+    lead = rf"(?:(?:@\w+|{names}|{_FILLER})(?![\w'’])[^\w@]*+){{0,{_MAX_LEAD_TOKENS}}}"
     return re.compile(rf"^\W*{lead}(?P<ask>{_ASK})", re.IGNORECASE)
 
 
@@ -171,6 +177,13 @@ def _polite_re(names: str) -> re.Pattern:
         rf"(?<![\w'’])(?:please|pls|plz|thanks|thx|ty|{names})(?![\w'’])",
         re.IGNORECASE,
     )
+
+
+def _trim(s: str) -> str:
+    """`s` without the punctuation, spaces and emoji at either end. The far end
+    is cut from a reversed copy: an end-anchored `\\W+$` is quadratic on a long
+    run of punctuation."""
+    return re.sub(r"^\W+", "", re.sub(r"^\W+", "", s)[::-1])[::-1]
 
 
 def clean_request(
@@ -199,7 +212,7 @@ def clean_request(
     rest = rest.strip(" \t\r\n:;,.-–—")
     # Judged without the politeness and the bot's name ("from this pls dale"),
     # but handed back with them: "who is cooler, matt or dale" keeps its end.
-    bare = re.sub(r"\s+", " ", _polite_re(names).sub(" ", rest)).strip(" \t\r\n:;,.-–—")
+    bare = _trim(re.sub(r"\s+", " ", _polite_re(names).sub(" ", rest)))
     pointer = _ALL_DEICTIC.match(bare) or (
         not after_ask and _DEICTIC.fullmatch(bare)
     )
@@ -225,12 +238,26 @@ def detect_poll_request(text: str | None, *, names: str | None = None) -> str | 
 
 # ── the draft ───────────────────────────────────────────────────────────────
 
-# Numbering and bullets a model adds in spite of being told not to: "1.",
-# "2)", "(3)", "-", "•", "(a)", "b)". Not "M. Jordan", "Q. Tip" or "> 5 years",
-# where the first characters are part of the option.
-_BULLET = re.compile(
-    r"^\s*(?:[-*•·▪◦➤]+|\(?\d{1,2}[.)\]]|\([a-zA-Z]\)|[a-zA-Z]\))\s+",
-)
+# What a model puts in front of options in spite of being told not to. Bullets
+# ("-", "•") always go. Numbers ("1.", "2)", "(3)") and letters ("a)", "(b)") go
+# only when they number the WHOLE list, in order: an option that merely starts
+# with a number ("24. Dezember", "3. Liga", "10. Downing Street") or a name's
+# initial ("M. Jordan") is the option.
+_BULLET = re.compile(r"^\s*[-*•·▪◦➤]+\s+")
+_NUM_MARK = re.compile(r"^\s*\(?(\d{1,2})[.)\]]\s+")
+_LETTER_MARK = re.compile(r"^\s*\(?([a-zA-Z])\)\s+")
+
+
+def _strip_marks(texts: list[str]) -> list[str]:
+    texts = [_BULLET.sub("", t, count=1) for t in texts]
+    for pattern, nth in ((_NUM_MARK, str), (_LETTER_MARK, lambda i: chr(96 + i))):
+        marks = [pattern.match(t) for t in texts]
+        if (len(texts) >= 2 and all(marks)
+                and all(m.group(1).lower() == nth(i) for i, m in enumerate(marks, 1))):
+            return [t[m.end():] for t, m in zip(texts, marks)]
+    return texts
+
+
 _YES = {"true", "yes", "1"}
 
 
@@ -238,6 +265,8 @@ def _tidy(value: object, limit: int) -> str:
     """One line, trimmed, and no longer than Telegram allows."""
     if isinstance(value, dict):
         value = value.get("text")
+    if isinstance(value, float) and not math.isfinite(value):
+        return ""                       # NaN and Infinity are not options
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         value = str(value)              # options like 1, 2, 3
     if not isinstance(value, str):
@@ -261,10 +290,8 @@ def clean_draft(data: object, *, strip_marks: bool = True) -> PollDraft | None:
         return None
     options: list[str] = []
     seen: set[str] = set()
-    for item in raw:
-        text = _tidy(item, MAX_OPTION + 20)
-        if strip_marks:
-            text = _BULLET.sub("", text, count=1)
+    items = [t for t in (_tidy(i, MAX_OPTION + 20) for i in raw) if t]
+    for text in _strip_marks(items) if strip_marks else items:
         text = _tidy(text, MAX_OPTION)
         key = text.casefold()
         if text and key not in seen:
@@ -494,6 +521,8 @@ async def make_poll(
     typed = piped(request[:_MAX_TYPED_CHARS])
     if typed is not None:
         return await _post(rt, msg, typed)
+    if _NOISE_ONLY.fullmatch(request):
+        request = ""
     material = await gather(rt, msg, vision_ok=vision_ok)
     if material is not None and material.problem:
         if not request:

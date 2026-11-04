@@ -430,7 +430,7 @@ def test_multiple_survives_spacing_and_case():
 
 def test_an_option_is_judged_for_numbering_before_it_is_cut():
     long = "1. " + "w" * 98 + "ZZ"                      # 101 chars, number included
-    assert clean_draft({"question": "Q", "options": [long, "b"]}).options[0] == "w" * 98 + "ZZ"
+    assert clean_draft({"question": "Q", "options": [long, "2. b"]}).options[0] == "w" * 98 + "ZZ"
 
 
 @pytest.mark.asyncio
@@ -580,7 +580,7 @@ def test_the_docs_say_what_is_true():
     security = (root / "docs" / "SECURITY.md").read_text()
     assert "a poll drafted from material" in security and "| 10 |" in security
     commands = (root / "docs" / "COMMANDS.md").read_text()
-    assert "When asked in plain words it is also written" in commands
+    assert "When asked in plain words it is also written" in " ".join(commands.split())
 
 
 def test_a_typed_poll_skips_empty_segments_as_the_command_does():
@@ -601,3 +601,86 @@ async def test_a_blank_request_is_a_hint_not_a_paid_call(blank):
 def test_the_prompt_says_what_multiple_means_and_defaults_it_off():
     assert "otherwise false" in prompts.POLL_DRAFT_PROMPT
     assert "pick every one that applies" in prompts.POLL_DRAFT_PROMPT
+
+
+# ── the second review's small finds ──────────────────────────────────────────
+
+@pytest.mark.parametrize("options, kept", [
+    (["1. Pizza", "2. Tacos", "3. Sushi"], ["Pizza", "Tacos", "Sushi"]),
+    (["1) Pizza", "2) Tacos"], ["Pizza", "Tacos"]),
+    (["a) x", "b) y", "c) z"], ["x", "y", "z"]),
+    # an option that merely starts with a number or an initial is the option
+    (["24. Dezember", "25. Dezember", "26. Dezember"], ["24. Dezember", "25. Dezember", "26. Dezember"]),
+    (["3. Liga", "Bundesliga"], ["3. Liga", "Bundesliga"]),
+    (["10. Downing Street", "Baker Street"], ["10. Downing Street", "Baker Street"]),
+    (["1. Mai", "3. Juni"], ["1. Mai", "3. Juni"]),             # not 1, 2, ...
+    (["1. Pizza", "Tacos"], ["1. Pizza", "Tacos"]),             # not the whole list
+    (["b) y", "a) x"], ["b) y", "a) x"]),                       # not a, b, ...
+    (["M. Jordan", "L. James"], ["M. Jordan", "L. James"]),
+    (["A) Yes", "Maybe"], ["A) Yes", "Maybe"]),
+])
+def test_numbering_is_taken_off_only_when_it_numbers_the_whole_list(options, kept):
+    assert clean_draft({"question": "Q", "options": options}).options == kept
+
+
+def test_nan_and_infinity_are_not_options():
+    assert clean_draft({"question": "Q", "options": [float("nan"), float("inf"), "a", "b"]}).options == ["a", "b"]
+    d = parse_draft('{"question": "Q", "options": [NaN, Infinity, -Infinity, "a", "b"]}')
+    assert d.options == ["a", "b"]
+
+
+EMOJI_BOT = identity._build("Robo", ("robo", "\U0001f916", "..."), False)
+
+
+@pytest.mark.parametrize("text", [
+    "\U0001f916" * 40 + "x", "\U0001f916 " * 30 + "x make a poll", "." * 300 + "x",
+    "... " * 60 + "make a poll", "robo " * 40 + "x", "\U0001f916...\U0001f916... " * 20 + "x",
+])
+def test_a_name_made_of_symbols_cannot_make_the_matcher_slow(text):
+    started = time.perf_counter()
+    detect_poll_request(text, names=EMOJI_BOT.names_pattern)
+    assert time.perf_counter() - started < 0.1
+
+
+@pytest.mark.parametrize("text", [
+    "hey @dale_bot make a poll", "@a @b make a poll", "ok, @dale_bot, make a poll",
+    "\U0001f916 make a poll",
+])
+def test_an_at_mention_may_follow_a_word_in_the_lead_in(text):
+    assert detect_poll_request(text, names=EMOJI_BOT.names_pattern if "\U0001f916" in text else None) == ""
+
+
+@pytest.mark.parametrize("text", [
+    "make a poll from this screenshot pls!", "make a poll from the screenshot please?",
+    "make a poll from this pic thanks!", "make a poll from this please \U0001f64f",
+    "make a poll from the menu pls dale!!", "poll this pls!",
+])
+def test_politeness_with_punctuation_around_a_pointer_is_still_no_topic(text):
+    assert detect_poll_request(text) == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("noise", ["|||", "???", " ... ", "|  |", "!!!|", "- - -", "( )"])
+async def test_a_request_of_only_punctuation_is_a_hint_not_a_paid_call(noise):
+    rt = _rt(reply=GOOD)
+    msg = _msg("make a poll")
+    assert await make_poll(rt, msg, noise) == HINT
+    rt.openai.cheap_completion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_emoji_or_a_word_is_still_something_to_go_on():
+    for topic in ("\U0001f355 or \U0001f32e", "\U0001f355\U0001f32e", "pizza"):
+        rt = _rt(reply=GOOD)
+        assert (await make_poll(rt, _msg("poll: x"), topic)).startswith("[made a poll]")
+        rt.openai.cheap_completion.assert_awaited_once()
+
+
+@pytest.mark.parametrize("text, rest", [
+    ("make a poll: this-year or next | a | b", "this-year or next | a | b"),
+    ("make a poll: it-girl | a | b", "it-girl | a | b"),
+    ("make a poll about this - where | a | b", "where | a | b"),
+    ("make a poll about this: where | a | b", "where | a | b"),
+])
+def test_a_pointer_word_is_only_a_lead_in_before_a_colon_or_a_spaced_dash(text, rest):
+    assert detect_poll_request(text) == rest

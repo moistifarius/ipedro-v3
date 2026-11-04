@@ -222,12 +222,20 @@ def test_what_cannot_be_a_poll_is_none(text):
 
 def test_numbering_bullets_and_duplicates_are_cleaned():
     d = clean_draft({"question": "  Pick\none ", "options": [
-        "1. Pizza", "- Tacos", "• Sushi", "(a) Ramen", "B) Pho", "pizza", "  ",
-        {"text": "Dumplings"}, "10. Curry", "(3) Pad Thai", "2] Bao",
+        "1. Pizza", "2. Tacos", "3. Sushi", "4. pizza",
     ]})
     assert d.question == "Pick one"
-    assert d.options == ["Pizza", "Tacos", "Sushi", "Ramen", "Pho", "Dumplings",
-                         "Curry", "Pad Thai", "Bao"]
+    assert d.options == ["Pizza", "Tacos", "Sushi"]           # duplicates gone
+    d = clean_draft({"question": "Q", "options": ["Pizza", "  ", {"text": "Dumplings"}, "pizza"]})
+    assert d.options == ["Pizza", "Dumplings"]
+    d = clean_draft({"question": "Q", "options": ["- Tacos", "• Sushi", "* Ramen", "Pho"]})
+    assert d.options == ["Tacos", "Sushi", "Ramen", "Pho"]       # bullets always go
+    d = clean_draft({"question": "Q", "options": ["(a) Ramen", "(b) Pho", "(c) Bao"]})
+    assert d.options == ["Ramen", "Pho", "Bao"]
+    d = clean_draft({"question": "Q", "options": ["a) Ramen", "B) Pho"]})
+    assert d.options == ["Ramen", "Pho"]
+    d = clean_draft({"question": "Q", "options": ["(1) Curry", "(2) Pad Thai", "3] Bao"]})
+    assert d.options == ["Curry", "Pad Thai", "Bao"]
 
 
 def test_options_that_merely_start_like_a_bullet_are_kept():
