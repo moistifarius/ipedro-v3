@@ -108,7 +108,7 @@ a second message.
 | `/karma` | Chat karma leaderboard (👍/👎 reactions grant/dock) |
 | `/remind <duration> <text>` | Schedule a future reminder (e.g. `1h30m`) |
 | `/birthday MM-DD`, `/anniversary <name> MM-DD-YYYY`, `/dates` | Track / list chat dates |
-| `/poll Q \| A \| B \| …` | Create a poll |
+| `/poll Q \| A \| B \| …` | Create a poll. Reply to a message, or send a screenshot or `.txt` with `/poll` (or say "make a poll from this"), and the bot drafts one from it |
 | `/confess <text>` | Anonymous confession (DM only, not admin-only) |
 
 ### Mod (chat admin or bot admin)

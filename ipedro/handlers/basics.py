@@ -96,7 +96,7 @@ HELP_TEXT_PUBLIC = _DALE_HELP_INTRO + (
     "/birthday MM-DD - set your birthday\n"
     "/anniversary <name> MM-DD-YYYY - mark a chat date\n"
     "/dates - list all tracked dates here\n"
-    "/poll Q | A | B | ... - create a poll\n"
+    "/poll Q | A | B | ... - create a poll (or /poll on a reply or screenshot)\n"
     "\n"
     "DM only:\n"
     "/confess <text> - submit an anonymous confession\n"

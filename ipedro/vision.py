@@ -274,6 +274,20 @@ async def _download(bot, file_id: str) -> bytes | None:
     return buf.getvalue()
 
 
+async def fetch_still(bot, file_id: str | None) -> tuple[bytes, str] | None:
+    """A still picture's bytes and its real media type (read from the bytes,
+    never from a name), or None when it can't be had or isn't one."""
+    if not file_id:
+        return None
+    try:
+        data = await _download(bot, file_id)
+    except Exception as exc:
+        log.info("picture download failed: %s: %s", type(exc).__name__, exc)
+        return None
+    media_type = sniff_image_type(data) if data else None
+    return (data, media_type) if media_type else None
+
+
 @dataclass(frozen=True)
 class Seen:
     """What the bot made of one message's media."""

@@ -26,6 +26,7 @@ LIMITS: dict[str, tuple[int, float]] = {
     "ask": (30, 3600.0),         # /a: the main model
     "translate": (10, 3600.0),   # /aitranslate: audio transcription
     "video": (8, 3600.0),        # watching a video: frames + a transcript
+    "poll": (10, 3600.0),        # a poll drafted from material (one model call)
     "relay": (2, 3600.0),        # Dale passing a message to another chat
     "duck": (6, 3600.0),         # /duckhunt: summoning a duck on demand. Each
                                  # one is a model call and a point to be had, so
@@ -35,6 +36,7 @@ CHAT_LIMITS: dict[str, tuple[int, float]] = {
     "ether": (10, 3600.0),
     "relay": (3, 3600.0),
     "video": (20, 3600.0),
+    "poll": (20, 3600.0),
 }
 
 

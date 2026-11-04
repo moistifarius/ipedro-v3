@@ -20,11 +20,45 @@ Generate an image with the configured image model (default `gpt-image-1`).
 ### `/aitranslate`
 Reply to a voice note with this command to translate the audio to English.
 
+### `/poll`, and "make a poll from this"
+`/poll Question | Option A | Option B | …` makes a poll from what you typed
+(2 to 10 options, anonymous), exactly as before, with no model and no limit.
+
+Give it *material* instead and the bot drafts the question and the options
+from it. The material can be:
+
+- **words:** `/poll where should we eat friday` (a topic or a question: it
+  writes the question and the likeliest answers), or a pasted list or message
+  (a list of choices is used exactly as written, in its order; a long text is
+  boiled down to the one thing the group could vote on);
+- **a message you reply to:** reply to it with `/poll`, or in plain words;
+- **a screenshot or photo:** send it with `/poll` as its caption, or reply to
+  one (a menu, a list of options, a chat asking what to do), in a chat with
+  `vision` on;
+- **a small text file:** a `.txt`, `.md` or `.csv` under 100 KB, sent with
+  `/poll` or replied to.
+
+In plain words it takes an ask at the *start* of a message, to a bot that is
+answering you anyway: "make a poll from this", "poll this: pizza or tacos",
+"turn this into a poll", "can you make us a poll about friday". Talk *about*
+polls ("did you make a poll", "i hate polls", "get the poll results") makes
+nothing, and a poll typed whole after the ask ("make a poll: where | pizza |
+tacos") is posted as typed. The poll is posted as a reply to your message and
+written into the chat's history, so he knows it exists. `/poll` with nothing to
+go on says what to give it.
+
+The drafted poll is one cheap model call, checked against Telegram's limits in
+code (question 300 characters, options 100 each, no duplicates, no numbering),
+so a model that ignores the limits still can't make Telegram refuse the poll.
+Whatever is in the material is treated as data in the prompt, never as an
+instruction, and nothing from any other chat is used.
+
 ### Spend limits
 The commands that cost real money are limited per person per hour, and the
 bot says when to come back: `/aigen` / `/meme` / "make a meme about …" 5,
 `/ether` 3 (and 10 per chat), `/a` 30, `/aitranslate` 10, `/duckhunt` 6
-summons. Bot admins are exempt. The counters are in memory, so a restart
+summons, a drafted poll 10 (and 20 per chat; a poll typed out whole isn't
+counted). Bot admins are exempt. The counters are in memory, so a restart
 forgets them.
 
 ### `/fixname <wrong> -> <right>`

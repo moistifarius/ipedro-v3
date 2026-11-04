@@ -15,7 +15,7 @@ from aiogram import F, Router
 from aiogram.types import BufferedInputFile, Message, ReactionTypeEmoji
 
 from ipedro import (
-    addressed, identity, introspection, media_library, relay, vision,
+    addressed, identity, introspection, media_library, poll_maker, relay, vision,
 )
 from ipedro.bot_messages import track
 from ipedro.capabilities import capability_brief
@@ -1041,6 +1041,23 @@ def build_router(rt: Runtime) -> Router:
             if await media_library.recall(rt, msg, cfg, typed):
                 return
             recall_miss = True
+
+        # "dale make a poll from this" → draft a poll from what they gave
+        # him: the replied-to message, a screenshot or text file sent with
+        # it, or the words after the ask. Regex only, and the ask has to
+        # open the message, so talk ABOUT polls never makes one. A poll
+        # typed out whole ("make a poll: where | pizza | tacos") is posted
+        # as it is; anything else is one model call, rate limited.
+        poll_request = poll_maker.detect_poll_request(
+            typed, names=ident.names_pattern,
+        )
+        if poll_request is not None:
+            made = await poll_maker.make_poll(
+                rt, msg, poll_request, vision_ok=cfg.vision_enabled,
+            )
+            if made:
+                await _record_bot_turn(rt, cfg, msg.chat.id, made)
+            return
 
         # "hey pedro give me a meme about this" → fetch a relevant meme
         # (topic explicit, or distilled from the current conversation) and

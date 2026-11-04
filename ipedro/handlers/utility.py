@@ -20,6 +20,7 @@ from aiogram.types import (
     InlineKeyboardMarkup, Message,
 )
 
+from ipedro import poll_maker
 from ipedro.bot_messages import track
 from ipedro.auth import is_admin_user
 from ipedro.handlers.common import (
@@ -337,15 +338,19 @@ def build_router(rt: Runtime) -> Router:
 
     @r.message(Command("poll"))
     async def poll(msg: Message) -> None:
-        """/poll Question | Option A | Option B | ... (2-10 options)."""
-        raw = (msg.text or "").split(None, 1)
-        if len(raw) < 2:
-            await msg.reply(
-                "Usage: /poll Question | Option A | Option B | ...",
-                disable_notification=True,
+        """/poll Question | Option A | Option B | ... (2-10 options), or /poll
+        alone on a reply, a screenshot or a small text file, or with a topic:
+        the bot drafts the poll from it."""
+        raw = (msg.text or msg.caption or "").split(None, 1)
+        args = raw[1] if len(raw) > 1 else ""
+        if "|" not in args:
+            cfg = await get_or_create_chat_config(rt, msg)
+            await poll_maker.make_poll(
+                rt, msg, poll_maker.clean_request(args, after_ask=False),
+                vision_ok=bool(getattr(cfg, "vision_enabled", True)),
             )
             return
-        parts = [p.strip() for p in raw[1].split("|") if p.strip()]
+        parts = [p.strip() for p in args.split("|") if p.strip()]
         if len(parts) < 3:
             await msg.reply(
                 "Need a question and at least two options, separated by |.",
