@@ -46,8 +46,10 @@ _CONTEXT_MESSAGES = 4           # what he is shown before the last message
 _CONTEXT_CHARS = 200
 _TAGS_TTL = 600.0               # s the library's tags are remembered
 
-# The tags an unprompted GIF may be, and what each one is for. The rest of the
-# library (pocketsand, shsha, guns) belongs to the keyword bits that name it.
+# The tags an unprompted GIF may be, and what each one is for. A clip that also
+# carries one of KEYWORD_TAGS (the stock "guns, conspiracy" clip) belongs to the
+# keyword bits that name it, and is never sent unprompted.
+KEYWORD_TAGS = frozenset({"pocketsand", "shsha", "guns"})
 AMBIENT_TAGS: dict[str, str] = {
     "agree": "nodding along ('yep', 'noted'): a short, flat agreement",
     "doubt": "deeply skeptical: someone claiming something unlikely or too good to be true",
@@ -68,10 +70,18 @@ _SERIOUS = re.compile(
     r"|crash(?:ed)?|emergency|police|arrest\w*|divorce|broke\s+up|breakup|fired"
     r"|laid\s+off|lost\s+my\s+job|evict\w*|bankrupt\w*|miscarriage|grief|grieving"
     r"|mourning|condolences|sorry\s+for\s+your\s+loss|pray(?:ing|ers)?|tragic"
-    r"|tragedy|war|bomb\w*|terror\w*|kidnap\w*|overdose|kill\s+(?:my|him|her|them)self)\b",
+    r"|tragedy|war|bomb\w*|terror\w*|kidnap\w*|overdose|kill\s+(?:my|him|her|them)self"
+    r"|lost\s+(?:my|our|his|her)\s+(?:dog|cat|pet|mom|dad|mother|father|grand\w+|brother|sister"
+    r"|friend|job|home|house)|heart\s+attack|stroke|injur\w+|ambulance|hospice|terminal"
+    r"|alzheimer\w*|dementia|murder\w*|kill(?:ed|ing)|want\s+to\s+die|end\s+it\s+all"
+    r"|hang\s+myself)\b",
     re.IGNORECASE,
 )
-_LINKISH = re.compile(r"https?://|www\.|\bt\.me/|^/", re.IGNORECASE)
+_LINKISH = re.compile(
+    r"https?://|www\.|\bt\.me/|^/"
+    r"|\b[\w-]+\.(?:com|org|net|io|gg|tv|co|me|app|dev|ly|xyz|info|ru|de|uk)\b",
+    re.IGNORECASE,
+)
 # A question needs no "?": "what time is it", "anyone know a plumber".
 _QUESTION_START = re.compile(
     r"^\W*(?:what|when|where|who|whom|whose|why|how|which|is|are|was|were|do|does"
@@ -126,13 +136,16 @@ def chat_ready(chat_id: int) -> bool:
 
 
 async def available_tags(db) -> frozenset[str]:
-    """The ambient tags the library actually has a GIF for."""
+    """The ambient tags the library has a clip for that may go unprompted."""
     global _tags_cache
     now = _now()
     if _tags_cache is not None and now - _tags_cache[0] < _TAGS_TTL:
         return _tags_cache[1]
-    rows = await db.fetch("SELECT DISTINCT unnest(tags) AS tag FROM dale_gifs")
-    have = frozenset(r["tag"] for r in rows if r["tag"] in AMBIENT_TAGS)
+    rows = await db.fetch("SELECT tags FROM dale_gifs")
+    have = frozenset(
+        t for r in rows if not set(r["tags"] or ()) & KEYWORD_TAGS
+        for t in r["tags"] or () if t in AMBIENT_TAGS
+    )
     _tags_cache = (now, have)
     return have
 
@@ -179,6 +192,8 @@ async def ambient(rt, msg, typed: str) -> bool:
     """Send an unprompted Dale GIF that fits `typed`, if this is the moment
     for one. True when a GIF went out."""
     chat_id = msg.chat.id
+    if getattr(msg, "forward_origin", None) or getattr(msg, "forward_date", None):
+        return False                    # somebody else's words, not a moment of ours
     if not moment_ok(typed) or not chat_ready(chat_id):
         return False
     tags = await available_tags(rt.db)
@@ -189,7 +204,9 @@ async def ambient(rt, msg, typed: str) -> bool:
     tag = await choose(rt, chat_id, typed, tags)
     if tag is None:
         return False
-    gif = await dale_gifs.random_for_tag(rt.db, tag, avoid=dale_gifs.recent_ids(chat_id))
+    gif = await dale_gifs.random_for_tag(
+        rt.db, tag, avoid=dale_gifs.recent_ids(chat_id), exclude_tags=KEYWORD_TAGS,
+    )
     if gif is None or await dale_gifs.send_one(rt.db, msg, gif, tag=tag) is None:
         return False
     _last_ambient[chat_id] = now

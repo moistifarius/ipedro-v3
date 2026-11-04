@@ -31,6 +31,8 @@ CATCHPHRASE = re.compile(r"sh+-?sha+|pocket\s+sand", re.IGNORECASE)
 DALE_ONLY = {
     "handlers/automod_bits.py", "dale_gif_seeds.py", "identity.py", "personas.py",
     "handlers/basics.py", "prompts.py", "dale_gifs.py", "handlers/dale.py",
+    "gif_reaction.py",      # tag names ("shsha") of his library, never said aloud;
+                            # its only caller is gated on dale_flavor
 }
 
 

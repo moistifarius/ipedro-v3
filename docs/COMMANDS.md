@@ -54,25 +54,32 @@ before a colon:
 | Kind | Say | Notes |
 |---|---|---|
 | quiz | "make a quiz poll", "make it a quiz", `quiz:` | one right answer, and a one-line *why* shown after someone answers. He works the answer out; in a poll you type, mark it: `Paris*` or `✓ Paris` |
-| public votes | "make a public poll", "non-anonymous", "show who voted", `public:` | people's votes show by name |
+| public votes | "make a public poll", "make it public", "non-anonymous", "show who voted", `public:` | people's votes show by name; "not public" and "anonymous" mean the opposite |
 | pick several | "pick all that apply", "select all", "multiple answers" | ("multiple choice" means pick one) |
 | pick one | "pick only one" | the default |
-| timer | "closes in 10 minutes", "ends after 2 hours", "open for 1 day", `closes in 10 minutes:` | 5 seconds to 30 days; Telegram closes it itself |
+| timer | "closes in 10 minutes", "poll ends in 2 hours", "a 10 minute poll", "timer of 1 day", `closes in 10 minutes:` | 5 seconds to 30 days (also "2 hours 30 minutes", "an hour and a half"); Telegram closes it itself |
 
 Combine them: `/poll quiz, public, closes in 10 minutes: Capital of France? |
 London | Paris* | Rome`, or "make a public poll about lunch that closes in 2
-hours". Only the phrasings above count, so a topic like "public transport" or
-"pub quiz night" stays a topic. What you say wins over what the drafter guesses.
-A quiz with several right answers lets people pick several.
+hours". Only the phrasings above count, so a topic like "public transport", "pub
+quiz night", "the movie ends in 5 minutes" or "bowling, quiz, karaoke" stays a
+topic (a bare "10 minutes" or "quiz" counts only where it can only be the kind: in
+the ask itself, before a colon, or as the answer to his question). What you say
+wins over what the drafter guesses. A quiz with several right answers lets people
+pick several.
 
 **He asks.** When you ask for a poll and give him nothing to go on ("dale make a
 poll", or `/poll` alone), he asks what it's about and offers the kinds. Say "ask
-me what kind" and he asks the kind (and takes any topic you already gave). "A
-timed poll" with no length gets "how long?". The drafter may also ask one thing
+me what kind" and he asks the kind (and takes any topic you already gave; with
+none, he asks what it's about first). "A timed poll" with no length gets "how
+long?" (with no topic, one question asks both); if you still give no length the
+poll stays open and he says so. The drafter may also ask one thing
 it can't guess (a long text with two decisions in it: which one?). Each question
 is sent as a force-reply: **in a group, answer by replying to his question** (and
 only the person who asked can answer it); in a private chat your next message is
-the answer. "never mind", "cancel" or "no" drops it. A question waits three
+the answer. "never mind" or "cancel" drops it (so does a bare "no" when he
+asked what it's about; to "what kind?" or "how long?" a "no" just means no kind,
+no timer). A question waits three
 minutes, he never asks a second one, and nothing is charged until he drafts.
 
 The drafted poll is one cheap model call, checked against Telegram's limits in
@@ -626,12 +633,14 @@ He sends GIFs of himself two ways, and each only when it fits.
   from that bit's own tag. If the tag has none, he says the bit's text line, and
   never some other clip. The same bit can't go off again in a chat for 90
   seconds, no bit goes off within 15 seconds of any GIF, and a chat is never sent
-  the same clip twice running (the least-sent are rotated).
+  the same clip twice running when the tag has more than one (the least-sent are
+  rotated, and a clip that couldn't be sent, say a dead link, is left alone for
+  half an hour).
 - **Unprompted reactions** (a group, `automod` on, a message that isn't for him):
   about one message in seventeen is even considered. It has to be fair game: two
-  words to a short sentence, no question (with or without the "?"), no link, no
-  command, and nothing that reads as sad, scary or serious (illness, death, a
-  fight, an emergency). The chat has to be ready: no unprompted GIF there for 20
+  words to a short sentence, no question (a "?", or a message that opens like one:
+  what, how, is, can…), no link (bare domains too), no command, not forwarded, and
+  nothing that mentions illness, death, accidents, crime, grief and the like. The chat has to be ready: no unprompted GIF there for 20
   minutes, no more than three an hour, a look at most once a minute, nothing from
   him in the last three minutes, no other GIF in the last 15 seconds. Then one
   cheap model call, shown the last few messages and the reactions the library
@@ -639,7 +648,7 @@ He sends GIFs of himself two ways, and each only when it fits.
   `panic`, `flee`, `chaos`, `deadpan`), says whether one plainly fits and which.
   The usual answer is no, and anything but exactly one of those tags counts as
   no. So most days he sends none; the ones he sends fit what was just said.
-  Pocket sand, sh-sha and guns are never unprompted: they belong to their
-  keywords.
+  A clip tagged `pocketsand`, `shsha` or `guns` (the stock "guns, conspiracy" one
+  too) is never sent unprompted: those belong to their keywords.
 
 `/dalegif test <tag>` is for the owner poking the library and isn't paced.

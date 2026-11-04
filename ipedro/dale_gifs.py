@@ -77,7 +77,9 @@ _RECENT_PER_CHAT = 6            # GIFs remembered per chat, to not repeat them
 TRIGGER_CHAT_GAP = 15.0         # s: no keyword bit right after any GIF here
 TRIGGER_TAG_GAP = 90.0          # s: the same bit again in the same chat
 _STATE_LIMIT = 500              # entries before stale ones are swept
+FAIL_REST = 1800.0              # s a clip that couldn't be sent is left alone
 _now = time.monotonic
+_failing: dict[int, float] = {}                 # gif id -> not before this
 _recent_ids: dict[int, deque[int]] = {}
 _last_gif_at: dict[int, float] = {}
 _last_tag_at: dict[tuple[int, str], float] = {}
@@ -115,8 +117,18 @@ def note_gif(chat_id: int, tag: str = "", gif_id: int | None = None) -> None:
             _recent_ids.pop(key, None)
 
 
+def _note_failed(gif_id: int) -> None:
+    """A clip that couldn't be sent: leave it be for a while. Bounded."""
+    if len(_failing) > _STATE_LIMIT:
+        now = _now()
+        for key in [k for k, until in _failing.items() if until <= now]:
+            del _failing[key]
+    _failing[gif_id] = _now() + FAIL_REST
+
+
 def forget_state() -> None:
     """Clear the pacing state (tests, and nothing else)."""
+    _failing.clear()
     _recent_ids.clear()
     _last_gif_at.clear()
     _last_tag_at.clear()
@@ -183,6 +195,7 @@ async def add(
 
 async def random_for_tag(
     db: Database, tag: str, *, avoid: Sequence[int] = (),
+    exclude_tags: frozenset[str] = frozenset(),
 ) -> StoredGif | None:
     """A GIF for ``tag``, or None when that bucket is empty.
 
@@ -191,7 +204,9 @@ async def random_for_tag(
     text line the caller falls back to. ``avoid`` is what this chat just saw,
     oldest first: those are passed over, the least-sent of the rest preferred;
     and when the chat has seen them all, the one seen longest ago comes round
-    again. So a bucket of three is rotated, never rolled.
+    again. So a bucket of three is rotated, never rolled. A clip that couldn't
+    be sent a moment ago (a dead link) is left alone for FAIL_REST, so it can't
+    keep winning its tag; ``exclude_tags`` drops any clip carrying one of them.
     """
     tag = normalize_tag(tag)
     if not tag:
@@ -200,7 +215,9 @@ async def random_for_tag(
         f"SELECT {_COLUMNS} FROM dale_gifs WHERE $1 = ANY(tags) ORDER BY id",
         tag,
     )
-    gifs = [_row(r) for r in rows]
+    gifs = [g for g in map(_row, rows) if not set(g.tags) & exclude_tags]
+    now = _now()
+    gifs = [g for g in gifs if _failing.get(g.id, 0.0) <= now] or gifs
     if not gifs:
         return None
     seen = list(avoid)
@@ -340,6 +357,7 @@ async def send_one(
     elif gif.url:
         data = await _download(gif.url)
         if data is None:
+            _note_failed(gif.id)
             return None
         payload = BufferedInputFile(data, filename="dale.gif")
     else:
@@ -351,7 +369,9 @@ async def send_one(
         )
     except Exception as exc:
         log.warning("dale gif send failed in %s: %s", msg.chat.id, exc)
+        _note_failed(gif.id)
         return None
+    _failing.pop(gif.id, None)
 
     # Learn the file_id Telegram just handed back, so the next send is free.
     # Never let a bookkeeping failure undo a message the user already saw.

@@ -87,17 +87,16 @@ def _fresh(monkeypatch):
     ("pick only one", dict(multiple=False)),
     ("single answer", dict(multiple=False)),
     ("closes in 10 minutes", dict(open_seconds=600)),
-    ("ends after 2 hours", dict(open_seconds=7200)),
-    ("stays open for 1 day", dict(open_seconds=86400)),
+    ("this poll ends after 2 hours", dict(open_seconds=7200)),
+    ("timer of 1 day", dict(open_seconds=86400)),
     ("closes in half an hour", dict(open_seconds=1800)),
-    ("expires in an hour", dict(open_seconds=3600)),
+    ("it expires in an hour", dict(open_seconds=3600)),
     ("a 5 minute poll", dict(open_seconds=300)),
     ("timer of thirty seconds", dict(open_seconds=30)),
     ("closes in 2 weeks", dict(open_seconds=1_209_600)),
     ("closes in 1 second", dict(open_seconds=5)),            # Telegram's floor
     ("ask me what kind", dict(ask_kind=True)),
     ("what kind of poll do you want", dict(ask_kind=True)),
-    ("timed", dict(ask_when=True)),
     ("a timed poll", dict(ask_when=True)),
 ])
 def test_a_kind_that_is_asked_for_is_read(text, expect):
@@ -181,7 +180,7 @@ def test_a_kind_adjective_still_makes_it_an_ask(text):
 
 def test_the_asking_words_are_handed_on_with_what_follows():
     found = detect_poll_ask("dale make a public quiz poll about capitals")
-    assert found.rest == "capitals" and found.ask.lower() == "make a public quiz poll"
+    assert found.rest == "capitals" and found.ask.lower() == "a public quiz"
     assert detect_poll_ask("make a quiz") is None            # a quiz is not a poll
     assert detect_poll_ask("make a quiz night poll") is None  # nor is "night" a kind
 

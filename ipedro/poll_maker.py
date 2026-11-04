@@ -95,6 +95,11 @@ ASK_TOPIC = (
     "Want a kind? Say quiz (one right answer), pick several, public votes, or "
     "a timer like \"closes in 10 minutes\". Otherwise it's a regular poll."
 )
+ASK_TOPIC_WHEN = (
+    "What's the poll about, and how long should it stay open (\"10 minutes\", "
+    "\"2 hours\", \"1 day\")? Add a kind if you like: quiz, pick several, public votes."
+)
+NO_LENGTH = "You didn't give a length, so it stays open until someone stops it."
 ASK_KIND = (
     "What kind of poll? Regular (pick one), pick several, quiz (one right "
     "answer), public (shows who voted), and/or a timer like \"10 minutes\". "
@@ -197,7 +202,7 @@ _NOT_AN_ASK = r"(?!\s+(?:results?|numbers|stats|status|data|winner|so\s+far|tota
 # every decision into a poll" is a meme request that merely mentions one.
 _THING = r"(?:[\w'’-]+\s+){0,3}"
 _ASK = (
-    rf"(?:{_VERB}\s+(?:{_NOISE}\s+){{0,6}}poll\b{_NOT_AN_ASK}"
+    rf"(?:{_VERB}\s+(?P<kw>(?:{_NOISE}\s+){{0,6}})poll\b{_NOT_AN_ASK}"
     rf"|(?:turn|convert|make|put|change|transform)\s+{_THING}"
     r"(?:(?:into|in\s+to)\s+(?:an?\s+)?|to\s+an?\s+)poll\b"
     r"|poll\s+(?:this|that|it|these|those|them"
@@ -298,7 +303,9 @@ def clean_request(
 @dataclass(frozen=True)
 class PollAsk:
     rest: str       # what they said besides the ask ("" for "make a poll from this")
-    ask: str        # the asking words themselves: where "quiz" or "public" can sit
+    ask: str        # the words between the verb and "poll" ("public quiz"): a kind
+                    # sits there, while the thing in "turn the pub quiz into a
+                    # poll" is a topic, and so is not in it
 
 
 def detect_poll_ask(text: str | None, *, names: str | None = None) -> PollAsk | None:
@@ -317,7 +324,7 @@ def detect_poll_ask(text: str | None, *, names: str | None = None) -> PollAsk | 
         return None
     return PollAsk(
         rest=clean_request(text[m.end():m.end() + _MAX_TYPED_CHARS], names=names),
-        ask=m.group("ask"),
+        ask=(m.group("kw") or "").strip(),
     )
 
 
@@ -356,8 +363,9 @@ class Kind:
 
 _NUMBER_WORDS = {
     "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "fifteen": 15,
-    "twenty": 20, "thirty": 30, "forty": 40, "sixty": 60,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+    "twelve": 12, "fifteen": 15, "twenty": 20, "thirty": 30, "forty": 40,
+    "sixty": 60, "ninety": 90,
 }
 _UNIT_SECONDS = {
     "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
@@ -365,33 +373,51 @@ _UNIT_SECONDS = {
     "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
     "d": 86400, "day": 86400, "days": 86400,
     "w": 604800, "week": 604800, "weeks": 604800,
+    "month": 2_592_000, "months": 2_592_000,
+    "year": 31_536_000, "years": 31_536_000,
 }
-_DURATION = (
-    r"(?P<n>\d+(?:\.\d+)?|half\s+an?|" + "|".join(_NUMBER_WORDS) + r")\s*"
-    r"(?P<u>" + "|".join(sorted(_UNIT_SECONDS, key=len, reverse=True)) + r")\b"
+# One length of time: digits (bounded, so a long run of them can't make the
+# search quadratic) or a number word, then a unit, standing alone: "ideas" is
+# not "a" + "s", and "and" is not "an" + "d".
+_LONG_UNITS = "|".join(sorted((u for u in _UNIT_SECONDS if len(u) > 1), key=len, reverse=True))
+_ALL_UNITS = "|".join(sorted(_UNIT_SECONDS, key=len, reverse=True))
+_DUR = (
+    r"(?<![\w.])(?:(?P<n>\d{1,7}(?:\.\d{1,3})?)[ \t]*(?P<u>" + _ALL_UNITS + r")"
+    r"|(?P<w>half\s+an?|" + "|".join(sorted(_NUMBER_WORDS, key=len, reverse=True)) + r")"
+    r"\s+(?P<u2>" + _LONG_UNITS + r"))\b"
 )
-_WHEN_CUE = (
-    r"(?:clos(?:e|es|ed|ing)|auto[- ]?clos(?:e|es|ing)|end(?:s|ing)?|expir(?:e|es|ing)"
-    r"|last(?:s|ing)?|stay(?:s)?\s+open|open\s+for|running\s+for|timer(?:\s+of)?"
-    r"|time\s+limit(?:\s+of)?|timed(?:\s+poll)?)"
-    r"(?:\s+(?:in|after|for|of|at))?\s+"
-)
-_WHEN_STRICT = re.compile(_WHEN_CUE + _DURATION, re.IGNORECASE)
-_WHEN_AFTER = re.compile(_DURATION + r"[- ]*(?:poll|timer)\b", re.IGNORECASE)
-_WHEN_BARE = re.compile(_DURATION, re.IGNORECASE)
-_TIMED_WORD = re.compile(
-    r"\b(?:timed|time[- ]limited|with\s+a\s+(?:timer|time\s+limit)|auto[- ]?clos\w*)\b",
+_DUR_RE = re.compile(_DUR, re.IGNORECASE)
+_DUR_THEN = re.compile(_DUR + r"[- ]*(?:poll|timer)\b", re.IGNORECASE)
+_AND_HALF = re.compile(r"\s+and\s+a\s+half\b", re.IGNORECASE)
+_JOIN = re.compile(r"\s*(?:,\s*)?(?:and\s+)?", re.IGNORECASE)
+# What says a poll's length when it is in what they typed (not in an ask, a
+# prefix or an answer, where a bare "10 minutes" is clear): the poll closes,
+# has a timer, or it ends/lasts. "the movie ends in 5 minutes" isn't one.
+_WHEN_CUE = re.compile(
+    r"(?:clos(?:e|es|ed|ing)\s+(?:in|after)|auto[- ]?clos(?:e|es|ing)\s+(?:in|after)"
+    r"|(?:poll|vote|voting|it)\s+(?:also\s+)?(?:ends?|ending|expires?|lasts?)\s+(?:in|after|for)"
+    r"|(?:timer|time\s+limit)\s+(?:of\s+|for\s+)?)\s*",
     re.IGNORECASE,
 )
+_TIMED_STRICT = re.compile(
+    r"\btimed\s+poll\b|\btime[- ]limited\b|\bwith\s+a\s+(?:timer|time\s+limit)\b"
+    r"|\bauto[- ]?clos\w*\b",
+    re.IGNORECASE,
+)
+_TIMED_LOOSE = re.compile(r"\btimed\b", re.IGNORECASE)
 
 # A kind named in a list of kinds ("..., public, closes in 2 hours"): after a
-# comma, "and" or "+", and before the end of its clause. "public transport" and
-# "pub quiz" are topics; "lunch, public" is a kind.
-_LISTED = r"(?:,|\band\b|&|\+)\s*"
-_CLAUSE_END = r"(?=\s*(?:[,.;!?]|$|\band\b|&|\+))"
+# comma, "and" or "+", and at the end of the request or before another kind.
+# "public transport" and "pub quiz" are topics; "bowling, quiz, karaoke" is a
+# list of topics; "lunch, public" is a kind.
+_LISTED = r"(?:,|&|\+)\s*"
+_KIND_AFTER = (
+    r"(?=\s*(?:[.!]*$|(?:[,;]|\band\b)\s*(?:public|anonymous|non-anonymous|quiz|trivia"
+    r"|clos\w+|timed|several|multiple|pick)\b))"
+)
 
 _QUIZ_STRICT = re.compile(
-    rf"{_LISTED}\b(?:quiz|trivia){_CLAUSE_END}"
+    rf"{_LISTED}\b(?:quiz|trivia){_KIND_AFTER}"
     r"|\bquiz[- ](?:poll|style|type|mode|question)s?\b"
     r"|\b(?:as|make\s+it|like|into|be)\s+an?\s+quiz\b|\bpoll\s+quiz\b"
     r"|\btrivia[- ](?:poll|style|question)s?\b"
@@ -401,16 +427,17 @@ _QUIZ_STRICT = re.compile(
 )
 _QUIZ_LOOSE = re.compile(r"\b(?:quiz|trivia)\b", re.IGNORECASE)
 _PUBLIC_STRICT = re.compile(
-    rf"{_LISTED}\bpublic\b{_CLAUSE_END}"
+    rf"{_LISTED}\bpublic\b{_KIND_AFTER}"
     r"|\bpublic\s+(?:poll|vote|votes|voting|ballot)\b|\bmake\s+it\s+public\b"
     r"|\b(?:non|not)[- ]?anonymous\b|\bshow(?:s|ing)?\s+(?:who|names|votes)\b"
-    r"|\bwho\s+(?:voted|votes)\b|\bvisible\s+votes?\b|\bopen\s+ballot\b",
+    r"|\bsee\s+who\s+voted\b|\bvisible\s+votes?\b|\bopen\s+ballot\b",
     re.IGNORECASE,
 )
 _PUBLIC_LOOSE = re.compile(r"\b(?:public|non[- ]?anonymous|not\s+anonymous)\b", re.IGNORECASE)
+_ANON_WORD = re.compile(r"(?<![\w-])anonymous\b", re.IGNORECASE)
 _MULTIPLE_STRICT = re.compile(
-    r"\b(?:pick|choose|select|check|vote\s+for)\s+(?:all|any|every|more\s+than\s+one"
-    r"|multiple|several|as\s+many)\b|\ball\s+that\s+apply\b|\bselect\s+all\b"
+    r"\b(?:pick|choose|select|check|vote\s+for)\s+(?:all|more\s+than\s+one"
+    r"|multiple|several|as\s+many)\b|\ball\s+that\s+apply\b"
     r"|\b(?:multiple|several|more\s+than\s+one)\s+(?:answers?|selections?|picks?|votes?)\b"
     r"|\bmulti[- ]?select\b|\bcheckbox(?:es)?\b",
     re.IGNORECASE,
@@ -421,29 +448,89 @@ _MULTIPLE_LOOSE = re.compile(
 )
 _SINGLE = re.compile(
     r"\bsingle[- ](?:answer|choice|select)\b|\bpick\s+(?:only\s+)?one\b"
-    r"|\bone\s+answer\b|\bonly\s+one\b",
+    r"|\bone\s+answer\s+only\b",
     re.IGNORECASE,
 )
+# "ask me what kind" is a request to be asked; "what kind of pizza" is a topic.
 _ASK_KIND = re.compile(
-    r"\bask\s+me\b|\b(?:what|which)\s+(?:kind|type|sort)\b"
-    r"|\b(?:kind|type)\s+of\s+poll\b",
+    r"\bask\s+(?:me|us)\s+(?:what|which)\s+(?:kind|type|sort)\b"
+    r"|\bask\s+(?:me|us)\b(?=\s*[,.;!?]|\s*$)"
+    r"|\b(?:what|which)\s+(?:kind|type|sort)\s+of\s+poll\b"
+    r"|\blet\s+me\s+(?:choose|pick|say)\s+the\s+(?:kind|type)\b",
     re.IGNORECASE,
 )
+_ASK_KIND_WORDS = re.compile(
+    r"\bask\s+(?:me|us)(?:\s+(?:what|which)\s+(?:kind|type|sort)(?:\s+of\s+poll)?)?"
+    r"|\b(?:what|which)\s+(?:kind|type|sort)\s+of\s+poll\b"
+    r"|\blet\s+me\s+(?:choose|pick|say)\s+the\s+(?:kind|type)\b",
+    re.IGNORECASE,
+)
+# A kind word with one of these just before it ("not public", "don't make it
+# public", "no quiz") is the opposite of a kind.
+_NEGATED = re.compile(
+    r"\b(?:not|no|never|nobody|without|don'?t|dont|doesn'?t|isn'?t|aren'?t)\s+(?:\w+\s+){0,2}$",
+    re.IGNORECASE,
+)
+
+
+def _hit(pattern: re.Pattern, text: str) -> bool:
+    """Does `pattern` match somewhere in `text` that isn't negated?"""
+    return any(
+        not _NEGATED.search(text[max(0, m.start() - 30):m.start()])
+        for m in pattern.finditer(text)
+    )
+
+
+def strip_ask_kind(request: str) -> str:
+    """`request` without "ask me what kind": those words are an instruction to
+    him, not a topic to make a poll about."""
+    return _ASK_KIND_WORDS.sub(" ", request).strip(" \t\r\n:;,.-–—")
+
+
+def _seconds_at(text: str, pos: int) -> tuple[float, int] | None:
+    """(seconds, where it ends) for the length of time written at `pos`:
+    "10 minutes", "2 hours 30 minutes", "1 hour and 30 minutes", "an hour and
+    a half". None if there isn't one."""
+    total, end = 0.0, None
+    while True:
+        m = _DUR_RE.match(text, pos)
+        if m is None:
+            break
+        n, word = m.group("n"), (m.group("w") or "").casefold()
+        amount = float(n) if n else (
+            0.5 if word.startswith("half") else _NUMBER_WORDS.get(word))
+        unit = _UNIT_SECONDS.get((m.group("u") or m.group("u2")).casefold())
+        if amount is None or unit is None:       # a letter that only folds to one
+            break
+        total += amount * unit
+        pos = end = m.end()
+        half = _AND_HALF.match(text, pos)
+        if half:
+            total += 0.5 * unit
+            pos = end = half.end()
+        pos = _JOIN.match(text, pos).end()
+    return (total, end) if end is not None else None
 
 
 def _duration(text: str, *, bare: bool) -> tuple[int | None, bool]:
     """(seconds, past Telegram's range) for the timer `text` asks for. `bare`
-    also reads "10 minutes" with no "closes in" before it (an answer to "how
-    long?"); otherwise a cue is needed, so "a 5 minute walk" is no timer."""
-    m = _WHEN_STRICT.search(text) or _WHEN_AFTER.search(text)
-    if m is None and bare:
-        m = _WHEN_BARE.search(text)
-    if m is None:
+    also reads "10 minutes" with no "closes in" before it (in an ask, a prefix
+    or an answer to "how long?"); otherwise a cue is needed, so "a 5 minute
+    walk" is no timer."""
+    found = None
+    for cue in _WHEN_CUE.finditer(text):
+        found = _seconds_at(text, cue.end())
+        if found:
+            break
+    if not found:
+        m = _DUR_THEN.search(text)
+        found = _seconds_at(text, m.start()) if m else None
+    if not found and bare:
+        m = _DUR_RE.search(text)
+        found = _seconds_at(text, m.start()) if m else None
+    if not found:
         return None, False
-    n = m.group("n").lower()
-    amount = 0.5 if n.startswith("half") else (
-        _NUMBER_WORDS[n] if n in _NUMBER_WORDS else float(n))
-    seconds = int(amount * _UNIT_SECONDS[m.group("u").lower()])
+    seconds = int(found[0])
     if seconds > MAX_OPEN_SECONDS:
         return MAX_OPEN_SECONDS, True
     return max(seconds, MIN_OPEN_SECONDS), False
@@ -453,20 +540,25 @@ def parse_kind(text: str, *, loose: bool = False) -> Kind:
     """The kind of poll `text` asks for. `loose` is for words that are only
     about the kind (the ask itself, a prefix, an answer to "what kind?"), where
     a bare "quiz" or "public" means it; in a topic ("public transport", "quiz
-    night") only the phrasings that name a poll kind count."""
+    night") only the phrasings that name a poll kind count. A kind word that is
+    negated ("not public") isn't one, and "anonymous" outranks a public cue."""
     text = text[:_MAX_TYPED_CHARS]
-    quiz = bool(_QUIZ_STRICT.search(text) or (loose and _QUIZ_LOOSE.search(text)))
-    public = bool(_PUBLIC_STRICT.search(text) or (loose and _PUBLIC_LOOSE.search(text)))
+    quiz = _hit(_QUIZ_STRICT, text) or (loose and _hit(_QUIZ_LOOSE, text))
+    public = _hit(_PUBLIC_STRICT, text) or (loose and _hit(_PUBLIC_LOOSE, text))
+    if public and _hit(_ANON_WORD, text):
+        public = False
     multiple: bool | None = None
-    if _MULTIPLE_STRICT.search(text) or (loose and _MULTIPLE_LOOSE.search(text)):
+    if _hit(_MULTIPLE_STRICT, text) or (loose and _hit(_MULTIPLE_LOOSE, text)):
         multiple = True
-    elif _SINGLE.search(text):
+    elif _hit(_SINGLE, text):
         multiple = False
     seconds, clamped = _duration(text, bare=loose)
+    timed = _TIMED_STRICT.search(text) or (loose and _TIMED_LOOSE.search(text))
     return Kind(
-        quiz=quiz, multiple=multiple, anonymous=not public, open_seconds=seconds,
-        clamped=clamped, ask_kind=bool(_ASK_KIND.search(text)),
-        ask_when=bool(_TIMED_WORD.search(text)) and seconds is None,
+        quiz=bool(quiz), multiple=multiple, anonymous=not public,
+        open_seconds=seconds, clamped=clamped,
+        ask_kind=bool(_ASK_KIND.search(text)),
+        ask_when=bool(timed) and seconds is None,
     )
 
 
@@ -809,20 +901,21 @@ async def _say(msg: Message, text: str) -> str:
 
 
 _MARK_CHARS = "✓✔✅☑"
-_MARK_STAR = re.compile(r"\s*\*+\s*$")
 
 
 def _correct_mark(text: str) -> tuple[bool, str]:
     """(is it marked as the right answer, the option without the mark): a * on
-    the end ("Paris*") or a tick on either end ("✓ Paris")."""
-    t, marked = text.strip(), False
+    the end ("Paris*") or a tick on either end ("✓ Paris", "Paris ✅")."""
+    t, marked = text.replace("\ufe0f", "").strip(), False
     if t and t[0] in _MARK_CHARS:
         t, marked = t[1:].strip(), True
     if t and t[-1] in _MARK_CHARS:
         t, marked = t[:-1].strip(), True
-    star = _MARK_STAR.search(t)
-    if star and star.start() > 0:
-        t, marked = t[:star.start()], True
+    end = len(t)
+    while end and t[end - 1] == "*":
+        end -= 1
+    if 0 < end < len(t):                      # a lone "*" is an option, not a mark
+        t, marked = t[:end].rstrip(), True
     return marked, t
 
 
@@ -858,16 +951,29 @@ class Pending:
     material: Material | None
     question_id: int | None
     at: float
+    want_when: bool = False     # the topic question also asked how long
 
 
 _PENDING: dict[tuple[int, int], Pending] = {}
 _now = time.monotonic
-_QUIZ_ANSWER = re.compile(r"(?<!\bpub )\b(?:quiz|trivia)\b", re.IGNORECASE)
-_CANCEL = re.compile(
-    r"\s*(?:never\s*mind|nvm|cancel|forget\s*it|skip\s*it|stop|nope|nah|no"
-    r"|no\s+thanks|nothing)\W*",
+_QUIZ_ANSWER = re.compile(
+    r"(?<!\bpub )(?<!\bthe )(?<!\bour )(?<!\bthis )(?<!\bnext )(?<!\blast )"
+    r"\b(?:quiz|trivia)\b(?!\s+(?:night|show|team|game|league|master|bowl))",
     re.IGNORECASE,
 )
+# "never mind" always drops the poll. A bare "no" does too when he asked what it
+# is about; to "what kind?" or "how long?" it just means no kind, no timer.
+_DROP = re.compile(
+    r"\W*(?:never\s*mind|nvm|cancel|forget\s*it|skip\s*it|stop|drop\s*it)"
+    r"(?:\s+(?:it|that|this|the\s+poll|poll|please|pls|dale|rusty|thanks?))*\W*",
+    re.IGNORECASE,
+)
+_NO = re.compile(
+    r"\W*(?:no|nope|nah|nothing|no\s+thanks)"
+    r"(?:\s+(?:thanks?|please|pls|dale|rusty|poll|the\s+poll))*\W*",
+    re.IGNORECASE,
+)
+_CANCEL_MAX = 60
 
 
 def _key(msg: Message) -> tuple[int, int] | None:
@@ -917,7 +1023,7 @@ def forget_pending(msg: Message) -> None:
 
 async def _ask_back(
     rt: Runtime, msg: Message, text: str, *, mode: str, request: str,
-    ask_text: str, material: Material | None,
+    ask_text: str, material: Material | None, want_when: bool = False,
 ) -> str | None:
     """Ask the asker `text` as a force-reply (so their answer arrives as a
     reply to it) and keep what we have until they answer."""
@@ -936,6 +1042,7 @@ async def _ask_back(
     _remember(key, Pending(
         mode=mode, request=request, ask_text=ask_text, material=material,
         question_id=getattr(sent, "message_id", None), at=_now(),
+        want_when=want_when,
     ))
     return text
 
@@ -947,20 +1054,30 @@ async def continue_poll(
     """Finish a poll with the answer to the question he asked. The answer says
     the topic, or the kind, or how long, or the one missing detail, by what the
     question was; he asks nothing more."""
-    if _CANCEL.fullmatch(typed):
+    short = len(typed) <= _CANCEL_MAX
+    no = short and _NO.fullmatch(typed) is not None
+    if short and _DROP.fullmatch(typed) or (no and pending.mode in ("topic", "clarify")):
         return await _say(msg, DROPPED)
     request, answer, ask_text = pending.request, "", pending.ask_text
+    if no:
+        typed = ""                                  # no kind, no timer: carry on
     if pending.mode == "topic":
         request = typed
         # He told them to say "quiz": a bare quiz in the answer is the kind
-        # (unless it's a pub quiz). Public and timers need their phrases, so
-        # "public transport" and "10 minutes of silence" stay topics.
-        if _QUIZ_ANSWER.search(typed):
+        # (unless it's a pub quiz, or the answer is a whole typed poll, whose
+        # question is its own business). Public and timers need their phrases,
+        # so "public transport" and "10 minutes of silence" stay topics.
+        if "|" not in typed and _QUIZ_ANSWER.search(typed):
             ask_text = f"{ask_text} quiz".strip()
+        if pending.want_when and "|" not in typed:
+            length = _DUR_RE.search(typed)
+            found = _seconds_at(typed, length.start()) if length else None
+            if found:
+                answer = f"closes in {typed[length.start():found[1]]}"
     elif pending.mode == "clarify":
         request = f"{pending.request}\n{typed}".strip()
     elif pending.mode == "when":
-        answer = f"closes in {typed}"
+        answer = f"closes in {typed}" if typed else ""
     else:
         answer = typed
     return await make_poll(
@@ -1018,6 +1135,15 @@ async def _post(rt: Runtime, msg: Message, draft: PollDraft) -> str:
 _GATHER = object()      # make_poll reads the material off the message itself
 
 
+def _finalize(draft: PollDraft, kind: Kind, may_ask: bool) -> PollDraft | None:
+    """apply_kind, and a word about it when they said "timed" and then never
+    gave a length (he asked once; the poll stays open until someone stops it)."""
+    final = apply_kind(draft, kind)
+    if final is not None and kind.ask_when and not may_ask and not final.note:
+        final = replace(final, note=NO_LENGTH)
+    return final
+
+
 async def make_poll(
     rt: Runtime, msg: Message, request: str, *, vision_ok: bool = True,
     ask_text: str = "", material: Material | None | object = _GATHER,
@@ -1045,7 +1171,11 @@ async def make_poll(
             found = found.merged(parse_kind(request))
         return found.merged(parse_kind(answer, loose=True)) if answer else found
 
-    kind = kind_of("|" not in request)
+    had_pipes = "|" in request
+    kind = kind_of(not had_pipes)
+    if not had_pipes:
+        # "ask me what kind" is for him, not a topic to make a poll about.
+        request = strip_ask_kind(request)
     typed = piped(request[:_MAX_TYPED_CHARS], quiz=kind.quiz)
     if typed is not None:
         if may_ask and (kind.ask_kind or kind.ask_when):
@@ -1056,8 +1186,9 @@ async def make_poll(
             )
         if kind.quiz and not typed.correct:
             return await _say(msg, NO_ANSWER_MARKED)
-        return await _post(rt, msg, apply_kind(typed, kind))
-    kind = kind_of(True)
+        return await _post(rt, msg, _finalize(typed, kind, may_ask))
+    if had_pipes:                         # it had a bar but isn't a poll typed whole
+        kind = kind_of(True)
     if _NOISE_ONLY.fullmatch(request):
         request = ""
     if material is _GATHER:
@@ -1069,8 +1200,9 @@ async def make_poll(
     if material is None and not request:
         if may_ask:
             return await _ask_back(
-                rt, msg, ASK_TOPIC, mode="topic", request="", ask_text=ask_text,
-                material=None,
+                rt, msg, ASK_TOPIC_WHEN if kind.ask_when else ASK_TOPIC,
+                mode="topic", request="", ask_text=ask_text, material=None,
+                want_when=kind.ask_when,
             )
         return await _say(msg, HINT)
     if may_ask and (kind.ask_kind or kind.ask_when):
@@ -1097,7 +1229,7 @@ async def make_poll(
         )
     if found is None:
         return await _say(msg, NOTHING)
-    final = apply_kind(found, kind)
+    final = _finalize(found, kind, may_ask)
     if final is None:
         return await _say(msg, NO_QUIZ_ANSWER)
     return await _post(rt, msg, final)
