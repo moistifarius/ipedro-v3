@@ -214,6 +214,14 @@ CREATE TABLE IF NOT EXISTS bot_posts (
 
 CREATE INDEX IF NOT EXISTS bot_posts_created_idx ON bot_posts (created_at);
 
+-- One row per chat: when a bot last answered another bot there. Every bot
+-- claims this row (atomically) before it replies to a bot, so across ALL
+-- bots a chat gets at most one bot-to-bot reply per window; see hub.py.
+CREATE TABLE IF NOT EXISTS hub_chat_claims (
+    chat_id     BIGINT PRIMARY KEY,
+    claimed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Duckhunt ------------------------------------------------------------------
 -- Persistent state for active spawns. At most one active duck per chat.
 CREATE TABLE IF NOT EXISTS duck_events (

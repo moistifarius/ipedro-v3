@@ -15,6 +15,8 @@ whenever they're addressed will happily address each other forever, so:
   speaking on its own), parent + 1 when it was answering another bot.
   Nothing answers a post at MAX_DEPTH, so one human line sets off at
   most MAX_DEPTH bot-to-bot replies, however many bots there are.
+* Hub-wide, a chat gets one bot-to-bot reply per CHAT_GAP_SECONDS, claimed
+  atomically in Postgres, so N bots hearing one post produce one answer.
 * Each bot leaves MIN_GAP_SECONDS between its own bot-triggered replies
   in a chat, so even a legal chain can't machine-gun the room.
 * A human's /shutup on a bot holds here too, and a commands-only chat
@@ -38,8 +40,13 @@ CHANNEL = "bot_posts"
 # command, and with no timeout a silently dropped connection stalled that
 # probe for the kernel's TCP timeout (many minutes) instead of seconds.
 _LISTEN_COMMAND_TIMEOUT = 15.0
-MAX_DEPTH = 3
+MAX_DEPTH = 2
 MIN_GAP_SECONDS = 20.0
+# Hub-wide: across ALL bots, a chat gets at most one bot-to-bot reply per
+# this many seconds. The per-bot gap above can't stop a loop by itself —
+# every bot hears a post at the same instant, so with N bots one post
+# drew N replies, and each of those drew N more.
+CHAT_GAP_SECONDS = 90.0
 _KEEPALIVE_SECONDS = 30.0
 _POLL_SECONDS = 1.0            # how often the listen loop looks up from the queue
 _PRUNE_EVERY_SECONDS = 3600.0
@@ -123,6 +130,27 @@ class Hub:
         now = time.monotonic() if now is None else now
         last = self._last_bot_reply.get(chat_id)
         return last is None or now - last >= MIN_GAP_SECONDS
+
+    async def claim_chat(self, chat_id: int) -> bool:
+        """Win the right to answer a bot in this chat, hub-wide. One atomic
+        upsert, so when several bots hear the same post only one wins.
+        Fails closed: if the claim can't be made, nobody answers."""
+        try:
+            won = await self.db.fetchval(
+                """
+                INSERT INTO hub_chat_claims (chat_id, claimed_at)
+                VALUES ($1, NOW())
+                ON CONFLICT (chat_id) DO UPDATE SET claimed_at = NOW()
+                WHERE hub_chat_claims.claimed_at
+                      < NOW() - make_interval(secs => $2)
+                RETURNING 1
+                """,
+                chat_id, CHAT_GAP_SECONDS,
+            )
+        except Exception as exc:
+            log.info("hub: couldn't claim %s (%s); not answering", chat_id, exc)
+            return False
+        return won is not None
 
     def answered(self, chat_id: int, *, now: float | None = None) -> None:
         self._last_bot_reply[chat_id] = time.monotonic() if now is None else now
@@ -337,9 +365,12 @@ async def handle_post(rt, ident, hub: Hub, post: Post) -> None:
         )
         or not hub.may_answer(post.chat_id)
         or await has_flag(rt.db, post.chat_id, post.bot_id, "shutup")
+        # Last, because it spends the chat's one slot: only one bot, of all
+        # that heard this, gets to answer.
+        or not await hub.claim_chat(post.chat_id)
     ):
         return
-    hub.answered(post.chat_id)      # claim the slot before the slow part
+    hub.answered(post.chat_id)     # claim the slot before the slow part
 
     ctx = await build_context(
         store=rt.memory, settings=rt.settings, chat_id=post.chat_id,

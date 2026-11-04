@@ -31,7 +31,7 @@ def _post(**over) -> hub.Post:
 
 
 def _hub() -> hub.Hub:
-    return hub.Hub(SimpleNamespace(), bot_id=HANK_ID, bot_username="HankBot",
+    return hub.Hub(SimpleNamespace(fetchval=AsyncMock(return_value=1)), bot_id=HANK_ID, bot_username="HankBot",
                    bot_name="Hank")
 
 
@@ -518,3 +518,29 @@ async def test_the_listening_connection_has_a_command_timeout(monkeypatch):
     monkeypatch.setattr(asyncpg, "connect", fake_connect)
     assert await hub._connect_listener("postgresql://x/y") == "conn"
     assert seen["command_timeout"] == hub._LISTEN_COMMAND_TIMEOUT <= 30
+
+
+@pytest.mark.asyncio
+async def test_only_one_bot_wins_the_chat_claim(heard):
+    heard.hub.db.fetchval.return_value = None      # another bot got there first
+    await heard.hear(_post())
+    heard.rt.openai.chat.assert_not_awaited()
+    heard.rt.bot.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_claim_means_silence(heard):
+    heard.hub.db.fetchval.side_effect = RuntimeError("db down")
+    await heard.hear(_post())
+    heard.rt.bot.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_claim_is_not_spent_on_posts_that_arent_for_us(heard):
+    await heard.hear(_post(text="nothing to see here"))
+    heard.hub.db.fetchval.assert_not_awaited()
+
+
+def test_a_bot_to_bot_chain_is_short():
+    assert hub.MAX_DEPTH <= 2
+    assert hub.CHAT_GAP_SECONDS >= 60
