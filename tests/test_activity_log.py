@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from ipedro import gif_reaction
 from ipedro.handlers import chat
 from tests.test_addressed import _mention_rt
 from tests.test_captcha_intercept import _msg, _rt_with
@@ -61,7 +62,7 @@ async def test_automod_text_trigger_logs_itself():
 
 @pytest.mark.asyncio
 async def test_ambient_gif_logs_itself(monkeypatch):
-    monkeypatch.setattr(chat.dale, "send_random", AsyncMock(return_value=True))
+    monkeypatch.setattr(gif_reaction, "ambient", AsyncMock(return_value=True))
     monkeypatch.setattr(chat, "_DALE_GIF_PROBABILITY", 1.0)
     monkeypatch.setattr(chat, "_REACT_PROBABILITY", 0.0)
     rt = _rt()

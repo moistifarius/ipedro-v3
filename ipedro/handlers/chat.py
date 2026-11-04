@@ -15,7 +15,8 @@ from aiogram import F, Router
 from aiogram.types import BufferedInputFile, Message, ReactionTypeEmoji
 
 from ipedro import (
-    addressed, identity, introspection, media_library, poll_maker, relay, vision,
+    addressed, gif_reaction, identity, introspection, media_library, poll_maker,
+    relay, vision,
 )
 from ipedro.bot_messages import track
 from ipedro.capabilities import capability_brief
@@ -90,16 +91,17 @@ _REACTION_POOL = (
 
 _REACT_PROBABILITY = 0.04
 
-# Ambient Dale: how often an un-addressed TEXT message just gets a GIF
-# back — one in fifty. A module constant on purpose, like
-# _REACT_PROBABILITY above it; the per-chat off switch is /chat_config
-# automod off. That toggle covers this roll and the automod trigger
-# table, but NOT the cat-fact intercept, the reaction roll, or the
-# thanks/credit lines below — those are separate ambient features with
-# their own always-on behavior, not a second overlapping toggle.
-# Was 3%, and felt like constant once media messages started flowing
-# through this handler too (see the guard at the roll).
-_DALE_GIF_PROBABILITY = 0.02
+# Ambient Dale: how often an un-addressed TEXT message is even CONSIDERED for a
+# GIF reaction, about one in seventeen. Considering is not sending: gif_reaction
+# then checks the message is fair game (short, no question, nothing serious),
+# the chat is ready (cooldowns, he hasn't just spoken) and one cheap model call
+# says a particular reaction plainly fits, which is rare. A module constant on
+# purpose, like _REACT_PROBABILITY above it; the per-chat off switch is
+# /chat_config automod off. That toggle covers this roll and the automod
+# trigger table, but NOT the cat-fact intercept, the reaction roll, or the
+# thanks/credit lines below: those are separate ambient features with their
+# own always-on behavior, not a second overlapping toggle.
+_DALE_GIF_PROBABILITY = 0.06
 
 _POSITIVITY_RE = re.compile(
     r"\b(thanks?|thank\s*you|ty|tysm|appreciate|love\s+(it|this|that)|"
@@ -749,6 +751,21 @@ def build_router(rt: Runtime) -> Router:
                 except Exception as exc:
                     log.warning("media library failed in %s: %s", msg.chat.id, exc)
 
+        # The answer to a question he asked about a poll ("what's it about?",
+        # "what kind?"). Before everything below, which would take it for
+        # ordinary chat: an answer like "quiz about capitals" names nobody. In
+        # a group it has to be a reply to his question; the asker's DM needs
+        # no reply. Anything else the asker says carries on as normal.
+        if typed:
+            waiting = poll_maker.take_pending(msg)
+            if waiting is not None:
+                made = await poll_maker.continue_poll(
+                    rt, msg, waiting, typed, vision_ok=cfg.vision_enabled,
+                )
+                if made:
+                    await _record_bot_turn(rt, cfg, msg.chat.id, made)
+                return
+
         # "thanks pedro" → passive-aggressive line. Intercepts before the
         # normal flow so we don't also run an AI reply. Dale's names and
         # Dale's lines, so Dale only: another bot thanked by name just
@@ -812,7 +829,7 @@ def build_router(rt: Runtime) -> Router:
                 await dale.send_random(
                     rt.db, msg, automod.tag,
                     caption=automod.caption or None,
-                    fallback=automod.fallback,
+                    fallback=automod.fallback, pace=True,
                 )
                 kind = "gif"
             else:
@@ -953,9 +970,9 @@ def build_router(rt: Runtime) -> Router:
 
         # Ambient Dale. Deliberately does NOT return: falling through keeps
         # maybe_summarize (below) running on these messages. Skipped whenever
-        # the message is addressed to the bot, so a random GIF can never eat a
-        # real answer, and given no text fallback — an empty library means
-        # silence, not noise. Text only: since vision, stickers and photos
+        # the message is addressed to the bot, so a GIF can never eat a real
+        # answer, and given no text fallback — an empty library, or nothing
+        # that fits, means silence, not noise. Text only: since vision, stickers and photos
         # reach this point too, and a sticker volley rolling the dice on
         # every frame turned "occasional" into "constant" — and a GIF fired
         # back at a GIF reads as a reply, not a stray. The library is GIFs
@@ -972,7 +989,7 @@ def build_router(rt: Runtime) -> Router:
         ):
             gif_sent = False
             try:
-                gif_sent = await dale.send_random(rt.db, msg, "")
+                gif_sent = await gif_reaction.ambient(rt, msg, typed)
             except Exception as exc:
                 log.debug("ambient dale gif failed in %s: %s", msg.chat.id, exc)
             if gif_sent:
@@ -985,7 +1002,7 @@ def build_router(rt: Runtime) -> Router:
                         rt.memory, rt.openai, rt.settings, msg.chat.id,
                     )
                 await _log_activity(
-                    rt, msg.chat.id, "ambient_gif", f"random roll on {typed[:60]!r}",
+                    rt, msg.chat.id, "ambient_gif", f"fit reaction to {typed[:60]!r}",
                 )
                 return
 
@@ -1041,12 +1058,11 @@ def build_router(rt: Runtime) -> Router:
         # as it is; anything else is one model call, rate limited. Ahead of
         # the picture-recall bit below, which would answer "post a poll from
         # this screenshot" by sending an old screenshot back.
-        poll_request = poll_maker.detect_poll_request(
-            typed, names=ident.names_pattern,
-        )
-        if poll_request is not None:
+        poll_ask = poll_maker.detect_poll_ask(typed, names=ident.names_pattern)
+        if poll_ask is not None:
             made = await poll_maker.make_poll(
-                rt, msg, poll_request, vision_ok=cfg.vision_enabled,
+                rt, msg, poll_ask.rest, ask_text=poll_ask.ask,
+                vision_ok=cfg.vision_enabled,
             )
             if made:
                 await _record_bot_turn(rt, cfg, msg.chat.id, made)

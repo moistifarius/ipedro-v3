@@ -19,6 +19,12 @@ ever posted into the chat it came from.
 
 The model call costs money, so drafted polls are rate limited (kind
 ``poll``). The typed ``Q | A | B`` form calls no model and is not.
+
+What KIND of poll can be said in the ask or the request ("a quiz poll", "make
+it public", "pick all that apply", "closes in 10 minutes"), or as a prefix
+("quiz, public: Q | A | B*"), and is applied in code whatever the model says.
+When the ask leaves out what the poll is about, or says "ask me what kind", the
+bot asks (a force-reply to the asker) and the asker's answer finishes the poll.
 """
 
 from __future__ import annotations
@@ -30,15 +36,20 @@ import json
 import logging
 import math
 import re
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 
-from aiogram.types import Message, ReplyParameters
+from aiogram.methods import SendPoll
+from aiogram.types import ForceReply, Message, ReplyParameters
 
 from ipedro import vision
 from ipedro.bot_messages import track
 from ipedro.handlers.common import over_limit
 from ipedro.identity import DALE
-from ipedro.prompts import POLL_DRAFT_PROMPT
+from ipedro.prompts import (
+    POLL_ASK_MAY, POLL_ASK_NEVER, POLL_DRAFT_PROMPT, POLL_KIND_MULTIPLE,
+    POLL_KIND_QUIZ, POLL_KIND_SINGLE,
+)
 from ipedro.runtime import Runtime
 
 log = logging.getLogger(__name__)
@@ -48,6 +59,9 @@ MAX_QUESTION = 300
 MAX_OPTION = 100
 MIN_OPTIONS = 2
 MAX_OPTIONS = 10
+MAX_EXPLANATION = 200           # a quiz's "why", shown once someone answers
+MIN_OPEN_SECONDS = 5            # a poll's timer: Telegram's range
+MAX_OPEN_SECONDS = 2_628_000    # about 30 days
 
 _MAX_FILE_BYTES = 100_000       # a text file bigger than this isn't a menu
 _MAX_MATERIAL_CHARS = 6000      # what one poll is allowed to cost in input
@@ -56,6 +70,9 @@ _MAX_TYPED_CHARS = 4096         # a whole message: what Telegram allows
 _DRAFT_TOKENS = 900            # room for 10 long options in a wide script
 _SCAN_CHARS = 300               # a request is made at the start of a message
 _MAX_LEAD_TOKENS = 8            # filler words/names allowed before the ask
+_PENDING_TTL = 180.0            # seconds an answer to a question of his is awaited
+_PENDING_MAX = 200              # questions waiting on an answer, all chats
+_PENDING_WITH_IMAGE_MAX = 8     # …of which may hold a picture's bytes
 _TEXT_SUFFIXES = (".txt", ".text", ".md", ".csv", ".log")
 _TEXT_MIMES = ("text/plain", "text/markdown", "text/csv")
 
@@ -73,6 +90,38 @@ NOTHING = (
 NO_VISION = (
     "Reading pictures is switched off here, so I can't make a poll out of one."
 )
+ASK_TOPIC = (
+    "What's the poll about? Give me the question and choices, or just a topic. "
+    "Want a kind? Say quiz (one right answer), pick several, public votes, or "
+    "a timer like \"closes in 10 minutes\". Otherwise it's a regular poll."
+)
+ASK_KIND = (
+    "What kind of poll? Regular (pick one), pick several, quiz (one right "
+    "answer), public (shows who voted), and/or a timer like \"10 minutes\". "
+    "Say as many as you like."
+)
+ASK_WHEN = (
+    "How long should it stay open? Say something like \"10 minutes\", "
+    "\"2 hours\" or \"1 day\" (5 seconds to 30 days)."
+)
+NO_ANSWER_MARKED = (
+    "A quiz needs its right answer marked: put a * after it (Paris*) or ✓ "
+    "before it, like /poll quiz: Capital of France? | Rome | Paris* | Oslo"
+)
+NO_QUIZ_ANSWER = (
+    "I couldn't tell which answer is right for that quiz. Say it, e.g. "
+    "\"quiz about capitals, Paris is right\", or mark it: Paris*"
+)
+DROPPED = "Okay, no poll."
+FORCE_PLACEHOLDER = "your answer"
+
+
+def _human_span(seconds: int) -> str:
+    for unit, size in (("day", 86400), ("hour", 3600), ("minute", 60)):
+        if seconds >= size and seconds % size == 0:
+            n = seconds // size
+            return f"{n} {unit}{'' if n == 1 else 's'}"
+    return f"{seconds} seconds"
 
 
 @dataclass(frozen=True)
@@ -80,11 +129,36 @@ class PollDraft:
     question: str
     options: list[str]
     multiple: bool = False
+    quiz: bool = False
+    correct: tuple[int, ...] = ()           # indexes of the right option(s)
+    explanation: str | None = None          # a quiz's "why"
+    anonymous: bool = True
+    open_seconds: int | None = None         # closes itself after this long
+    note: str | None = None                 # said after it is posted
 
     def summary(self) -> str:
         """What goes into the chat's history for the poll that was posted."""
-        tail = " (several answers allowed)" if self.multiple else ""
-        return f"[made a poll] {self.question} — {' | '.join(self.options)}{tail}"
+        options = [
+            f"{o} ✓" if self.quiz and i in self.correct else o
+            for i, o in enumerate(self.options)
+        ]
+        bits = []
+        if self.multiple and not self.quiz:
+            bits.append("several answers allowed")
+        if not self.anonymous:
+            bits.append("public votes")
+        if self.open_seconds:
+            bits.append(f"closes in {_human_span(self.open_seconds)}")
+        tail = f" ({', '.join(bits)})" if bits else ""
+        what = "a quiz poll" if self.quiz else "a poll"
+        return f"[made {what}] {self.question} — {' | '.join(options)}{tail}"
+
+
+@dataclass(frozen=True)
+class Ask:
+    """The drafter wants one more detail before it can make the poll."""
+
+    question: str
 
 
 @dataclass(frozen=True)
@@ -113,7 +187,9 @@ _VERB = (
     r"|build|draft|whip\s+up|throw\s+together|generate|write)"
 )
 _NOISE = (
-    r"(?:me|us|up|out|together|a|an|one|new|quick|little|small|simple|short|fun)"
+    r"(?:me|us|up|out|together|a|an|one|new|quick|little|small|simple|short|fun"
+    r"|quiz|trivia|public|anonymous|private|timed|multiple|multi-?select"
+    r"|multiselect|choice|yes/no|yes-no|true/false|regular|basic)"
 )
 _NOT_AN_ASK = r"(?!\s+(?:results?|numbers|stats|status|data|winner|so\s+far|totals?|count))"
 # What "turn ... into a poll" is turning: a pointer or a few words ("this",
@@ -121,7 +197,7 @@ _NOT_AN_ASK = r"(?!\s+(?:results?|numbers|stats|status|data|winner|so\s+far|tota
 # every decision into a poll" is a meme request that merely mentions one.
 _THING = r"(?:[\w'’-]+\s+){0,3}"
 _ASK = (
-    rf"(?:{_VERB}\s+(?:{_NOISE}\s+){{0,4}}poll\b{_NOT_AN_ASK}"
+    rf"(?:{_VERB}\s+(?:{_NOISE}\s+){{0,6}}poll\b{_NOT_AN_ASK}"
     rf"|(?:turn|convert|make|put|change|transform)\s+{_THING}"
     r"(?:(?:into|in\s+to)\s+(?:an?\s+)?|to\s+an?\s+)poll\b"
     r"|poll\s+(?:this|that|it|these|those|them"
@@ -219,12 +295,18 @@ def clean_request(
     return "" if pointer or not re.search(r"\w", bare) else rest
 
 
-def detect_poll_request(text: str | None, *, names: str | None = None) -> str | None:
-    """None when `text` isn't asking for a poll; otherwise what they said
-    besides the ask ("" when the ask was only "make a poll from this").
+@dataclass(frozen=True)
+class PollAsk:
+    rest: str       # what they said besides the ask ("" for "make a poll from this")
+    ask: str        # the asking words themselves: where "quiz" or "public" can sit
+
+
+def detect_poll_ask(text: str | None, *, names: str | None = None) -> PollAsk | None:
+    """None when `text` isn't asking for a poll; otherwise the ask and what
+    they said besides it.
 
     The ask must open the message: "dale make a poll from this", "poll this:
-    pizza or tacos", "turn this into a poll", "can you make us a poll about
+    pizza or tacos", "turn this into a poll", "can you make us a quiz poll about
     friday". Only the start is read, so a long message can't make the match
     expensive."""
     if not text:
@@ -233,7 +315,187 @@ def detect_poll_request(text: str | None, *, names: str | None = None) -> str | 
     m = _ask_re(names).match(text[:_SCAN_CHARS])
     if m is None:
         return None
-    return clean_request(text[m.end():m.end() + _MAX_TYPED_CHARS], names=names)
+    return PollAsk(
+        rest=clean_request(text[m.end():m.end() + _MAX_TYPED_CHARS], names=names),
+        ask=m.group("ask"),
+    )
+
+
+def detect_poll_request(text: str | None, *, names: str | None = None) -> str | None:
+    """What they said besides the ask ("" when the ask was only "make a poll
+    from this"), or None when `text` isn't asking for a poll."""
+    found = detect_poll_ask(text, names=names)
+    return None if found is None else found.rest
+
+
+# ── what kind of poll ───────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class Kind:
+    quiz: bool = False
+    multiple: bool | None = None     # None: not said, so the draft decides
+    anonymous: bool = True
+    open_seconds: int | None = None  # closes itself after this long
+    clamped: bool = False            # the timer asked for was past Telegram's range
+    ask_kind: bool = False           # "ask me what kind"
+    ask_when: bool = False           # "timed", but no length said
+
+    def merged(self, other: "Kind") -> "Kind":
+        """This kind with `other` (said later) laid over it."""
+        open_seconds = other.open_seconds or self.open_seconds
+        return Kind(
+            quiz=self.quiz or other.quiz,
+            multiple=other.multiple if other.multiple is not None else self.multiple,
+            anonymous=self.anonymous and other.anonymous,
+            open_seconds=open_seconds,
+            clamped=self.clamped or other.clamped,
+            ask_kind=self.ask_kind or other.ask_kind,
+            ask_when=(self.ask_when or other.ask_when) and open_seconds is None,
+        )
+
+
+_NUMBER_WORDS = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "fifteen": 15,
+    "twenty": 20, "thirty": 30, "forty": 40, "sixty": 60,
+}
+_UNIT_SECONDS = {
+    "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
+    "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60,
+    "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
+    "d": 86400, "day": 86400, "days": 86400,
+    "w": 604800, "week": 604800, "weeks": 604800,
+}
+_DURATION = (
+    r"(?P<n>\d+(?:\.\d+)?|half\s+an?|" + "|".join(_NUMBER_WORDS) + r")\s*"
+    r"(?P<u>" + "|".join(sorted(_UNIT_SECONDS, key=len, reverse=True)) + r")\b"
+)
+_WHEN_CUE = (
+    r"(?:clos(?:e|es|ed|ing)|auto[- ]?clos(?:e|es|ing)|end(?:s|ing)?|expir(?:e|es|ing)"
+    r"|last(?:s|ing)?|stay(?:s)?\s+open|open\s+for|running\s+for|timer(?:\s+of)?"
+    r"|time\s+limit(?:\s+of)?|timed(?:\s+poll)?)"
+    r"(?:\s+(?:in|after|for|of|at))?\s+"
+)
+_WHEN_STRICT = re.compile(_WHEN_CUE + _DURATION, re.IGNORECASE)
+_WHEN_AFTER = re.compile(_DURATION + r"[- ]*(?:poll|timer)\b", re.IGNORECASE)
+_WHEN_BARE = re.compile(_DURATION, re.IGNORECASE)
+_TIMED_WORD = re.compile(
+    r"\b(?:timed|time[- ]limited|with\s+a\s+(?:timer|time\s+limit)|auto[- ]?clos\w*)\b",
+    re.IGNORECASE,
+)
+
+# A kind named in a list of kinds ("..., public, closes in 2 hours"): after a
+# comma, "and" or "+", and before the end of its clause. "public transport" and
+# "pub quiz" are topics; "lunch, public" is a kind.
+_LISTED = r"(?:,|\band\b|&|\+)\s*"
+_CLAUSE_END = r"(?=\s*(?:[,.;!?]|$|\band\b|&|\+))"
+
+_QUIZ_STRICT = re.compile(
+    rf"{_LISTED}\b(?:quiz|trivia){_CLAUSE_END}"
+    r"|\bquiz[- ](?:poll|style|type|mode|question)s?\b"
+    r"|\b(?:as|make\s+it|like|into|be)\s+an?\s+quiz\b|\bpoll\s+quiz\b"
+    r"|\btrivia[- ](?:poll|style|question)s?\b"
+    r"|\b(?:with|has|have)\s+an?\s+(?:correct|right)\s+answer\b"
+    r"|\bone\s+(?:right|correct)\s+answer\b",
+    re.IGNORECASE,
+)
+_QUIZ_LOOSE = re.compile(r"\b(?:quiz|trivia)\b", re.IGNORECASE)
+_PUBLIC_STRICT = re.compile(
+    rf"{_LISTED}\bpublic\b{_CLAUSE_END}"
+    r"|\bpublic\s+(?:poll|vote|votes|voting|ballot)\b|\bmake\s+it\s+public\b"
+    r"|\b(?:non|not)[- ]?anonymous\b|\bshow(?:s|ing)?\s+(?:who|names|votes)\b"
+    r"|\bwho\s+(?:voted|votes)\b|\bvisible\s+votes?\b|\bopen\s+ballot\b",
+    re.IGNORECASE,
+)
+_PUBLIC_LOOSE = re.compile(r"\b(?:public|non[- ]?anonymous|not\s+anonymous)\b", re.IGNORECASE)
+_MULTIPLE_STRICT = re.compile(
+    r"\b(?:pick|choose|select|check|vote\s+for)\s+(?:all|any|every|more\s+than\s+one"
+    r"|multiple|several|as\s+many)\b|\ball\s+that\s+apply\b|\bselect\s+all\b"
+    r"|\b(?:multiple|several|more\s+than\s+one)\s+(?:answers?|selections?|picks?|votes?)\b"
+    r"|\bmulti[- ]?select\b|\bcheckbox(?:es)?\b",
+    re.IGNORECASE,
+)
+_MULTIPLE_LOOSE = re.compile(
+    r"\b(?:multiple(?![- ]choice)|several|many|multi[- ]?select|pick\s+all|all\s+that\s+apply)\b",
+    re.IGNORECASE,
+)
+_SINGLE = re.compile(
+    r"\bsingle[- ](?:answer|choice|select)\b|\bpick\s+(?:only\s+)?one\b"
+    r"|\bone\s+answer\b|\bonly\s+one\b",
+    re.IGNORECASE,
+)
+_ASK_KIND = re.compile(
+    r"\bask\s+me\b|\b(?:what|which)\s+(?:kind|type|sort)\b"
+    r"|\b(?:kind|type)\s+of\s+poll\b",
+    re.IGNORECASE,
+)
+
+
+def _duration(text: str, *, bare: bool) -> tuple[int | None, bool]:
+    """(seconds, past Telegram's range) for the timer `text` asks for. `bare`
+    also reads "10 minutes" with no "closes in" before it (an answer to "how
+    long?"); otherwise a cue is needed, so "a 5 minute walk" is no timer."""
+    m = _WHEN_STRICT.search(text) or _WHEN_AFTER.search(text)
+    if m is None and bare:
+        m = _WHEN_BARE.search(text)
+    if m is None:
+        return None, False
+    n = m.group("n").lower()
+    amount = 0.5 if n.startswith("half") else (
+        _NUMBER_WORDS[n] if n in _NUMBER_WORDS else float(n))
+    seconds = int(amount * _UNIT_SECONDS[m.group("u").lower()])
+    if seconds > MAX_OPEN_SECONDS:
+        return MAX_OPEN_SECONDS, True
+    return max(seconds, MIN_OPEN_SECONDS), False
+
+
+def parse_kind(text: str, *, loose: bool = False) -> Kind:
+    """The kind of poll `text` asks for. `loose` is for words that are only
+    about the kind (the ask itself, a prefix, an answer to "what kind?"), where
+    a bare "quiz" or "public" means it; in a topic ("public transport", "quiz
+    night") only the phrasings that name a poll kind count."""
+    text = text[:_MAX_TYPED_CHARS]
+    quiz = bool(_QUIZ_STRICT.search(text) or (loose and _QUIZ_LOOSE.search(text)))
+    public = bool(_PUBLIC_STRICT.search(text) or (loose and _PUBLIC_LOOSE.search(text)))
+    multiple: bool | None = None
+    if _MULTIPLE_STRICT.search(text) or (loose and _MULTIPLE_LOOSE.search(text)):
+        multiple = True
+    elif _SINGLE.search(text):
+        multiple = False
+    seconds, clamped = _duration(text, bare=loose)
+    return Kind(
+        quiz=quiz, multiple=multiple, anonymous=not public, open_seconds=seconds,
+        clamped=clamped, ask_kind=bool(_ASK_KIND.search(text)),
+        ask_when=bool(_TIMED_WORD.search(text)) and seconds is None,
+    )
+
+
+_PREFIX_WORDS = frozenset((
+    "quiz trivia public anonymous non-anonymous regular multiple answer answers "
+    "several multi-select multiselect timed closes close closing in for after "
+    "and a an half one two three four five six seven eight nine ten fifteen "
+    "twenty thirty forty sixty second seconds sec secs minute minutes min mins "
+    "hour hours hr hrs day days week weeks s m h d w"
+).split())
+
+
+def split_kind_prefix(text: str) -> tuple[str, str]:
+    """("quiz, public", "Q | A | B*") for "quiz, public: Q | A | B*": the words
+    before the first colon, when every one of them is a kind word and together
+    they ask for something. ("", text) otherwise, so a question that happens to
+    contain a colon is left alone."""
+    head, colon, tail = text[:100].partition(":")
+    if not colon:
+        return "", text
+    tokens = re.findall(r"[a-z0-9.\-]+", head.lower())
+    if not tokens or not all(
+        t in _PREFIX_WORDS or re.fullmatch(r"\d+(?:\.\d+)?", t) for t in tokens
+    ):
+        return "", text
+    asks = parse_kind(head, loose=True)
+    if asks == Kind() and not {"regular", "anonymous"} & set(tokens):
+        return "", text
+    return head.strip(), text[len(head) + 1:].lstrip()
 
 
 # ── the draft ───────────────────────────────────────────────────────────────
@@ -278,6 +540,20 @@ def _tidy(value: object, limit: int) -> str:
     return s
 
 
+def _indexes(value: object, final_of: dict[int, int]) -> tuple[int, ...]:
+    """The right option(s) a quiz draft names, as indexes into the cleaned
+    options: ints, a list of them, or digit strings; anything that no longer
+    points at an option (cut, or not there) is dropped."""
+    items = value if isinstance(value, list) else [value]
+    found = set()
+    for item in items:
+        if isinstance(item, str) and item.strip().isdigit():
+            item = int(item.strip())
+        if isinstance(item, int) and not isinstance(item, bool) and item in final_of:
+            found.add(final_of[item])
+    return tuple(sorted(found))
+
+
 def clean_draft(data: object, *, strip_marks: bool = True) -> PollDraft | None:
     """A PollDraft from the model's JSON, or None if it can't be a poll.
     `strip_marks` takes off numbering a model adds; a poll somebody typed is
@@ -288,28 +564,64 @@ def clean_draft(data: object, *, strip_marks: bool = True) -> PollDraft | None:
     raw = data.get("options")
     if not question or not isinstance(raw, list):
         return None
+    cleaned = [(i, t) for i, item in enumerate(raw)
+               if (t := _tidy(item, MAX_OPTION + 20))]
+    texts = [t for _, t in cleaned]
+    if strip_marks:
+        texts = _strip_marks(texts)
     options: list[str] = []
-    seen: set[str] = set()
-    items = [t for t in (_tidy(i, MAX_OPTION + 20) for i in raw) if t]
-    for text in _strip_marks(items) if strip_marks else items:
+    seen: dict[str, int] = {}
+    final_of: dict[int, int] = {}       # an option's place in the model's list -> in ours
+    for (index, _), text in zip(cleaned, texts):
         text = _tidy(text, MAX_OPTION)
         key = text.casefold()
-        if text and key not in seen:
-            seen.add(key)
+        if not text:
+            continue
+        if key not in seen:
+            if len(options) >= MAX_OPTIONS:
+                continue
+            seen[key] = len(options)
             options.append(text)
-    options = options[:MAX_OPTIONS]
+        final_of[index] = seen[key]
     if len(options) < MIN_OPTIONS:
         return None
     flag = data.get("multiple")
     multiple = flag is True or (isinstance(flag, str) and flag.strip().lower() in _YES)
-    return PollDraft(question=question, options=options, multiple=multiple)
+    return PollDraft(
+        question=question, options=options, multiple=multiple,
+        correct=_indexes(data.get("correct"), final_of),
+        explanation=_tidy(data.get("explanation"), MAX_EXPLANATION) or None,
+    )
 
 
-def parse_draft(text: str | None) -> PollDraft | None:
-    """Find the JSON object in a model reply (which may wrap it in a fence or
-    a sentence) and check it. Raw control characters inside a string, which a
-    model sometimes writes, are tolerated; a reply nested absurdly deep is
-    just not a poll."""
+def apply_kind(draft: PollDraft, kind: Kind) -> PollDraft | None:
+    """`draft` as the kind that was asked for: a quiz keeps its right answer(s)
+    and its "why", a regular poll drops them, and what the person said (public
+    votes, a timer, one answer or several) wins over what the model guessed.
+    None when a quiz has no right answer to post."""
+    correct = draft.correct if kind.quiz else ()
+    if kind.quiz and not correct:
+        return None
+    if kind.quiz:
+        if kind.multiple is False:
+            correct = correct[:1]
+        multiple = len(correct) > 1
+    else:
+        multiple = kind.multiple if kind.multiple is not None else draft.multiple
+    return replace(
+        draft, quiz=kind.quiz, correct=correct, multiple=multiple,
+        explanation=draft.explanation if kind.quiz else None,
+        anonymous=kind.anonymous, open_seconds=kind.open_seconds,
+        note=("Telegram's longest timer is 30 days, so that's what it got."
+              if kind.clamped else None),
+    )
+
+
+def parse_reply(text: str | None) -> PollDraft | Ask | None:
+    """What a model reply says: a poll, a question it wants answered first, or
+    nothing usable. The reply may wrap its JSON in a fence or a sentence.
+    Raw control characters inside a string, which a model sometimes writes, are
+    tolerated; a reply nested absurdly deep is just not a poll."""
     if not text:
         return None
     decoder = json.JSONDecoder(strict=False)
@@ -322,8 +634,18 @@ def parse_draft(text: str | None) -> PollDraft | None:
         except ValueError:
             start = text.find("{", start + 1)
             continue
-        return clean_draft(data)
+        draft = clean_draft(data)
+        if draft is not None:
+            return draft
+        question = _tidy(data.get("ask"), 200) if isinstance(data, dict) else ""
+        return Ask(question) if question else None
     return None
+
+
+def parse_draft(text: str | None) -> PollDraft | None:
+    """The poll in a model reply, or None (a question it asked doesn't count)."""
+    found = parse_reply(text)
+    return found if isinstance(found, PollDraft) else None
 
 
 _TAGS = re.compile(r"<(\s*/?\s*(?:request|material)\b)", re.IGNORECASE)
@@ -335,7 +657,10 @@ def _quote(text: str, limit: int) -> str:
     return _TAGS.sub(r"‹\1", text[:limit])
 
 
-def build_prompt(request: str, material: Material | None) -> str:
+def build_prompt(
+    request: str, material: Material | None, kind: Kind | None = None,
+    may_ask: bool = False,
+) -> str:
     if material is None:
         body = "(none: the request itself is what to make a poll from)"
     else:
@@ -346,18 +671,31 @@ def build_prompt(request: str, material: Material | None) -> str:
             label = "Its caption:\n" if material.image is not None else ""
             parts.append(label + _quote(material.text, _MAX_MATERIAL_CHARS))
         body = "\n".join(parts) or "(empty)"
+    kinds = ""
+    if kind is not None:
+        if kind.quiz:
+            kinds += POLL_KIND_QUIZ.format(no_answer=(
+                'reply {"ask": "which one is the right answer?"}.' if may_ask
+                else 'reply {"options": []}.'))
+        if kind.multiple is True:
+            kinds += POLL_KIND_MULTIPLE
+        elif kind.multiple is False:
+            kinds += POLL_KIND_SINGLE
     return POLL_DRAFT_PROMPT.format(
         request=_quote(request, _MAX_MATERIAL_CHARS) or "(nothing typed)",
-        material=body,
+        material=body, kind=kinds,
+        ask_rule=POLL_ASK_MAY if may_ask else POLL_ASK_NEVER,
     )
 
 
 async def draft_poll(
     openai, *, request: str, material: Material | None, chat_id: int | None = None,
-) -> PollDraft | None:
+    kind: Kind | None = None, may_ask: bool = False,
+) -> PollDraft | Ask | None:
     """Ask the model for a poll. None whenever it can't give one: a provider
-    error, an unreadable reply, or material with nothing to vote on."""
-    prompt = build_prompt(request, material)
+    error, an unreadable reply, or material with nothing to vote on. An Ask
+    only comes back when `may_ask`."""
+    prompt = build_prompt(request, material, kind, may_ask)
     try:
         if material is not None and material.image is not None:
             raw = await openai.describe_images(
@@ -371,7 +709,8 @@ async def draft_poll(
     except Exception as exc:
         log.info("poll draft failed in %s: %s: %s", chat_id, type(exc).__name__, exc)
         return None
-    return parse_draft(raw)
+    found = parse_reply(raw)
+    return None if isinstance(found, Ask) and not may_ask else found
 
 
 # ── what a message offers ───────────────────────────────────────────────────
@@ -469,67 +808,277 @@ async def _say(msg: Message, text: str) -> str:
     return text
 
 
-def piped(request: str) -> PollDraft | None:
+_MARK_CHARS = "✓✔✅☑"
+_MARK_STAR = re.compile(r"\s*\*+\s*$")
+
+
+def _correct_mark(text: str) -> tuple[bool, str]:
+    """(is it marked as the right answer, the option without the mark): a * on
+    the end ("Paris*") or a tick on either end ("✓ Paris")."""
+    t, marked = text.strip(), False
+    if t and t[0] in _MARK_CHARS:
+        t, marked = t[1:].strip(), True
+    if t and t[-1] in _MARK_CHARS:
+        t, marked = t[:-1].strip(), True
+    star = _MARK_STAR.search(t)
+    if star and star.start() > 0:
+        t, marked = t[:star.start()], True
+    return marked, t
+
+
+def piped(request: str, *, quiz: bool = False) -> PollDraft | None:
     """A poll typed out whole ("where to eat | pizza | tacos"), as /poll has
-    always taken it, or None when `request` isn't one."""
+    always taken it, or None when `request` isn't one. For a quiz the right
+    answer is the one marked with a * or a tick."""
     if "|" not in request:
         return None
     parts = [p.strip() for p in request.split("|") if p.strip()]
     if len(parts) < 3:
         return None
-    return clean_draft({"question": parts[0], "options": parts[1:]}, strip_marks=False)
+    question, options, right = parts[0], parts[1:], []
+    if quiz:
+        marks = [_correct_mark(o) for o in options]
+        right = [i for i, (marked, _) in enumerate(marks) if marked]
+        options = [text for _, text in marks]
+    return clean_draft(
+        {"question": question, "options": options, "correct": right},
+        strip_marks=False,
+    )
 
+
+# ── asking back ─────────────────────────────────────────────────────────────
+
+@dataclass
+class Pending:
+    """A question he asked, and what he has so far, until the asker answers."""
+
+    mode: str                   # topic | kind | when | clarify
+    request: str
+    ask_text: str
+    material: Material | None
+    question_id: int | None
+    at: float
+
+
+_PENDING: dict[tuple[int, int], Pending] = {}
+_now = time.monotonic
+_QUIZ_ANSWER = re.compile(r"(?<!\bpub )\b(?:quiz|trivia)\b", re.IGNORECASE)
+_CANCEL = re.compile(
+    r"\s*(?:never\s*mind|nvm|cancel|forget\s*it|skip\s*it|stop|nope|nah|no"
+    r"|no\s+thanks|nothing)\W*",
+    re.IGNORECASE,
+)
+
+
+def _key(msg: Message) -> tuple[int, int] | None:
+    sender = getattr(msg, "from_user", None)
+    return (msg.chat.id, sender.id) if sender is not None else None
+
+
+def _remember(key: tuple[int, int], pending: Pending) -> None:
+    """Keep `pending`, bounded: stale questions go first, then the oldest, and
+    only a few may hold a picture's bytes (3.5 MB each)."""
+    for k in [k for k, p in _PENDING.items() if pending.at - p.at > _PENDING_TTL]:
+        del _PENDING[k]
+    _PENDING.pop(key, None)
+    _PENDING[key] = pending
+    while len(_PENDING) > _PENDING_MAX:
+        del _PENDING[next(iter(_PENDING))]
+    holders = [k for k, p in _PENDING.items() if p.material and p.material.image]
+    for k in holders[:max(0, len(holders) - _PENDING_WITH_IMAGE_MAX)]:
+        del _PENDING[k]
+
+
+def take_pending(msg: Message) -> Pending | None:
+    """The question this message answers, taken off the list. In a group the
+    answer has to be a reply to the question (the force-reply makes that the
+    default); in a private chat the asker's next message is the answer."""
+    key = _key(msg)
+    pending = _PENDING.get(key) if key is not None else None
+    if pending is None:
+        return None
+    if _now() - pending.at > _PENDING_TTL:
+        del _PENDING[key]
+        return None
+    if getattr(msg.chat, "type", None) != "private":
+        quoted = getattr(msg, "reply_to_message", None)
+        if (quoted is None or pending.question_id is None
+                or getattr(quoted, "message_id", None) != pending.question_id):
+            return None
+    del _PENDING[key]
+    return pending
+
+
+def forget_pending(msg: Message) -> None:
+    key = _key(msg)
+    if key is not None:
+        _PENDING.pop(key, None)
+
+
+async def _ask_back(
+    rt: Runtime, msg: Message, text: str, *, mode: str, request: str,
+    ask_text: str, material: Material | None,
+) -> str | None:
+    """Ask the asker `text` as a force-reply (so their answer arrives as a
+    reply to it) and keep what we have until they answer."""
+    key = _key(msg)
+    if key is None:                         # nobody to wait for
+        return await _say(msg, HINT)
+    try:
+        sent = await msg.reply(text, reply_markup=ForceReply(
+            force_reply=True, selective=True,
+            input_field_placeholder=FORCE_PLACEHOLDER,
+        ))
+    except Exception as exc:
+        log.info("poll question failed in %s: %s: %s", msg.chat.id,
+                 type(exc).__name__, exc)
+        return None
+    _remember(key, Pending(
+        mode=mode, request=request, ask_text=ask_text, material=material,
+        question_id=getattr(sent, "message_id", None), at=_now(),
+    ))
+    return text
+
+
+async def continue_poll(
+    rt: Runtime, msg: Message, pending: Pending, typed: str, *,
+    vision_ok: bool = True,
+) -> str | None:
+    """Finish a poll with the answer to the question he asked. The answer says
+    the topic, or the kind, or how long, or the one missing detail, by what the
+    question was; he asks nothing more."""
+    if _CANCEL.fullmatch(typed):
+        return await _say(msg, DROPPED)
+    request, answer, ask_text = pending.request, "", pending.ask_text
+    if pending.mode == "topic":
+        request = typed
+        # He told them to say "quiz": a bare quiz in the answer is the kind
+        # (unless it's a pub quiz). Public and timers need their phrases, so
+        # "public transport" and "10 minutes of silence" stay topics.
+        if _QUIZ_ANSWER.search(typed):
+            ask_text = f"{ask_text} quiz".strip()
+    elif pending.mode == "clarify":
+        request = f"{pending.request}\n{typed}".strip()
+    elif pending.mode == "when":
+        answer = f"closes in {typed}"
+    else:
+        answer = typed
+    return await make_poll(
+        rt, msg, request, vision_ok=vision_ok, ask_text=ask_text,
+        material=pending.material, answer=answer, may_ask=False,
+    )
+
+
+# ── posting ─────────────────────────────────────────────────────────────────
 
 async def _post(rt: Runtime, msg: Message, draft: PollDraft) -> str:
     # bot.send_poll with explicit reply parameters, not msg.reply_poll: that
     # one sends the deprecated allow_sending_without_reply next to its own
     # reply parameters, and Telegram goes by the latter, which don't carry it,
     # so a command deleted a moment too soon would fail the whole poll.
+    thread = (
+        getattr(msg, "message_thread_id", None)
+        if getattr(msg, "is_topic_message", False) else None
+    )
+    reply = ReplyParameters(message_id=msg.message_id, allow_sending_without_reply=True)
     try:
-        sent = await rt.bot.send_poll(
-            chat_id=msg.chat.id,
-            message_thread_id=(
-                getattr(msg, "message_thread_id", None)
-                if getattr(msg, "is_topic_message", False) else None
-            ),
-            question=draft.question, options=draft.options, is_anonymous=True,
-            allows_multiple_answers=draft.multiple,
-            reply_parameters=ReplyParameters(
-                message_id=msg.message_id, allow_sending_without_reply=True,
-            ),
-        )
+        if draft.quiz:
+            # Sent as a method object: the Bot API replaced correct_option_id
+            # with correct_option_ids (April 2026) and the aiogram this runs on
+            # only knows the old name, so a quiz carries both.
+            sent = await rt.bot(SendPoll(
+                chat_id=msg.chat.id, message_thread_id=thread,
+                question=draft.question, options=draft.options,
+                is_anonymous=draft.anonymous, type="quiz",
+                allows_multiple_answers=True if len(draft.correct) > 1 else None,
+                correct_option_id=draft.correct[0] if len(draft.correct) == 1 else None,
+                correct_option_ids=list(draft.correct),
+                explanation=draft.explanation, open_period=draft.open_seconds,
+                reply_parameters=reply,
+            ))
+        else:
+            sent = await rt.bot.send_poll(
+                chat_id=msg.chat.id, message_thread_id=thread,
+                question=draft.question, options=draft.options,
+                is_anonymous=draft.anonymous,
+                allows_multiple_answers=draft.multiple,
+                open_period=draft.open_seconds, reply_parameters=reply,
+            )
     except Exception as exc:
         log.warning("poll send failed in %s: %s: %s", msg.chat.id, type(exc).__name__, exc)
         why = re.sub(r"\s+", " ", str(exc)).strip()[:120]
         return await _say(msg, f"Telegram wouldn't take that poll: {why}" if why
                           else "Telegram wouldn't take that poll.")
     track(msg.chat.id, getattr(sent, "message_id", None), draft.question)
+    if draft.note:
+        await _say(msg, draft.note)
     return draft.summary()
+
+
+_GATHER = object()      # make_poll reads the material off the message itself
 
 
 async def make_poll(
     rt: Runtime, msg: Message, request: str, *, vision_ok: bool = True,
+    ask_text: str = "", material: Material | None | object = _GATHER,
+    answer: str = "", may_ask: bool = True,
 ) -> str | None:
     """Make a poll from what `msg` gives the bot and post it as a reply.
 
-    `request` is what they typed besides the ask. A poll typed out whole is
-    posted as it is, with no model and no limit; anything else is drafted
-    from the material. Returns the line to keep in the chat's history (the
-    poll, or the sentence they were told instead), or None when nothing
-    visible happened (a rate limit already said so)."""
+    `request` is what they typed besides the ask, and `ask_text` the asking
+    words (where "quiz" or "public" can sit). A poll typed out whole is posted
+    as it is, with no model and no limit; anything else is drafted from the
+    material. When there is nothing to go on, or they said "ask me what kind",
+    or the drafter needs one more detail, he asks (once: `may_ask` is False for
+    the follow-up, whose `answer` is read for the kind). Returns the line to
+    keep in the chat's history (the poll, or the sentence they were told
+    instead), or None when nothing visible happened (a rate limit already said
+    so)."""
     request = request.strip()
-    typed = piped(request[:_MAX_TYPED_CHARS])
+    prefix, after = split_kind_prefix(request)
+    if prefix:
+        ask_text, request = f"{ask_text} {prefix}".strip(), after.strip()
+
+    def kind_of(with_request: bool) -> Kind:
+        found = parse_kind(ask_text, loose=True)
+        if with_request:
+            found = found.merged(parse_kind(request))
+        return found.merged(parse_kind(answer, loose=True)) if answer else found
+
+    kind = kind_of("|" not in request)
+    typed = piped(request[:_MAX_TYPED_CHARS], quiz=kind.quiz)
     if typed is not None:
-        return await _post(rt, msg, typed)
+        if may_ask and (kind.ask_kind or kind.ask_when):
+            return await _ask_back(
+                rt, msg, ASK_KIND if kind.ask_kind else ASK_WHEN,
+                mode="kind" if kind.ask_kind else "when", request=request,
+                ask_text=ask_text, material=None,
+            )
+        if kind.quiz and not typed.correct:
+            return await _say(msg, NO_ANSWER_MARKED)
+        return await _post(rt, msg, apply_kind(typed, kind))
+    kind = kind_of(True)
     if _NOISE_ONLY.fullmatch(request):
         request = ""
-    material = await gather(rt, msg, vision_ok=vision_ok)
+    if material is _GATHER:
+        material = await gather(rt, msg, vision_ok=vision_ok)
     if material is not None and material.problem:
         if not request:
             return await _say(msg, material.problem)
         material = None             # they typed enough to go on without it
     if material is None and not request:
+        if may_ask:
+            return await _ask_back(
+                rt, msg, ASK_TOPIC, mode="topic", request="", ask_text=ask_text,
+                material=None,
+            )
         return await _say(msg, HINT)
+    if may_ask and (kind.ask_kind or kind.ask_when):
+        return await _ask_back(
+            rt, msg, ASK_KIND if kind.ask_kind else ASK_WHEN,
+            mode="kind" if kind.ask_kind else "when", request=request,
+            ask_text=ask_text, material=material,
+        )
     # Typed words that come with other material are a steer; typed words on
     # their own ARE the material (a pasted list, a message), and get its room.
     request = request[:_MAX_REQUEST_CHARS if material is not None else _MAX_MATERIAL_CHARS]
@@ -537,9 +1086,18 @@ async def make_poll(
         return None
     with contextlib.suppress(Exception):
         await rt.bot.send_chat_action(msg.chat.id, "typing")
-    draft = await draft_poll(
+    found = await draft_poll(
         rt.openai, request=request, material=material, chat_id=msg.chat.id,
+        kind=kind, may_ask=may_ask,
     )
-    if draft is None:
+    if isinstance(found, Ask):
+        return await _ask_back(
+            rt, msg, found.question, mode="clarify", request=request,
+            ask_text=ask_text, material=material,
+        )
+    if found is None:
         return await _say(msg, NOTHING)
-    return await _post(rt, msg, draft)
+    final = apply_kind(found, kind)
+    if final is None:
+        return await _say(msg, NO_QUIZ_ANSWER)
+    return await _post(rt, msg, final)

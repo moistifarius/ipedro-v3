@@ -46,15 +46,41 @@ nothing, and a poll typed whole after the ask ("make a poll: where | pizza |
 tacos") is posted as typed. A drafted poll, or one typed whole in plain words,
 is posted as a reply to your message, in the same topic of a forum group (the
 typed `/poll Q | A | B` posts as it always has). When asked in plain words it is
-also written into the chat's history, so he knows it exists. `/poll` with
-nothing to go on says what to give it.
+also written into the chat's history, so he knows it exists.
+
+**What kind of poll.** Say it in the ask or in what you type, or lead with it
+before a colon:
+
+| Kind | Say | Notes |
+|---|---|---|
+| quiz | "make a quiz poll", "make it a quiz", `quiz:` | one right answer, and a one-line *why* shown after someone answers. He works the answer out; in a poll you type, mark it: `Paris*` or `✓ Paris` |
+| public votes | "make a public poll", "non-anonymous", "show who voted", `public:` | people's votes show by name |
+| pick several | "pick all that apply", "select all", "multiple answers" | ("multiple choice" means pick one) |
+| pick one | "pick only one" | the default |
+| timer | "closes in 10 minutes", "ends after 2 hours", "open for 1 day", `closes in 10 minutes:` | 5 seconds to 30 days; Telegram closes it itself |
+
+Combine them: `/poll quiz, public, closes in 10 minutes: Capital of France? |
+London | Paris* | Rome`, or "make a public poll about lunch that closes in 2
+hours". Only the phrasings above count, so a topic like "public transport" or
+"pub quiz night" stays a topic. What you say wins over what the drafter guesses.
+A quiz with several right answers lets people pick several.
+
+**He asks.** When you ask for a poll and give him nothing to go on ("dale make a
+poll", or `/poll` alone), he asks what it's about and offers the kinds. Say "ask
+me what kind" and he asks the kind (and takes any topic you already gave). "A
+timed poll" with no length gets "how long?". The drafter may also ask one thing
+it can't guess (a long text with two decisions in it: which one?). Each question
+is sent as a force-reply: **in a group, answer by replying to his question** (and
+only the person who asked can answer it); in a private chat your next message is
+the answer. "never mind", "cancel" or "no" drops it. A question waits three
+minutes, he never asks a second one, and nothing is charged until he drafts.
 
 The drafted poll is one cheap model call, checked against Telegram's limits in
 code (question 300 characters, options 100 each, no duplicates, numbering a
-model put on the whole list taken off),
-so a model that ignores the limits still can't make Telegram refuse the poll.
-Whatever is in the material is treated as data in the prompt, never as an
-instruction, and nothing from any other chat is used.
+model put on the whole list taken off), so a model that ignores the limits still
+can't make Telegram refuse the poll. Whatever is in the material is treated as
+data in the prompt, never as an instruction, and nothing from any other chat is
+used.
 
 ### Spend limits
 The commands that cost real money are limited per person per hour, and the
@@ -591,3 +617,29 @@ arrives:
 - What was said, and any text on screen, is treated as data in the prompt, never
   as an instruction. Each bot process (Dale and every `/newbot`) watches for
   itself, with its own limits and its own `/cost`.
+
+### Dale's GIFs: when they fire
+
+He sends GIFs of himself two ways, and each only when it fits.
+
+- **Keyword bits** ("propane", "chemtrails", "pocket sand", …): the GIF comes
+  from that bit's own tag. If the tag has none, he says the bit's text line, and
+  never some other clip. The same bit can't go off again in a chat for 90
+  seconds, no bit goes off within 15 seconds of any GIF, and a chat is never sent
+  the same clip twice running (the least-sent are rotated).
+- **Unprompted reactions** (a group, `automod` on, a message that isn't for him):
+  about one message in seventeen is even considered. It has to be fair game: two
+  words to a short sentence, no question (with or without the "?"), no link, no
+  command, and nothing that reads as sad, scary or serious (illness, death, a
+  fight, an emergency). The chat has to be ready: no unprompted GIF there for 20
+  minutes, no more than three an hour, a look at most once a minute, nothing from
+  him in the last three minutes, no other GIF in the last 15 seconds. Then one
+  cheap model call, shown the last few messages and the reactions the library
+  really has (`agree`, `doubt`, `conspiracy`, `paranoia`, `smug`, `expert`,
+  `panic`, `flee`, `chaos`, `deadpan`), says whether one plainly fits and which.
+  The usual answer is no, and anything but exactly one of those tags counts as
+  no. So most days he sends none; the ones he sends fit what was just said.
+  Pocket sand, sh-sha and guns are never unprompted: they belong to their
+  keywords.
+
+`/dalegif test <tag>` is for the owner poking the library and isn't paced.

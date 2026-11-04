@@ -267,7 +267,7 @@ COMMANDS: tuple[Command, ...] = (
             "/dates", "List all tracked dates here."),
     Command("poll",         "reminders", "/poll",
             "/poll Q | A | B | …",
-            "Create a poll, or draft one from a reply or screenshot."),
+            "Create a poll (quiz, public, timed…), or draft one from a reply or screenshot."),
 
     # ── Anonymous (DM only) ──────────────────────────────────────────────
     Command("confess",      "dm", "/confess",

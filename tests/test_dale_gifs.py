@@ -168,12 +168,13 @@ async def test_random_for_tag_prefers_the_tag():
 
 
 @pytest.mark.asyncio
-async def test_random_for_tag_falls_back_to_any_gif():
-    """An unfilled bucket must still produce a GIF, not silence."""
+async def test_random_for_tag_never_falls_back_to_some_other_gif():
+    """A clip that doesn't fit is worse than the text line the caller says
+    instead (a propane GIF answering "chemtrails"): an empty bucket is None."""
     db = _FakeDB()
     await dg.add(db, ["conspiracy"], file_id="CON", file_unique_id="U1")
-    got = await dg.random_for_tag(db, "propane")
-    assert got is not None and got.file_id == "CON"
+    assert await dg.random_for_tag(db, "propane") is None
+    assert await dg.random_for_tag(db, "") is None
 
 
 @pytest.mark.asyncio

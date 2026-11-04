@@ -95,13 +95,14 @@ def test_vision_off_is_stated_plainly():
 
 def test_the_brief_is_not_a_novel():
     """It rides along on every AI reply; keep it well under a quarter of
-    the default 6000-token context budget."""
+    the default 6000-token context budget. (1230, not 1200, since the poll
+    line names its kinds: quiz, public, timed.)"""
     fully_on = _cfg(
         duckhunt_enabled=True, monthly_recap_enabled=True,
         share_photo_enabled=True, comic_enabled=True, fortune_enabled=True,
         ether_enabled=True,
     )
-    assert count_tokens(capability_brief(fully_on)) < 1200
+    assert count_tokens(capability_brief(fully_on)) < 1230
 
 
 # ── per-chat lines ───────────────────────────────────────────────────────────

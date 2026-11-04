@@ -340,13 +340,17 @@ def build_router(rt: Runtime) -> Router:
     async def poll(msg: Message) -> None:
         """/poll Question | Option A | Option B | ... (2-10 options), or /poll
         alone on a reply, a screenshot or a small text file, or with a topic:
-        the bot drafts the poll from it."""
+        the bot drafts the poll from it (and asks what it's about, or what
+        kind, when that's missing). A kind can lead: /poll quiz, public: Q | A
+        | B* (see poll_maker.split_kind_prefix)."""
         raw = (msg.text or msg.caption or "").split(None, 1)
         args = raw[1] if len(raw) > 1 else ""
-        if "|" not in args:
+        kinds, after = poll_maker.split_kind_prefix(args)
+        if kinds or "|" not in args:
             cfg = await get_or_create_chat_config(rt, msg)
             await poll_maker.make_poll(
-                rt, msg, poll_maker.clean_request(args, after_ask=False),
+                rt, msg, poll_maker.clean_request(after, after_ask=False),
+                ask_text=kinds,
                 vision_ok=bool(getattr(cfg, "vision_enabled", True)),
             )
             return

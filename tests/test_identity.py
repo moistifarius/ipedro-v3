@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from ipedro import addressed, identity, personas
+from ipedro import addressed, gif_reaction, identity, personas
 from ipedro import dale_gifs as dale
 from ipedro.capabilities import _REFLEXES, capability_brief
 from ipedro.handlers import automod, automod_bits, basics, chat
@@ -258,7 +258,8 @@ async def test_only_dale_takes_credit_in_his_own_words(credit_roll):
 @pytest.fixture
 def gif_sender(monkeypatch):
     sent = AsyncMock(return_value=True)
-    monkeypatch.setattr(dale, "send_random", sent)
+    monkeypatch.setattr(dale, "send_random", sent)             # the keyword bits
+    monkeypatch.setattr(gif_reaction, "ambient", sent)         # the unprompted ones
     monkeypatch.setattr(chat, "should_respond", lambda *a, **k: False)
     return sent
 

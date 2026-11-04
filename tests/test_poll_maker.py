@@ -25,7 +25,7 @@ from ipedro.handlers import chat
 from ipedro.handlers.common import _LIMIT_NOUNS
 from ipedro.handlers.utility import build_router
 from ipedro.poll_maker import (
-    HINT, NOTHING, Material, PollDraft, build_prompt, clean_draft,
+    ASK_TOPIC, HINT, NOTHING, Material, PollDraft, build_prompt, clean_draft,
     clean_request, detect_poll_request, draft_poll, gather, make_poll,
     parse_draft, piped,
 )
@@ -532,11 +532,14 @@ async def test_a_poll_typed_whole_costs_nothing_and_has_no_limit():
 async def test_nothing_to_go_on_says_what_to_give_and_costs_nothing():
     rt = _rt(reply=GOOD)
     msg = _msg("make a poll")
-    assert await make_poll(rt, msg, "") == HINT
-    assert _said(msg) == [HINT]
+    assert await make_poll(rt, msg, "") == ASK_TOPIC     # he asks what it's about
+    assert _said(msg) == [ASK_TOPIC]
     rt.openai.cheap_completion.assert_not_awaited()
     rt.bot.send_poll.assert_not_awaited()
-    # …and a hint doesn't use up the person's polls for the hour.
+    msg = _msg("make a poll")                            # …and when he may not ask
+    assert await make_poll(rt, msg, "", may_ask=False) == HINT
+    assert _said(msg) == [HINT]
+    # …and neither uses up the person's polls for the hour.
     for _ in range(ratelimit.LIMITS["poll"][0]):
         assert await make_poll(_rt(reply=GOOD), _msg("x"), "lunch")
 
@@ -686,7 +689,7 @@ async def test_the_command_alone_says_what_to_give_it():
     rt, _ = _cmd_rt(reply=GOOD)
     msg = _msg("/poll")
     await _poll_handler(rt)(msg)
-    assert _said(msg) == [HINT]
+    assert _said(msg) == [ASK_TOPIC]
     rt.openai.cheap_completion.assert_not_awaited()
 
 
@@ -732,7 +735,7 @@ async def test_a_bare_pointer_after_the_command_is_not_a_topic():
     rt, _ = _cmd_rt(reply=GOOD)
     msg = _msg("/poll this")
     await _poll_handler(rt)(msg)
-    assert _said(msg) == [HINT]
+    assert _said(msg) == [ASK_TOPIC]
 
 
 def test_the_command_is_not_narrowed_to_text_messages():
@@ -937,7 +940,7 @@ async def test_the_poll_is_a_well_formed_telegram_request():
 
 def test_the_brief_says_he_makes_polls_and_not_that_he_cant():
     brief = capabilities.capability_brief()
-    assert "Make a poll from what they give you" in brief
+    assert "Make a poll (quiz, public, timed) from what they give you" in brief
     assert "never say one is up" in brief
     assert "start a poll" not in brief
     # The other things that still need a command are still said to.

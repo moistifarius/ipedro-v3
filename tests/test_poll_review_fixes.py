@@ -22,7 +22,7 @@ import pytest
 from ipedro import identity, media_library, poll_maker, prompts, ratelimit
 from ipedro.handlers import chat
 from ipedro.poll_maker import (
-    HINT, NOTHING, Material, build_prompt, clean_draft, clean_request,
+    ASK_TOPIC, HINT, NOTHING, Material, build_prompt, clean_draft, clean_request,
     detect_poll_request, gather, make_poll, parse_draft, piped,
 )
 from tests.test_poll_maker import (
@@ -238,7 +238,7 @@ def test_a_topic_keeps_its_words(text, rest):
 async def test_a_poll_ask_that_is_only_politeness_is_a_hint_not_a_paid_call():
     rt = _rt(reply=GOOD)
     msg = _msg("make a poll dale")
-    assert await make_poll(rt, msg, detect_poll_request("make a poll dale")) == HINT
+    assert await make_poll(rt, msg, detect_poll_request("make a poll dale")) == ASK_TOPIC
     rt.openai.cheap_completion.assert_not_awaited()
 
 
@@ -401,7 +401,7 @@ def test_every_shape_of_the_ask_works(text, rest):
 @pytest.mark.parametrize("text", [
     "justmake a poll", "andmake a poll", "okaymake a poll", "heydo a poll",
     "make a pollution report", "make a pollster list", "make a polling place",
-    "make us a quick little simple poll",       # five of them is a sentence
+    "make us a quick little simple short fun new poll",   # seven of them is a sentence
     "poll thisbit", "poll theatre", "polling the group",
 ])
 def test_the_edges_of_the_words_are_respected(text):
@@ -438,14 +438,16 @@ async def test_a_reply_that_fails_to_go_out_does_not_break_the_handler():
     rt = _rt(reply=GOOD)
     msg = _msg("make a poll")
     msg.reply = AsyncMock(side_effect=RuntimeError("chat gone"))
-    assert await make_poll(rt, msg, "") == HINT          # said, or tried to
+    assert await make_poll(rt, msg, "", may_ask=False) == HINT     # said, or tried to
+    msg.reply = AsyncMock(side_effect=RuntimeError("chat gone"))
+    assert await make_poll(rt, msg, "") is None          # the question never went out
 
 
 @pytest.mark.asyncio
 async def test_what_they_are_told_is_not_a_notification():
     rt = _rt(reply=GOOD)
     msg = _msg("make a poll")
-    await make_poll(rt, msg, "")
+    await make_poll(rt, msg, "", may_ask=False)
     assert msg.reply.await_args.kwargs == {"disable_notification": True}
 
 
@@ -593,7 +595,7 @@ def test_a_typed_poll_skips_empty_segments_as_the_command_does():
 async def test_a_blank_request_is_a_hint_not_a_paid_call(blank):
     rt = _rt(reply=GOOD)
     msg = _msg("make a poll")
-    assert await make_poll(rt, msg, blank) == HINT
+    assert await make_poll(rt, msg, blank) == ASK_TOPIC
     rt.openai.cheap_completion.assert_not_awaited()
     rt.bot.send_poll.assert_not_awaited()
 
@@ -664,7 +666,7 @@ def test_politeness_with_punctuation_around_a_pointer_is_still_no_topic(text):
 async def test_a_request_of_only_punctuation_is_a_hint_not_a_paid_call(noise):
     rt = _rt(reply=GOOD)
     msg = _msg("make a poll")
-    assert await make_poll(rt, msg, noise) == HINT
+    assert await make_poll(rt, msg, noise) == ASK_TOPIC
     rt.openai.cheap_completion.assert_not_awaited()
 
 
