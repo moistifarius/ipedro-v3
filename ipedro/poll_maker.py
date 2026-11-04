@@ -51,9 +51,10 @@ MAX_OPTIONS = 10
 _MAX_FILE_BYTES = 100_000       # a text file bigger than this isn't a menu
 _MAX_MATERIAL_CHARS = 6000      # what one poll is allowed to cost in input
 _MAX_REQUEST_CHARS = 500       # of a request that goes to the model
-_MAX_TYPED_CHARS = 1500         # of a poll typed out whole (Q | A | B …)
-_DRAFT_TOKENS = 500
+_MAX_TYPED_CHARS = 4096         # a whole message: what Telegram allows
+_DRAFT_TOKENS = 900            # room for 10 long options in a wide script
 _SCAN_CHARS = 300               # a request is made at the start of a message
+_MAX_LEAD_TOKENS = 8            # filler words/names allowed before the ask
 _TEXT_SUFFIXES = (".txt", ".text", ".md", ".csv", ".log")
 _TEXT_MIMES = ("text/plain", "text/markdown", "text/csv")
 
@@ -111,10 +112,14 @@ _NOISE = (
     r"(?:me|us|up|out|together|a|an|one|new|quick|little|small|simple|short|fun)"
 )
 _NOT_AN_ASK = r"(?!\s+(?:results?|numbers|stats|status|data|winner|so\s+far|totals?|count))"
+# What "turn ... into a poll" is turning: a pointer or a few words ("this",
+# "the options above"), never a clause, so "make a meme about people who turn
+# every decision into a poll" is a meme request that merely mentions one.
+_THING = r"(?:[\w'’-]+\s+){0,3}"
 _ASK = (
     rf"(?:{_VERB}\s+(?:{_NOISE}\s+){{0,4}}poll\b{_NOT_AN_ASK}"
-    r"|(?:turn|convert|make|put|change|transform)\s+[^.!?\n]{0,50}?"
-    r"\b(?:into|in\s+to|to)\s+(?:an?\s+)?poll\b"
+    rf"|(?:turn|convert|make|put|change|transform)\s+{_THING}"
+    r"(?:(?:into|in\s+to)\s+(?:an?\s+)?|to\s+an?\s+)poll\b"
     r"|poll\s+(?:this|that|it|these|those|them"
     r"|the\s+(?:group|chat|room|guys|boys|crew|gang|team))\b"
     r"|poll\s*[:\-–—]"
@@ -137,18 +142,33 @@ _ALL_DEICTIC = re.compile(
     r"|^what\s+(?:i|he|she|they|we)\s+(?:just\s+)?(?:said|sent|posted|wrote|meant)$",
     re.IGNORECASE,
 )
+# "this: where | pizza | tacos". A pointer opens a typed poll only when a colon
+# or dash follows it; "this or that | a | b" is a question about this and that.
+_POINTER_LEAD = re.compile(
+    r"^(?:(?:from|about|on|for|of|with|using|based\s+on|out\s+of|over)\s+)?"
+    r"(?:this|that|it|these|those|them|here|the\s+above|above)\s*[:\-–—]\s*",
+    re.IGNORECASE,
+)
 
 
+# The lead-in is a repeated group over an alternation that can match two ways
+# ("rusty shackleford" is "rusty shackleford", or "rusty" then "shackleford"),
+# which is exponential on a message built to fail: so the repeat is BOUNDED
+# (a few filler words or names, never a long run) and only the first
+# _SCAN_CHARS of a message are ever read. Eight repeats cost a few hundred
+# steps at worst.
 @functools.lru_cache(maxsize=32)
 def _ask_re(names: str) -> re.Pattern:
-    lead = rf"(?:(?:@\w+|{names}|{_FILLER})(?![\w'’])\W*)*"
+    lead = rf"(?:(?:@\w+|{names}|{_FILLER})(?![\w'’])\W*){{0,{_MAX_LEAD_TOKENS}}}"
     return re.compile(rf"^\W*{lead}(?P<ask>{_ASK})", re.IGNORECASE)
 
 
+# Politeness words and the bot's own names, found anywhere, flat: no repeated
+# group, so there is nothing to backtrack over.
 @functools.lru_cache(maxsize=32)
-def _tail_re(names: str) -> re.Pattern:
+def _polite_re(names: str) -> re.Pattern:
     return re.compile(
-        r"(?:(?:^|\W+)(?:please|pls|plz|thanks|thx|ty|" + names + r"))+\W*$",
+        rf"(?<![\w'’])(?:please|pls|plz|thanks|thx|ty|{names})(?![\w'’])",
         re.IGNORECASE,
     )
 
@@ -157,27 +177,33 @@ def clean_request(
     text: str, *, names: str | None = None, after_ask: bool = True,
 ) -> str:
     """What is left of a request once the asking words are gone: "" when it
-    only points at something ("this", "the message above", "pls").
+    only points at something ("this", "the message above", "pls", the bot's
+    own name).
 
     `after_ask` is True for the words that followed "make a poll" (where "from
     this" and "about the" are still part of the asking) and False for the
     arguments of /poll itself, where "on or off" is a topic and only a bare
-    pointer means nothing."""
+    pointer means nothing. A poll typed whole (it has a "|") is theirs word
+    for word, bar a lead-in like "this:"."""
     names = names or DALE.names_pattern
-    rest = text.strip()
+    rest = text[:_MAX_TYPED_CHARS].strip()
+    if "|" in rest:
+        rest = re.sub(r"^[\s:;,]+|^[-–—]\s+", "", rest, count=1)
+        return _POINTER_LEAD.sub("", rest, count=1).strip()
     if after_ask:
         # One connector ("from", "about"), then one pointer ("this"), and
         # whatever is left is what they said: "on where to eat" is a topic.
         for strip in (_CONNECTORS, _DEICTIC):
             rest = re.sub(r"^[\s:;,.\-–—]+", "", rest)
             rest = strip.sub("", rest, count=1)
-    rest = _tail_re(names).sub("", rest).strip(" \t\r\n:;,.-–—")
-    pointer = _ALL_DEICTIC.match(rest) or (
-        not after_ask and _DEICTIC.fullmatch(rest)
+    rest = rest.strip(" \t\r\n:;,.-–—")
+    # Judged without the politeness and the bot's name ("from this pls dale"),
+    # but handed back with them: "who is cooler, matt or dale" keeps its end.
+    bare = re.sub(r"\s+", " ", _polite_re(names).sub(" ", rest)).strip(" \t\r\n:;,.-–—")
+    pointer = _ALL_DEICTIC.match(bare) or (
+        not after_ask and _DEICTIC.fullmatch(bare)
     )
-    if pointer or not re.search(r"\w", rest):
-        return ""
-    return rest
+    return "" if pointer or not re.search(r"\w", bare) else rest
 
 
 def detect_poll_request(text: str | None, *, names: str | None = None) -> str | None:
@@ -191,18 +217,19 @@ def detect_poll_request(text: str | None, *, names: str | None = None) -> str | 
     if not text:
         return None
     names = names or DALE.names_pattern
-    head = text[:_SCAN_CHARS + _MAX_TYPED_CHARS]
-    m = _ask_re(names).match(head[:_SCAN_CHARS])
+    m = _ask_re(names).match(text[:_SCAN_CHARS])
     if m is None:
         return None
-    return clean_request(head[m.end():m.end() + _MAX_TYPED_CHARS], names=names)
+    return clean_request(text[m.end():m.end() + _MAX_TYPED_CHARS], names=names)
 
 
 # ── the draft ───────────────────────────────────────────────────────────────
 
-_FENCE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
+# Numbering and bullets a model adds in spite of being told not to: "1.",
+# "2)", "(3)", "-", "•", "(a)", "b)". Not "M. Jordan", "Q. Tip" or "> 5 years",
+# where the first characters are part of the option.
 _BULLET = re.compile(
-    r"^\s*(?:[-*•·▪◦➤>]+|\(?[0-9]{1,2}[.)\]]|\(?[a-zA-Z][.)\]])\s+",
+    r"^\s*(?:[-*•·▪◦➤]+|\(?\d{1,2}[.)\]]|\([a-zA-Z]\)|[a-zA-Z]\))\s+",
 )
 _YES = {"true", "yes", "1"}
 
@@ -211,6 +238,8 @@ def _tidy(value: object, limit: int) -> str:
     """One line, trimmed, and no longer than Telegram allows."""
     if isinstance(value, dict):
         value = value.get("text")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        value = str(value)              # options like 1, 2, 3
     if not isinstance(value, str):
         return ""
     s = re.sub(r"[\x00-\x1f\x7f  ]+", " ", value)
@@ -220,8 +249,10 @@ def _tidy(value: object, limit: int) -> str:
     return s
 
 
-def clean_draft(data: object) -> PollDraft | None:
-    """A PollDraft from the model's JSON, or None if it can't be a poll."""
+def clean_draft(data: object, *, strip_marks: bool = True) -> PollDraft | None:
+    """A PollDraft from the model's JSON, or None if it can't be a poll.
+    `strip_marks` takes off numbering a model adds; a poll somebody typed is
+    left as they wrote it."""
     if not isinstance(data, dict):
         return None
     question = _tidy(data.get("question"), MAX_QUESTION)
@@ -232,7 +263,9 @@ def clean_draft(data: object) -> PollDraft | None:
     seen: set[str] = set()
     for item in raw:
         text = _tidy(item, MAX_OPTION + 20)
-        text = _tidy(_BULLET.sub("", text, count=1), MAX_OPTION)
+        if strip_marks:
+            text = _BULLET.sub("", text, count=1)
+        text = _tidy(text, MAX_OPTION)
         key = text.casefold()
         if text and key not in seen:
             seen.add(key)
@@ -247,17 +280,20 @@ def clean_draft(data: object) -> PollDraft | None:
 
 def parse_draft(text: str | None) -> PollDraft | None:
     """Find the JSON object in a model reply (which may wrap it in a fence or
-    a sentence) and check it."""
+    a sentence) and check it. Raw control characters inside a string, which a
+    model sometimes writes, are tolerated; a reply nested absurdly deep is
+    just not a poll."""
     if not text:
         return None
-    body = _FENCE.sub("", text.strip())
-    decoder = json.JSONDecoder()
-    start = body.find("{")
+    decoder = json.JSONDecoder(strict=False)
+    start = text.find("{")
     while start != -1:
         try:
-            data, _ = decoder.raw_decode(body, start)
+            data, _ = decoder.raw_decode(text, start)
+        except RecursionError:
+            return None
         except ValueError:
-            start = body.find("{", start + 1)
+            start = text.find("{", start + 1)
             continue
         return clean_draft(data)
     return None
@@ -284,7 +320,7 @@ def build_prompt(request: str, material: Material | None) -> str:
             parts.append(label + _quote(material.text, _MAX_MATERIAL_CHARS))
         body = "\n".join(parts) or "(empty)"
     return POLL_DRAFT_PROMPT.format(
-        request=_quote(request, _MAX_REQUEST_CHARS) or "(nothing typed)",
+        request=_quote(request, _MAX_MATERIAL_CHARS) or "(nothing typed)",
         material=body,
     )
 
@@ -362,7 +398,7 @@ async def _attachment(
         got = await vision.fetch_still(rt.bot, media.file_id)
         if got is None:
             return fallback or Material(
-                problem="Couldn't get that picture from Telegram. Try sending it again.",
+                problem="Couldn't read that picture (too big, or not a normal image format).",
             )
         return Material(text=words, image=got[0], media_type=got[1])
     doc = getattr(m, "document", None)
@@ -414,7 +450,7 @@ def piped(request: str) -> PollDraft | None:
     parts = [p.strip() for p in request.split("|") if p.strip()]
     if len(parts) < 3:
         return None
-    return clean_draft({"question": parts[0], "options": parts[1:]})
+    return clean_draft({"question": parts[0], "options": parts[1:]}, strip_marks=False)
 
 
 async def _post(rt: Runtime, msg: Message, draft: PollDraft) -> str:
@@ -437,7 +473,9 @@ async def _post(rt: Runtime, msg: Message, draft: PollDraft) -> str:
         )
     except Exception as exc:
         log.warning("poll send failed in %s: %s: %s", msg.chat.id, type(exc).__name__, exc)
-        return await _say(msg, "Made one, but Telegram wouldn't take it. Try again.")
+        why = re.sub(r"\s+", " ", str(exc)).strip()[:120]
+        return await _say(msg, f"Telegram wouldn't take that poll: {why}" if why
+                          else "Telegram wouldn't take that poll.")
     track(msg.chat.id, getattr(sent, "message_id", None), draft.question)
     return draft.summary()
 
@@ -456,7 +494,6 @@ async def make_poll(
     typed = piped(request[:_MAX_TYPED_CHARS])
     if typed is not None:
         return await _post(rt, msg, typed)
-    request = request[:_MAX_REQUEST_CHARS]
     material = await gather(rt, msg, vision_ok=vision_ok)
     if material is not None and material.problem:
         if not request:
@@ -464,6 +501,9 @@ async def make_poll(
         material = None             # they typed enough to go on without it
     if material is None and not request:
         return await _say(msg, HINT)
+    # Typed words that come with other material are a steer; typed words on
+    # their own ARE the material (a pasted list, a message), and get its room.
+    request = request[:_MAX_REQUEST_CHARS if material is not None else _MAX_MATERIAL_CHARS]
     if await over_limit(rt, msg, "poll"):
         return None
     with contextlib.suppress(Exception):

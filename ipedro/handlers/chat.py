@@ -1033,21 +1033,14 @@ def build_router(rt: Runtime) -> Router:
                 )
             return
 
-        # "dale send that pic of the grill" → hand back a picture from this
-        # chat's library. A miss sends nothing and falls through: the reply
-        # below says so in his own voice rather than a canned line.
-        recall_miss = False
-        if cfg.memory_enabled and media_library.detect_recall(typed):
-            if await media_library.recall(rt, msg, cfg, typed):
-                return
-            recall_miss = True
-
         # "dale make a poll from this" → draft a poll from what they gave
         # him: the replied-to message, a screenshot or text file sent with
         # it, or the words after the ask. Regex only, and the ask has to
         # open the message, so talk ABOUT polls never makes one. A poll
         # typed out whole ("make a poll: where | pizza | tacos") is posted
-        # as it is; anything else is one model call, rate limited.
+        # as it is; anything else is one model call, rate limited. Ahead of
+        # the picture-recall bit below, which would answer "post a poll from
+        # this screenshot" by sending an old screenshot back.
         poll_request = poll_maker.detect_poll_request(
             typed, names=ident.names_pattern,
         )
@@ -1058,6 +1051,15 @@ def build_router(rt: Runtime) -> Router:
             if made:
                 await _record_bot_turn(rt, cfg, msg.chat.id, made)
             return
+
+        # "dale send that pic of the grill" → hand back a picture from this
+        # chat's library. A miss sends nothing and falls through: the reply
+        # below says so in his own voice rather than a canned line.
+        recall_miss = False
+        if cfg.memory_enabled and media_library.detect_recall(typed):
+            if await media_library.recall(rt, msg, cfg, typed):
+                return
+            recall_miss = True
 
         # "hey pedro give me a meme about this" → fetch a relevant meme
         # (topic explicit, or distilled from the current conversation) and

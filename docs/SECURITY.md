@@ -61,6 +61,9 @@ Each person gets a per-hour allowance of the commands that cost real money
 | `/a` | 30 |
 | `/aitranslate` | 10 |
 | `/duckhunt` summoning a duck | 6 |
+| a poll drafted from material (`/poll` on a reply, screenshot or text; a poll typed out whole isn't counted) (also 20 per chat) | 10 |
+| watching a video, GIF or video note (also 20 per chat) | 8 |
+| Dale passing a message to another chat (also 3 per chat) | 2 |
 
 The counters live in memory, so a restart hands out one extra window.
 `/cost` reports spend per chat; calls that aren't tied to a chat are
