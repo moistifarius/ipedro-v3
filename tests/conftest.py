@@ -55,3 +55,22 @@ def _no_ambient_dice(monkeypatch):
     monkeypatch.setattr(chat, "_REACT_PROBABILITY", 0.0)
     monkeypatch.setattr(chat, "_DALE_GIF_PROBABILITY", 0.0)
     monkeypatch.setattr(chat, "_CREDIT_PROBABILITY", 0.0)
+
+
+@pytest.fixture(autouse=True)
+def _no_leftover_state_between_tests():
+    """Module-level state a test can leave behind and a later one trip over.
+
+    A poll question he asked (ipedro/poll_maker.py) waits three minutes for the
+    asker's answer, and in a DM the asker's NEXT message is the answer: one
+    test's unanswered question would swallow another test's message. The GIF
+    pacing (ipedro/dale_gifs.py, ipedro/gif_reaction.py) is per chat and
+    time-based, so one test's GIF would hold back the next test's.
+    """
+    from ipedro import dale_gifs, gif_reaction, poll_maker
+
+    poll_maker._PENDING.clear()
+    dale_gifs.forget_state()
+    gif_reaction.forget_state()
+    yield
+    poll_maker._PENDING.clear()

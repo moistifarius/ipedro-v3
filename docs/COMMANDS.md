@@ -305,6 +305,18 @@ gated, so they can't take it themselves meanwhile.
 Ducks may also wander off on their own at any time — more likely as they
 hang around longer, and almost certainly gone after a day.
 
+### Replying to him
+
+When you reply to one of his messages, in a group he answers **as a reply to
+you** (in a DM it is a plain message), and he is told which message you replied
+to, word for word (up to 500 characters; the passage you quoted, if you quoted
+one; a poll's question and options). That matters most for his own canned bits
+(the "gay" copypasta, keyword lines, GIF captions), which are deliberately never
+saved to his memory: without it he saw only your line and answered whatever was
+nearest in the chat. A reply to a picture or GIF gets its description instead,
+where `vision` is on. Replying to someone else's message and naming him tells him
+what you replied to as well, but his answer is a plain message.
+
 ### "bad bot" / "bad dale"
 Reply to one of the bot's messages with "bad bot" or "bad <any of its
 names>" (Dale: dale, rusty, pedro, dude, duder, boomhauer) to make it
