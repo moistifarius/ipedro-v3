@@ -737,11 +737,13 @@ def build_router(rt: Runtime) -> Router:
         text = typed
         seen = None
         # A video sent to be played backwards isn't also to be WATCHED (a paid
-        # look at something nobody asked him about).
+        # look at something nobody asked him about). Only a video: a photo with
+        # those words as its caption is still looked at.
         reverse_ask = reverser.detect_reverse_request(typed, names=ident.names_pattern)
+        reversing_own = reverse_ask is not None and reverser.has_own_video(msg)
         if (
             cfg.vision_enabled and cfg.response_policy != "commands"
-            and reverse_ask is None
+            and not reversing_own
         ):
             # "typing…" only while he is likely to answer: a video in a busy
             # group that he'll just read shouldn't look like a reply coming.
@@ -1115,7 +1117,9 @@ def build_router(rt: Runtime) -> Router:
         # "dale reverse this" → the video it is about (replied to, or sent with
         # the words as its caption), played backwards and sent back. No model
         # and no money: rate limited, and ahead of the picture-recall bit.
-        if reverse_ask is not None:
+        if reverse_ask is not None and (
+            reverse_ask.clear or reverser.find_video(msg) is not None
+        ):
             made = await reverser.make_reverse(rt, msg, mute=reverse_ask.mute)
             if made:
                 await _record_bot_turn(rt, cfg, msg.chat.id, made)

@@ -39,6 +39,7 @@ NO_VIDEO = (
     "/reverse as its caption."
 )
 TOO_BIG = "That file is over 20 MB, which is as much as Telegram lets me take."
+DOWNLOAD_FAILED = "Couldn't get that video from Telegram. Try again."
 NOT_VIDEO = "I couldn't open that as a video."
 BIG_PICTURE = "That video's picture is too big for me to open."
 BUSY = "Busy with other videos right now. Try again in a minute."
@@ -68,8 +69,8 @@ _MUTE = re.compile(
     re.IGNORECASE,
 )
 _ASK = (
-    r"(?:reverse|rewind)\b"
-    r"|(?:play|run|do|show|make|put)\s+(?:this|that|it|the\s+\w+)"
+    r"(?P<verb>reverse|rewind)\b"
+    r"|(?:play|run|do|show|make|put)\s+(?:this|that|it|the\s+(?:video|vid|gif|clip|animation))"
     r"(?:\s+(?:video|vid|gif|clip|animation))?\s+(?:(?:to\s+)?(?:play|go|run)\s+)?"
     r"(?:in\s+)?(?:backwards?|reverse)\b"
 )
@@ -78,6 +79,10 @@ _ASK = (
 @dataclass(frozen=True)
 class ReverseAsk:
     mute: bool = False
+    # "reverse"/"rewind" is about a video however it is worded. "do it
+    # backwards" may be about anything, so without a video in sight it is left
+    # to the ordinary reply instead of being answered "reply to a video".
+    clear: bool = False
 
 
 @functools.lru_cache(maxsize=32)
@@ -101,10 +106,16 @@ def detect_reverse_request(text: str | None, *, names: str | None = None) -> Rev
     bare = poll_maker.polite_re(names).sub(" ", rest)
     if any(t not in _VOCAB for t in re.findall(r"[\w']+", bare.lower())):
         return None
-    return ReverseAsk(mute=bool(_MUTE.search(rest)))
+    return ReverseAsk(mute=bool(_MUTE.search(rest)), clear=m.group("verb") is not None)
 
 
 # ── what there is to reverse ────────────────────────────────────────────────
+
+def has_own_video(msg: Message) -> bool:
+    """Does this message itself carry a video, GIF or round video?"""
+    media = vision.extract_media(msg)
+    return media is not None and media.watchable
+
 
 def find_video(msg: Message) -> tuple[vision.Media, Message] | None:
     """The video, GIF or round video this message has, else the one it replies
@@ -157,7 +168,11 @@ _REFUSALS = {
     "big-picture": BIG_PICTURE, "busy": BUSY, "failed": FAILED,
     "too-large-output": TOO_LARGE_OUTPUT,
 }
-_NOTHING_DONE = {"unavailable", "not-video", "too-big", "big-picture", "busy", "too-long"}
+# Given back: nothing was downloaded or run (he was busy, or has no ffmpeg).
+# NOT given back: a refusal after the download (a wrong file, a picture too big),
+# which cost a download and a probe, or someone could make him fetch 20 MB files
+# at will without using up their hour.
+_NOTHING_DONE = {"unavailable", "busy"}
 
 
 # ── the whole job ───────────────────────────────────────────────────────────
@@ -211,7 +226,13 @@ async def make_reverse(rt: Runtime, msg: Message, *, mute: bool = False) -> str 
         return None
     try:
         async with _acting(rt.bot, msg.chat.id, "upload_video"):
-            data = await vision._download_video(rt.bot, media.source_file_id)
+            try:
+                data = await vision._download_video(rt.bot, media.source_file_id)
+            except Exception as exc:
+                log.info("download for a reversal failed in %s: %s: %s", msg.chat.id,
+                         type(exc).__name__, exc)
+                _refund(rt, msg)
+                return await _say(msg, DOWNLOAD_FAILED)
             if data is None:
                 _refund(rt, msg)
                 return await _say(msg, TOO_BIG)

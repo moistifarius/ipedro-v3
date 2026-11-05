@@ -152,9 +152,14 @@ def video_filter(seconds: float, fps: float) -> str:
 
 
 def audio_filter(seconds: float) -> str:
-    """The sound, padded or trimmed to the picture's length, then reversed, so
-    it comes out in step with the reversed picture."""
-    return f"apad=whole_dur={seconds:.3f},atrim=end={seconds:.3f},areverse"
+    """The sound, started at time zero (a track that begins after the picture
+    does, as many phone videos' do, gets silence in front, or the reversal
+    would lose that offset and come out late), padded or trimmed to the
+    picture's length, then reversed: in step with the reversed picture."""
+    return (
+        "aresample=async=1:first_pts=0,"
+        f"apad=whole_dur={seconds:.3f},atrim=end={seconds:.3f},areverse"
+    )
 
 
 def command(path: str, fmt: str, out: str, info: Probe, *, mute: bool) -> list[str]:
@@ -196,10 +201,12 @@ async def reverse(
         await asyncio.wait_for(gate.acquire(), vf._QUEUE_TIMEOUT)
     except asyncio.TimeoutError:
         raise Refused("busy") from None
-    workdir = tempfile.mkdtemp(prefix="ipedro-reverse-")
+    workdir = None
     try:
-        return await asyncio.wait_for(
-            _reverse(workdir, data, fmt, mute, max_seconds), _TOTAL_TIMEOUT,
+        workdir = tempfile.mkdtemp(prefix="ipedro-reverse-")    # inside the try: a
+        return await asyncio.wait_for(                          # full disk must not
+            _reverse(workdir, data, fmt, mute, max_seconds),    # keep the slot
+            _TOTAL_TIMEOUT,
         )
     except Refused:
         raise
@@ -208,7 +215,8 @@ async def reverse(
         raise Refused("failed") from exc
     finally:
         gate.release()
-        await asyncio.to_thread(shutil.rmtree, workdir, True)
+        if workdir is not None:
+            await asyncio.to_thread(shutil.rmtree, workdir, True)
 
 
 async def _reverse(

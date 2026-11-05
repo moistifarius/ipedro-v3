@@ -41,19 +41,22 @@ def _fresh(monkeypatch):
 
 # ── the ask ─────────────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("text, mute", [
-    ("dale reverse this", False), ("reverse", False), ("Reverse it!", False),
-    ("can you reverse this video please", False), ("hey dale, could you reverse that gif", False),
-    ("play this backwards", False), ("play that video backwards", False),
-    ("make this go backwards", False), ("make it play in reverse", False),
-    ("run it backward", False), ("do this backwards", False), ("show it in reverse", False),
-    ("rewind that gif", False), ("rewind", False), ("@dale_bot reverse this clip", False),
-    ("reverse this and mute it", True), ("reverse that clip without sound", True),
-    ("reverse this with no audio", True), ("reverse it silently", True),
-    ("reverse the video above", False),
+@pytest.mark.parametrize("text, mute, clear", [
+    ("dale reverse this", False, True), ("reverse", False, True), ("Reverse it!", False, True),
+    ("can you reverse this video please", False, True),
+    ("hey dale, could you reverse that gif", False, True),
+    ("rewind that gif", False, True), ("rewind", False, True),
+    ("@dale_bot reverse this clip", False, True), ("reverse the video above", False, True),
+    ("reverse this and mute it", True, True), ("reverse that clip without sound", True, True),
+    ("reverse this with no audio", True, True), ("reverse it silently", True, True),
+    # worded as "play/do/make ... backwards": about a video only if there is one
+    ("play this backwards", False, False), ("play that video backwards", False, False),
+    ("make this go backwards", False, False), ("make it play in reverse", False, False),
+    ("run it backward", False, False), ("do this backwards", False, False),
+    ("show it in reverse", False, False), ("play the video backwards", False, False),
 ])
-def test_an_ask_that_opens_the_message_is_recognised(text, mute):
-    assert detect_reverse_request(text) == ReverseAsk(mute=mute)
+def test_an_ask_that_opens_the_message_is_recognised(text, mute, clear):
+    assert detect_reverse_request(text) == ReverseAsk(mute=mute, clear=clear)
 
 
 @pytest.mark.parametrize("text", [
@@ -62,6 +65,8 @@ def test_an_ask_that_opens_the_message_is_recognised(text, mute):
     "we should reverse this decision", "they reversed the ban", "play the song",
     "play this song", "rewind to last week", "i reversed my car into a pole",
     "reverse this video and also tell me a joke about cats", "the video went in reverse",
+    "do the alphabet backwards", "make the list go backwards", "show the word backwards",
+    "play the song backwards", "put the names in reverse", "run the script backwards",
     "dale reverse " + "this " * 80, "", None, "   ",
 ])
 def test_talk_about_reversing_is_not_an_ask(text):
@@ -331,15 +336,29 @@ async def test_six_an_hour_then_it_says_so_and_does_nothing_more(reversing):
 
 
 @pytest.mark.asyncio
-async def test_refusals_that_did_nothing_do_not_use_up_the_hour(reversing):
+async def test_a_refusal_because_he_was_busy_or_has_no_ffmpeg_does_not_use_up_the_hour(reversing):
     rt = _rt()
-    for code in ("not-video", "busy", "unavailable", "big-picture", "too-big"):
+    for code in ("busy", "unavailable", "busy", "unavailable"):
         reversing.side_effect = vr.Refused(code)
         await make_reverse(rt, _msg(None, video=_video()))
     reversing.side_effect = None
     reversing.return_value = MADE
     for _ in range(ratelimit.LIMITS["reverse"][0]):
         assert await make_reverse(rt, _msg(None, video=_video())) == "[reversed a video]"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["not-video", "big-picture", "too-big", "too-long", "failed", "too-large-output"])
+async def test_a_refusal_after_the_download_does_count_or_files_could_be_fetched_for_free(reversing, code):
+    """Each cost a download and a probe, so it uses a try: otherwise anyone
+    could make him fetch 20 MB files at will."""
+    rt = _rt()
+    for _ in range(ratelimit.LIMITS["reverse"][0]):
+        reversing.side_effect = vr.Refused(code, "40")
+        await make_reverse(rt, _msg(None, video=_video()))
+    msg = _msg(None, video=_video())
+    assert await make_reverse(rt, msg) is None
+    assert "reversals for the hour" in _said(msg)[0]
 
 
 @pytest.mark.asyncio
@@ -549,7 +568,7 @@ async def test_a_round_video_that_is_not_square_is_sized_by_its_shorter_side(rev
 @pytest.mark.asyncio
 async def test_a_refusal_that_did_nothing_gives_back_the_chats_use_as_well(reversing):
     rt = _rt()
-    reversing.side_effect = vr.Refused("not-video")
+    reversing.side_effect = vr.Refused("busy")
     await make_reverse(rt, _msg(None, video=_video()))
     assert not ratelimit.LIMITER._hits.get(("reverse", "user", 7))
     assert not ratelimit.LIMITER._hits.get(("reverse", "chat", 42))
@@ -563,6 +582,69 @@ async def test_an_admins_refused_try_gives_nobody_elses_use_back(reversing):
     reversing.return_value = MADE
     await make_reverse(rt, _msg(None, video=_video(), user_id=1000))      # a member's use
     assert len(ratelimit.LIMITER._hits[("reverse", "chat", 42)]) == 1
-    reversing.side_effect = vr.Refused("not-video")
+    reversing.side_effect = vr.Refused("busy")
     await make_reverse(rt, _msg(None, video=_video(), user_id=7))         # the admin's refusal
     assert len(ratelimit.LIMITER._hits[("reverse", "chat", 42)]) == 1
+
+
+# ── the review's finds ──────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_a_download_that_throws_is_said_plainly_and_costs_nothing(reversing, monkeypatch):
+    monkeypatch.setattr(vision, "_download_video", AsyncMock(side_effect=RuntimeError("telegram timeout")))
+    msg = _msg(None, video=_video())
+    assert await make_reverse(_rt(), msg) == reverser.DOWNLOAD_FAILED
+    reversing.assert_not_awaited()
+    assert not ratelimit.LIMITER._hits.get(("reverse", "user", 7))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["dale do it backwards", "dale make this go backwards", "dale play that backwards"])
+async def test_an_unclear_ask_with_no_video_is_left_to_the_ordinary_reply(monkeypatch, reversing, text):
+    from ipedro.memory.context_builder import BuiltContext
+
+    async def fake_build(**kwargs):
+        return BuiltContext(messages=[{"role": "user", "content": "x"}], tokens=1)
+
+    monkeypatch.setattr(chat, "build_context", fake_build)
+    rt = _chat_rt(monkeypatch)
+    msg = _in_chat(text)
+    await _chat_handler(rt)(msg)
+    reversing.assert_not_awaited()
+    rt.openai.chat.assert_awaited_once()                  # he answers in words, not "reply to a video"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["dale do it backwards", "dale play this backwards"])
+async def test_the_same_unclear_ask_with_a_video_to_hand_reverses_it(monkeypatch, reversing, text):
+    rt = _chat_rt(monkeypatch)
+    await _chat_handler(rt)(_in_chat(text, reply_to=_has(video=_video())))
+    reversing.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_clear_ask_with_no_video_says_what_to_give(monkeypatch, reversing):
+    rt = _chat_rt(monkeypatch)
+    msg = _in_chat("dale reverse this")
+    await _chat_handler(rt)(msg)
+    assert msg.reply.await_args.args[0] == NO_VIDEO
+    rt.openai.chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_only_a_video_skips_being_watched_a_photo_with_those_words_is_still_looked_at(monkeypatch, reversing):
+    rt = _chat_rt(monkeypatch)
+    look = AsyncMock(return_value=None)
+    monkeypatch.setattr(vision, "look", look)
+    photo = [SimpleNamespace(file_id="p", file_unique_id="up", file_size=10)]
+    await _chat_handler(rt)(_in_chat(None, caption="dale reverse this", photo=photo))
+    look.assert_awaited_once()                            # a photo: seen as always
+    look.reset_mock()
+    await _chat_handler(rt)(_in_chat(None, caption="dale reverse this", video=_video()))
+    look.assert_not_awaited()                             # a video sent to be reversed: not watched
+
+
+def test_the_docs_say_what_counts_against_the_hour():
+    from pathlib import Path
+    docs = " ".join((Path(__file__).resolve().parent.parent / "docs" / "COMMANDS.md").read_text().split())
+    assert "he was busy" in docs and "download" in docs

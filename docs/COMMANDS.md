@@ -673,7 +673,10 @@ a message to a bot that is answering you anyway: "reverse this", "can you revers
 this video", "play this backwards", "make this go backwards", "rewind that gif".
 Add `mute` ("reverse this and mute it", `/reverse mute`) to leave the sound out.
 Anything after the ask that isn't pointing at the video makes it not an ask
-("reverse psychology", "reverse the order of the list").
+("reverse psychology", "reverse the order of the list", "do the alphabet
+backwards"). "reverse" and "rewind" are about a video however it is worded;
+"play/do/make it backwards" only counts when there is a video to hand, and
+otherwise gets an ordinary reply.
 
 It comes back as a reply of the same kind: a video, a looping GIF, or a round
 video. The sound is reversed with it and kept in step. No model is used, so it
@@ -688,8 +691,11 @@ costs nothing but CPU; a video sent with the ask as its caption isn't also
   picture is scaled down until the clip fits. A 10 second 720p clip is untouched;
   a 30 second one comes out about 720x400.
 - **Limits per person:** 6 an hour each, 15 an hour a chat (bot admins exempt). A
-  refusal before anything was done doesn't use one up. Reversing shares
-  `ffmpeg`'s two slots with watching videos; when both are busy he says so.
+  refusal because he was busy or has no `ffmpeg` doesn't use one up, and neither
+  does one from what Telegram says of the file (that's said before it counts); one
+  after the download (not a video, a picture too big) does, since it cost a
+  download. Reversing shares `ffmpeg`'s two slots with watching videos; when both
+  are busy he says so.
 - **Privacy:** the copy carries none of the original's metadata (a phone video can
   hold where it was shot), subtitles or data streams.
 - **Safety:** only real MP4/MOV/WebM files are opened, with only local files

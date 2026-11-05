@@ -471,7 +471,7 @@ def test_the_filter_holds_its_frames_last_and_scales_by_what_the_picture_shows()
 
 def test_the_sound_is_padded_trimmed_then_reversed():
     graph = vr.audio_filter(7.25)
-    assert graph == "apad=whole_dur=7.250,atrim=end=7.250,areverse"
+    assert graph == "aresample=async=1:first_pts=0,apad=whole_dur=7.250,atrim=end=7.250,areverse"
 
 
 @pytest.mark.parametrize("text, rate", [
@@ -541,3 +541,35 @@ async def test_an_ffmpeg_that_failed_is_a_failure_even_if_it_left_a_file_behind(
     with pytest.raises(vr.Refused) as err:
         await vr.reverse(MP4)
     assert err.value.code == "failed"
+
+
+# ── the review's finds ──────────────────────────────────────────────────────
+
+@real
+@pytest.mark.asyncio
+async def test_sound_that_starts_after_the_picture_stays_in_step_when_reversed(tmp_path):
+    """A phone video's audio often starts a fraction after its picture. The
+    reversal used to lose that offset: the tone (0.48 s to 1.5 s) came out at
+    3.0 s to 4.0 s instead of 2.5 s to 3.5 s."""
+    src = str(tmp_path / "late.mp4")
+    _ffmpeg("-f", "lavfi", "-i", "color=c=gray:size=160x120:rate=10:duration=4",
+            "-itsoffset", "0.5", "-f", "lavfi", "-i", "aevalsrc=0.8*sin(2*PI*440*t):s=44100:d=1",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "ultrafast", "-c:a", "aac", src)
+    assert _volume(src, 0.6, 0.8) > -20 and _volume(src, 2.2, 1.0) < -60       # starts late
+    out = _save(tmp_path, await _reverse_file(src))
+    assert _volume(out, 2.0, 0.3) < -60       # quiet where the tone must not be yet
+    assert _volume(out, 2.7, 0.6) > -20       # the tone, where reversing puts it
+    assert _volume(out, 3.65, 0.3) < -60      # and quiet again after it
+
+
+@pytest.mark.asyncio
+async def test_a_full_disk_when_making_the_work_directory_gives_the_slot_back(monkeypatch):
+    def boom(*a, **k):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(vr.tempfile, "mkdtemp", boom)
+    gate = vf._gate()
+    for _ in range(4):
+        with pytest.raises(vr.Refused) as err:
+            await vr.reverse(MP4)
+        assert err.value.code == "failed"
+    assert gate._value == 2                                              # nothing leaked
