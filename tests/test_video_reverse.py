@@ -486,3 +486,58 @@ def test_the_numbers_are_the_documented_ones():
     assert vr.MAX_SECONDS == 30 and vr.MAX_INPUT_BYTES == 20_000_000
     assert vr.FPS_CAP == 30.0 and vr.FRAME_MEMORY == 400_000_000
     assert vr.MAX_OUTPUT_BYTES < 50_000_000
+
+
+# ── what the mutation sweep found unpinned ──────────────────────────────────
+
+@real
+@pytest.mark.asyncio
+async def test_a_short_wide_clip_is_still_capped_to_the_maximum_width(tmp_path):
+    """Two seconds fits the frame budget even at 1080p, so only the width cap
+    can bring it down."""
+    src = _clip(tmp_path, seconds=2, size="1920x1080", rate=30, audio=False, source="test")
+    made = await _reverse_file(src)
+    assert 1000 < made.width <= 1280                      # the documented cap, not the constant
+    assert abs(made.width / made.height - 16 / 9) < 0.05
+
+
+@real
+@pytest.mark.asyncio
+async def test_a_chapter_in_the_source_does_not_come_along(tmp_path):
+    chapters = tmp_path / "chapters.txt"
+    chapters.write_text(
+        ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=2000\ntitle=PRIVATE CHAPTER\n"
+        "[CHAPTER]\nTIMEBASE=1/1000\nSTART=2000\nEND=4000\ntitle=SECOND ONE\n")
+    plain = _clip(tmp_path, "plain.mp4")
+    src = str(tmp_path / "chaptered.mp4")
+    _ffmpeg("-i", plain, "-i", str(chapters), "-map_metadata", "1", "-map_chapters", "1", "-c", "copy", src)
+    assert _probe_json(src, "chapter=id")["chapters"], "the source has chapters"
+    made = await _reverse_file(src)
+    assert b"PRIVATE CHAPTER" not in made.data
+    assert not _probe_json(_save(tmp_path, made), "chapter=id")["chapters"]
+
+
+@pytest.mark.asyncio
+async def test_the_frame_rate_falls_back_to_the_other_field_when_the_average_is_unknown(monkeypatch):
+    async def fake_run(argv, **kw):
+        return 0, json.dumps({"format": {"duration": "4.0"}, "streams": [
+            {"codec_type": "video", "width": 320, "height": 240,
+             "avg_frame_rate": "0/0", "r_frame_rate": "25/1"}]}).encode(), b""
+    monkeypatch.setattr(vf, "_run", fake_run)
+    info = await vr.probe("/x", "mov")
+    assert info.fps == 25.0 and info.seconds == 4.0 and not info.has_audio
+
+
+@pytest.mark.asyncio
+async def test_an_ffmpeg_that_failed_is_a_failure_even_if_it_left_a_file_behind(monkeypatch):
+    monkeypatch.setattr(vr, "probe", AsyncMock(return_value=vr.Probe(5.0, False, 320, 240, 30.0)))
+
+    async def fake_run(argv, **kw):
+        with open(argv[-1], "wb") as fh:
+            fh.write(b"\x00\x00\x00\x18ftypmp42" + b"x" * 40)       # looks fine…
+        return 1, b"", b"Conversion failed!"                       # …but ffmpeg said no
+
+    monkeypatch.setattr(vf, "_run", fake_run)
+    with pytest.raises(vr.Refused) as err:
+        await vr.reverse(MP4)
+    assert err.value.code == "failed"

@@ -523,3 +523,46 @@ def test_the_docs_describe_it():
         assert needle in docs, needle
     assert "/reverse" in (root / "README.md").read_text()
     assert "/reverse" in (root / "docs" / "SECURITY.md").read_text()
+
+
+# ── what the mutation sweep found unpinned ──────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_mute_asked_in_the_chat_reaches_the_job(monkeypatch, reversing):
+    rt = _chat_rt(monkeypatch)
+    await _chat_handler(rt)(_in_chat("dale reverse this and mute it", reply_to=_has(video=_video())))
+    assert reversing.await_args.kwargs["mute"] is True
+    reversing.reset_mock()
+    await _chat_handler(rt)(_in_chat("dale reverse this", reply_to=_has(video=_video()), ))
+    assert reversing.await_args.kwargs["mute"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_round_video_that_is_not_square_is_sized_by_its_shorter_side(reversing):
+    rt = _rt()
+    reversing.return_value = vr.Reversed(MADE.data, 6.4, 640, 360, True)
+    note = SimpleNamespace(file_id="n", file_unique_id="un", duration=7, file_size=1_000_000, thumbnail=None)
+    await make_reverse(rt, _msg(None, video_note=note))
+    assert rt.bot.send_video_note.await_args.kwargs["length"] == 360
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_that_did_nothing_gives_back_the_chats_use_as_well(reversing):
+    rt = _rt()
+    reversing.side_effect = vr.Refused("not-video")
+    await make_reverse(rt, _msg(None, video=_video()))
+    assert not ratelimit.LIMITER._hits.get(("reverse", "user", 7))
+    assert not ratelimit.LIMITER._hits.get(("reverse", "chat", 42))
+
+
+@pytest.mark.asyncio
+async def test_an_admins_refused_try_gives_nobody_elses_use_back(reversing):
+    """Admins are never counted, so there is nothing of theirs to give back;
+    giving back "the chat's" use would take one off somebody else."""
+    rt = _rt(admin_ids=frozenset({7}))
+    reversing.return_value = MADE
+    await make_reverse(rt, _msg(None, video=_video(), user_id=1000))      # a member's use
+    assert len(ratelimit.LIMITER._hits[("reverse", "chat", 42)]) == 1
+    reversing.side_effect = vr.Refused("not-video")
+    await make_reverse(rt, _msg(None, video=_video(), user_id=7))         # the admin's refusal
+    assert len(ratelimit.LIMITER._hits[("reverse", "chat", 42)]) == 1
