@@ -1,5 +1,8 @@
+# Test-only dependencies, pinned for the same reason as requirements.txt, and
+# one more: the /evolve workflow runs these inside a CI job that can merge to
+# main on its own, so a surprise release here is a surprise in that job.
 -r requirements.txt
-pytest>=8.0.0
-pytest-asyncio>=0.23.0
-pytest-mock>=3.12.0
-pyyaml>=6.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-mock==3.16.0
+pyyaml==6.0.1

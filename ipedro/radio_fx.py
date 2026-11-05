@@ -49,6 +49,8 @@ from pathlib import Path
 import numpy as np
 from scipy.signal import butter, fftconvolve, sosfiltfilt
 
+from ipedro.net_safety import redact_url
+
 log = logging.getLogger(__name__)
 
 SR = 8000  # working sample rate (the audio bandwidth is < 3 kHz anyway)
@@ -68,7 +70,10 @@ _FFMPEG_TIMEOUT_SECONDS = 60
 # URLs. ``_ensure_live_pcm()`` walks them in order until one yields valid
 # PCM. Every layer fails open: no URL set → off, all URLs down → bundled
 # or synthetic.
-_LIVE_FETCH_DURATION_SECONDS = 30
+# A live stream delivers audio at 1x, so the clip asked for must fit well
+# inside the time allowed to fetch it (connect + that many seconds of
+# real-time audio). The clip is looped as a bed anyway, so 15 s is plenty.
+_LIVE_FETCH_DURATION_SECONDS = 15
 _LIVE_FETCH_TIMEOUT_SECONDS = 25
 _LIVE_CACHE_TTL_SECONDS = 6 * 3600  # 6h between refreshes
 # No defaults: live fetch is OFF unless the operator explicitly sets
@@ -100,7 +105,7 @@ _live_cache: tuple[np.ndarray, float, str] | None = None
 
 
 def _fetch_live_from_url(url: str) -> np.ndarray:
-    """Pull ~30 s from one streaming URL, decoded to mono float32 at SR.
+    """Pull a short clip from one streaming URL, decoded to mono float32 at SR.
 
     Dispatches on URL scheme:
       * ``kiwi://host:port?freq=...&mode=...`` → KiwiSDR WebSocket client
@@ -138,13 +143,21 @@ def _fetch_live_from_url(url: str) -> np.ndarray:
             capture_output=True, check=False,
             timeout=_LIVE_FETCH_TIMEOUT_SECONDS + 5,
         )
-    except subprocess.TimeoutExpired:
-        log.info("live shortwave fetch %s timed out", url)
+    except subprocess.TimeoutExpired as exc:
+        # A real-time source that ran a little long still delivered audio:
+        # keep what arrived (whole float32 samples only) rather than waste it.
+        got = exc.stdout or b""
+        pcm = np.frombuffer(got[: len(got) - len(got) % 4], dtype=np.float32)
+        if pcm.size >= SR and float(np.max(np.abs(pcm))) >= 1e-4:
+            log.info("live shortwave fetch %s timed out; keeping the %.1fs "
+                     "it delivered", redact_url(url), pcm.size / SR)
+            return pcm.copy()
+        log.info("live shortwave fetch %s timed out", redact_url(url))
         return np.zeros(0, dtype=np.float32)
     if proc.returncode != 0 or not proc.stdout:
         tail = (proc.stderr or b"")[-200:].decode("utf-8", "replace")
         log.info("live shortwave fetch %s failed rc=%s: %s",
-                 url, proc.returncode, tail)
+                 redact_url(url), proc.returncode, redact_url(tail))
         return np.zeros(0, dtype=np.float32)
     pcm = np.frombuffer(proc.stdout, dtype=np.float32)
     if pcm.size < SR or float(np.max(np.abs(pcm))) < 1e-4:
@@ -166,12 +179,12 @@ def _ensure_live_pcm() -> tuple[np.ndarray, str] | None:
         if now - fetched_at < _LIVE_CACHE_TTL_SECONDS and pcm.size > 0:
             return pcm, src
     for url in urls:
-        log.info("live shortwave: fetching from %s", url)
+        log.info("live shortwave: fetching from %s", redact_url(url))
         pcm = _fetch_live_from_url(url)
         if pcm.size > 0:
             _live_cache = (pcm, now, url)
             log.info("live shortwave: cached %.1fs from %s",
-                     pcm.size / SR, url)
+                     pcm.size / SR, redact_url(url))
             return pcm, url
     log.info("live shortwave: all %d URLs failed, falling back", len(urls))
     return None
@@ -249,9 +262,9 @@ def live_cache_status() -> dict[str, object]:
         cached = pcm.size > 0
         cached_seconds = pcm.size / SR
         cached_age = time.monotonic() - fetched_at
-        cached_source = src
+        cached_source = redact_url(src)
     return {
-        "urls": _live_urls(),
+        "urls": tuple(redact_url(u) for u in _live_urls()),
         "cached": cached,
         "cached_source": cached_source,
         "cached_seconds": cached_seconds,

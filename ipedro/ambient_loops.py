@@ -39,9 +39,14 @@ async def _maybe_surface_confession(bot: Bot, db: Database) -> None:
     )
     if not conf:
         return
+    # Groups only. /confess is a DM command, so a private chat is one
+    # person: dropping an anonymous stranger's text into someone's DM (maybe
+    # the submitter's own) was never what "surface in a chat" meant, and
+    # marking it surfaced meant it never reached a group either.
     chats = await db.fetch(
         "SELECT chat_id FROM chats "
-        "WHERE last_seen >= NOW() - INTERVAL '14 days'"
+        "WHERE last_seen >= NOW() - INTERVAL '14 days' "
+        "  AND type IN ('group', 'supergroup')"
     )
     if not chats:
         return

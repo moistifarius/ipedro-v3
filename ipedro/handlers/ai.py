@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, Message
 
-from ipedro.handlers.common import catify, fallback_cat_fact, get_or_create_chat_config
+from ipedro.handlers.common import (
+    catify, fallback_cat_fact, get_or_create_chat_config, over_limit,
+)
 from ipedro.memory.tokens import count_tokens
 from ipedro.prompts import (
     BENEFICIALITY_PROMPT, CAT_FACT_PROMPT,
@@ -110,6 +113,39 @@ async def _set_persona_from_file(rt: Runtime, msg: Message, name: str) -> None:
     )
 
 
+# /chat_config on|off fields: the names people type -> the column they set.
+_SWITCHES = {
+    "duckhunt": "duckhunt_enabled",
+    "sharephoto": "share_photo_enabled", "share_photo": "share_photo_enabled",
+    "comic": "comic_enabled",
+    "fortune": "fortune_enabled",
+    "voice": "voice_transcribe",
+    "memory": "memory_enabled",
+    "ether": "ether_enabled",
+    "ducknames": "duck_names_public", "duck_names": "duck_names_public",
+    "duck_names_public": "duck_names_public",
+    "monthlyrecap": "monthly_recap_enabled", "monthly_recap": "monthly_recap_enabled",
+    "monthly_recap_enabled": "monthly_recap_enabled",
+    "onthisday": "on_this_day_enabled", "on_this_day": "on_this_day_enabled",
+    "on_this_day_enabled": "on_this_day_enabled",
+    "automod": "automod_enabled", "automod_enabled": "automod_enabled",
+    "vision": "vision_enabled", "vision_enabled": "vision_enabled",
+}
+_ON = frozenset({"on", "true", "1", "yes", "enable", "enabled"})
+_OFF = frozenset({"off", "false", "0", "no", "disable", "disabled"})
+
+
+def parse_switch(raw: str) -> bool | None:
+    """on/off as a person types it. None for anything else: a typo used to
+    count as "off", so "/chat_config memory onn" quietly turned memory off."""
+    word = raw.strip().lower()
+    if word in _ON:
+        return True
+    if word in _OFF:
+        return False
+    return None
+
+
 def build_router(rt: Runtime) -> Router:
     r = Router(name="ai")
 
@@ -121,6 +157,8 @@ def build_router(rt: Runtime) -> Router:
             await msg.reply(
                 "Usage: /a <question>", disable_notification=True,
             )
+            return
+        if await over_limit(rt, msg, "ask"):
             return
         await msg.bot.send_chat_action(msg.chat.id, "typing")
         answer = await rt.openai.short_completion(
@@ -134,8 +172,10 @@ def build_router(rt: Runtime) -> Router:
         if not prompt:
             await msg.reply("Usage: /aigen <prompt>", disable_notification=True)
             return
+        if await over_limit(rt, msg, "image"):
+            return
         await msg.bot.send_chat_action(msg.chat.id, "upload_photo")
-        data = await rt.openai.generate_image(prompt)
+        data = await rt.openai.generate_image(prompt, chat_id=msg.chat.id)
         if not data:
             await msg.reply("Image generation failed.", disable_notification=True)
             return
@@ -153,17 +193,23 @@ def build_router(rt: Runtime) -> Router:
                 disable_notification=True,
             )
             return
+        if await over_limit(rt, msg, "translate"):
+            return
         voice = msg.reply_to_message.voice
         file = await msg.bot.get_file(voice.file_id)
         buf = io.BytesIO()
         await msg.bot.download_file(file.file_path, destination=buf)
-        text = await rt.openai.translate_audio(buf, filename="voice.ogg")
+        text = await rt.openai.translate_audio(
+            buf, filename="voice.ogg", chat_id=msg.chat.id,
+        )
         await msg.reply(text or "Translation failed.", disable_notification=True)
 
     @r.message(Command("catfact"))
     async def catfact(msg: Message) -> None:
         await msg.bot.send_chat_action(msg.chat.id, "typing")
-        fact = await rt.openai.cheap_completion(CAT_FACT_PROMPT, max_tokens=120)
+        fact = await rt.openai.cheap_completion(
+            CAT_FACT_PROMPT, max_tokens=120, chat_id=msg.chat.id,
+        )
         await msg.reply(catify(fact or fallback_cat_fact()), disable_notification=True)
 
     @r.message(Command("beneficiality"))
@@ -176,6 +222,7 @@ def build_router(rt: Runtime) -> Router:
         conv = "\n".join(f"{m.role}: {m.content}" for m in recent)
         score = await rt.openai.cheap_completion(
             BENEFICIALITY_PROMPT.format(conversation=conv), max_tokens=10,
+            chat_id=msg.chat.id,
         )
         await msg.reply(
             f"Beneficiality score: {score or '?'}",
@@ -203,7 +250,9 @@ def build_router(rt: Runtime) -> Router:
                 f"Ether enabled: {cfg.ether_enabled}\n"
                 f"Duck names public: {cfg.duck_names_public}\n"
                 f"Monthly recap: {cfg.monthly_recap_enabled}\n"
-                f"Automod: {cfg.automod_enabled}\n\n"
+                f"Automod: {cfg.automod_enabled}\n"
+                f"Vision: {cfg.vision_enabled}\n"
+                f"On this day: {cfg.on_this_day_enabled}\n\n"
                 "Set a field: /chat_config <field> <value>\n"
                 "  policy     commands|mention|reply|ambient|always\n"
                 "  ambient    <0.0-1.0>\n"
@@ -218,7 +267,10 @@ def build_router(rt: Runtime) -> Router:
                 "  memory     on|off\n"
                 "  ether      on|off\n"
                 "  ducknames  on|off — share this chat's named ducks in /ducknames\n"
-                "  automod    on|off — copypasta/meme canned responses",
+                "  automod    on|off — copypasta/meme canned responses\n"
+                "  vision     on|off — look at photos, stickers, GIFs and videos\n"
+                "  onthisday  on|off — the daily look back\n"
+                "  monthlyrecap on|off — the monthly recap",
                 disable_notification=True,
             )
             return
@@ -246,10 +298,16 @@ def build_router(rt: Runtime) -> Router:
             updates["response_policy"] = raw
         elif field == "ambient":
             try:
-                updates["ambient_probability"] = max(0.0, min(1.0, float(raw)))
+                prob = float(raw)
             except ValueError:
-                await msg.reply("Invalid ambient probability.", disable_notification=True)
+                prob = float("nan")
+            if not math.isfinite(prob):         # "nan" parses, and clamped to 1.0
+                await msg.reply(
+                    "Invalid ambient probability. A number from 0.0 to 1.0.",
+                    disable_notification=True,
+                )
                 return
+            updates["ambient_probability"] = max(0.0, min(1.0, prob))
         elif field == "persona":
             # Custom personas via the remaining argument tail, or a .txt
             # file (setfile) for prompts too long for one Telegram message.
@@ -273,26 +331,15 @@ def build_router(rt: Runtime) -> Router:
                     disable_notification=True,
                 )
                 return
-        elif field == "duckhunt":
-            updates["duckhunt_enabled"] = raw.lower() in ("on", "true", "1", "yes")
-        elif field in ("sharephoto", "share_photo"):
-            updates["share_photo_enabled"] = raw.lower() in ("on", "true", "1", "yes")
-        elif field == "comic":
-            updates["comic_enabled"] = raw.lower() in ("on", "true", "1", "yes")
-        elif field == "fortune":
-            updates["fortune_enabled"] = raw.lower() in ("on", "true", "1", "yes")
-        elif field == "voice":
-            updates["voice_transcribe"] = raw.lower() in ("on", "true", "1", "yes")
-        elif field == "memory":
-            updates["memory_enabled"] = raw.lower() in ("on", "true", "1", "yes")
-        elif field == "ether":
-            updates["ether_enabled"] = raw.lower() in ("on", "true", "1", "yes")
-        elif field in ("ducknames", "duck_names", "duck_names_public"):
-            updates["duck_names_public"] = raw.lower() in ("on", "true", "1", "yes")
-        elif field in ("monthlyrecap", "monthly_recap", "monthly_recap_enabled"):
-            updates["monthly_recap_enabled"] = raw.lower() in ("on", "true", "1", "yes")
-        elif field in ("automod", "automod_enabled"):
-            updates["automod_enabled"] = raw.lower() in ("on", "true", "1", "yes")
+        elif field in _SWITCHES:
+            value = parse_switch(raw)
+            if value is None:
+                await msg.reply(
+                    f"{field} takes on or off, not {raw[:30]!r}. Nothing changed.",
+                    disable_notification=True,
+                )
+                return
+            updates[_SWITCHES[field]] = value
         else:
             await msg.reply("Unknown field.", disable_notification=True)
             return

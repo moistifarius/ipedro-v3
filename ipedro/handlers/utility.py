@@ -20,10 +20,11 @@ from aiogram.types import (
     InlineKeyboardMarkup, Message,
 )
 
+from ipedro import poll_maker, reverser
 from ipedro.bot_messages import track
 from ipedro.auth import is_admin_user
 from ipedro.handlers.common import (
-    display_name, get_or_create_chat_config, require_memory,
+    display_name, get_or_create_chat_config, over_limit, require_memory,
 )
 from ipedro.on_this_day import build_on_this_day, render_on_this_day
 from ipedro.meme_finder import find_relevant_meme
@@ -71,9 +72,14 @@ def _parse_user_date(raw: str) -> tuple[int, int, int | None] | None:
     raw = raw.strip()
     for fmt in _DATE_FORMATS:
         try:
-            dt = datetime.strptime(raw, fmt)
-            year = dt.year if "%Y" in fmt else None
-            return dt.month, dt.day, year
+            if "%Y" in fmt:
+                dt = datetime.strptime(raw, fmt)
+                return dt.month, dt.day, dt.year
+            # No year given: parse inside a leap year. strptime defaults the
+            # year to 1900, which isn't one, so Feb 29 (a real birthday)
+            # could never be set.
+            dt = datetime.strptime(f"2000 {raw}", f"%Y {fmt}")
+            return dt.month, dt.day, None
         except ValueError:
             continue
     return None
@@ -102,6 +108,36 @@ async def _can_edit_config(
     except Exception:
         return False
     return getattr(member, "status", None) in ("creator", "administrator")
+
+
+async def _may_correct_notes(rt: Runtime, msg: Message) -> bool:
+    """Who may rewrite the bot's notes with /fixname: a bot admin, a chat
+    admin of THIS chat, or the person in a private chat with the bot (it's
+    their own conversation). A plain group member may not: the rewrite
+    reaches every summary and fact, which sit in the bot's system prompt for
+    everyone, and there is no undo."""
+    user_id = msg.from_user.id if msg.from_user else None
+    if user_id is None:
+        return False
+    if msg.chat.type == "private":
+        return True
+    return await _can_edit_config(rt, user_id, msg.chat, msg.chat.id)
+
+
+_NAME_MAX_CHARS = 40
+_NAME_MAX_WORDS = 4
+_REMINDER_MAX_CHARS = 1000
+
+
+def _looks_like_a_name(text: str) -> bool:
+    """A name, not a sentence: this text is pasted verbatim into the bot's
+    summaries and facts, which are part of its system prompt. Letters,
+    digits, spaces and the few marks names carry; short; one line."""
+    return (
+        0 < len(text) <= _NAME_MAX_CHARS
+        and len(text.split()) <= _NAME_MAX_WORDS
+        and all(ch.isalnum() or ch in " '’.-" for ch in text)
+    )
 
 
 async def _answer_reddit_media(
@@ -241,6 +277,16 @@ def build_router(rt: Runtime) -> Router:
         if not body:
             await msg.reply("Empty reminder text.", disable_notification=True)
             return
+        if len(body) > _REMINDER_MAX_CHARS:
+            # It's sent back as one message with a prefix, and Telegram
+            # drops anything over 4096 characters: a reminder this long
+            # would be accepted now and silently lost when it fires.
+            await msg.reply(
+                f"That's too long for a reminder ({_REMINDER_MAX_CHARS} "
+                "characters at most).",
+                disable_notification=True,
+            )
+            return
         rid = await add_reminder(
             rt.db, msg.chat.id,
             msg.from_user.id if msg.from_user else None,
@@ -292,15 +338,23 @@ def build_router(rt: Runtime) -> Router:
 
     @r.message(Command("poll"))
     async def poll(msg: Message) -> None:
-        """/poll Question | Option A | Option B | ... (2-10 options)."""
-        raw = (msg.text or "").split(None, 1)
-        if len(raw) < 2:
-            await msg.reply(
-                "Usage: /poll Question | Option A | Option B | ...",
-                disable_notification=True,
+        """/poll Question | Option A | Option B | ... (2-10 options), or /poll
+        alone on a reply, a screenshot or a small text file, or with a topic:
+        the bot drafts the poll from it (and asks what it's about, or what
+        kind, when that's missing). A kind can lead: /poll quiz, public: Q | A
+        | B* (see poll_maker.split_kind_prefix)."""
+        raw = (msg.text or msg.caption or "").split(None, 1)
+        args = raw[1] if len(raw) > 1 else ""
+        kinds, after = poll_maker.split_kind_prefix(args)
+        if kinds or "|" not in args:
+            cfg = await get_or_create_chat_config(rt, msg)
+            await poll_maker.make_poll(
+                rt, msg, poll_maker.clean_request(after, after_ask=False),
+                ask_text=kinds,
+                vision_ok=bool(getattr(cfg, "vision_enabled", True)),
             )
             return
-        parts = [p.strip() for p in raw[1].split("|") if p.strip()]
+        parts = [p.strip() for p in args.split("|") if p.strip()]
         if len(parts) < 3:
             await msg.reply(
                 "Need a question and at least two options, separated by |.",
@@ -317,6 +371,16 @@ def build_router(rt: Runtime) -> Router:
             )
         except Exception as exc:
             await msg.reply(f"Poll failed: {exc}", disable_notification=True)
+
+    @r.message(Command("reverse"))
+    async def reverse(msg: Message) -> None:
+        """/reverse on a video, GIF or round video (replied to, or sent with
+        the command as its caption): it comes back played backwards.
+        "/reverse mute" leaves the sound out."""
+        words = (msg.text or msg.caption or "").lower().split()[1:]
+        await reverser.make_reverse(
+            rt, msg, mute=any(w in ("mute", "muted", "silent", "nosound") for w in words),
+        )
 
     @r.message(Command("quote"))
     async def quote(msg: Message) -> None:
@@ -348,7 +412,10 @@ def build_router(rt: Runtime) -> Router:
             qname = display_name(target.from_user) if target.from_user else "anonymous"
             # Allocate the next per-chat number atomically inside the INSERT so
             # each chat gets contiguous #1, #2, #3… instead of the global id.
-            seq = await rt.db.fetchval(
+            # Serialized per chat: two /quote at once both read the same MAX
+            # and saved the same number, and /unquote N then deleted both.
+            seq = await rt.db.fetchval_serialized(
+                msg.chat.id,
                 "INSERT INTO quotes (chat_id, seq, quoted_user_id, quoted_name, "
                 "                    text, saved_by, source_message_id) "
                 "VALUES ($1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM quotes "
@@ -771,9 +838,18 @@ def build_router(rt: Runtime) -> Router:
                 disable_notification=True,
             )
             return
-        # Topic = everything after the @user token (or "anything" if reply-to).
+        # Topic = everything after the @user token. A reply-to target has no
+        # @user token, so there the topic starts at the first word (it used
+        # to be read from the third, dropping a word, or ignored entirely).
         parts = (msg.text or "").split(None, 2)
-        topic = parts[2] if len(parts) >= 3 else "literally anything they'd say"
+        if msg.reply_to_message is not None and msg.reply_to_message.from_user:
+            words = (msg.text or "").split(None, 1)
+            tail = words[1] if len(words) > 1 else ""
+            if tail.startswith("@"):                  # /echo @bob tacos, as a reply
+                tail = tail.split(None, 1)[1] if " " in tail.strip() else ""
+            topic = tail.strip() or "literally anything they'd say"
+        else:
+            topic = parts[2] if len(parts) >= 3 else "literally anything they'd say"
         rows = await rt.db.fetch(
             "SELECT content FROM messages "
             " WHERE chat_id = $1 AND user_id = $2 "
@@ -844,10 +920,17 @@ def build_router(rt: Runtime) -> Router:
         past messages. Use an arrow for multi-word names; otherwise the
         first two words are taken as <wrong> <right>."""
         cfg = await get_or_create_chat_config(rt, msg)
+        if not await _may_correct_notes(rt, msg):
+            await msg.reply(
+                "Only chat admins can do that: it rewrites my notes for "
+                "everyone here, and there's no undo.",
+                disable_notification=True,
+            )
+            return
         raw = (msg.text or "").split(None, 1)
         if len(raw) < 2 or not raw[1].strip():
             await msg.reply(
-                "Usage: /fixname <wrong> -> <right>\n"
+                "Usage: /fixname <wrong> -> <right>   (chat admins)\n"
                 "e.g. /fixname Matt -> Sarah   (or: /fixname Matt Sarah)\n"
                 "Careful with names that are also common words (Will, "
                 "Grace, Rose, ...) — this does a whole-word replace across "
@@ -872,6 +955,14 @@ def build_router(rt: Runtime) -> Router:
         if not wrong or not right:
             await msg.reply(
                 "Both names need to be non-empty.", disable_notification=True,
+            )
+            return
+        if not (_looks_like_a_name(wrong) and _looks_like_a_name(right)):
+            await msg.reply(
+                f"Those need to be names: up to {_NAME_MAX_WORDS} words and "
+                f"{_NAME_MAX_CHARS} characters, letters and numbers only. "
+                "This pastes the new one into my notes word for word.",
+                disable_notification=True,
             )
             return
         if not cfg.memory_enabled:
@@ -1027,6 +1118,8 @@ def build_router(rt: Runtime) -> Router:
                 disable_notification=True,
             )
             return
+        if await over_limit(rt, msg, "image"):
+            return
         body = raw[1].strip()
         parts = [p.strip() for p in body.split("|", 1)]
         top = parts[0]
@@ -1140,7 +1233,16 @@ def build_router(rt: Runtime) -> Router:
                     target_chat_id, persona=new_persona, persona_custom=None,
                 )
         elif field == "custompersona:clear":
-            await rt.chats.update_config(target_chat_id, persona_custom=None)
+            # Back to a persona that exists. A custom persona's NAME is only a
+            # label; keeping it with no text left the chat quietly running the
+            # master prompt while the header still showed the old name.
+            current = await rt.chats.get_config(target_chat_id)
+            updates = {"persona_custom": None}
+            if current is not None and (current.persona or "dude") not in (
+                "dude", "pedro", "neutral",
+            ):
+                updates["persona"] = "dude"
+            await rt.chats.update_config(target_chat_id, **updates)
         new_cfg = await rt.chats.get_config(target_chat_id)
         # DM-scoped means the cb.message.chat.id (where the wizard is shown)
         # differs from the target_chat_id (whose config we're editing).
@@ -1191,7 +1293,10 @@ def _config_wizard_header(cfg, target_chat_id: int, *, is_dm_scoped: bool) -> st
         f"📡 <b>Response policy:</b> <code>{cfg.response_policy}</code>\n"
         f"   ambient probability: <code>{ambient_pct}</code> "
         f"(<code>{cfg.ambient_probability:.2f}</code>)\n"
-        f"🎭 <b>Persona:</b> <code>{cfg.persona}</code>\n"
+        # The persona NAME is free text a chat admin typed (/chat_config
+        # persona <name> ...). Unescaped under parse_mode=HTML, a '<' in it
+        # made the whole panel unparseable and bricked /config for the chat.
+        f"🎭 <b>Persona:</b> <code>{html.escape(str(cfg.persona))}</code>\n"
         f"{custom_line}\n"
         f"\n"
         f"<b>Features</b>\n"
@@ -1366,7 +1471,9 @@ async def _set_date(rt: Runtime, msg: Message, *, label: str) -> None:
       /anniversary "wedding" MM-DD-YYYY     — set chat-level anniversary
     """
     await get_or_create_chat_config(rt, msg)
-    parts = (msg.text or "").split(None, 3)
+    # No maxsplit: with one, a note of three words glued its last word to the
+    # date ("date 06-12-2020") and the date was unparseable.
+    parts = (msg.text or "").split()
     if len(parts) < 2:
         await msg.reply(
             f"Usage: /{label} MM-DD  (or /{label} @user MM-DD-YYYY)",

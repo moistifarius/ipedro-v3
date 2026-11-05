@@ -86,6 +86,10 @@ _CAN = (
     "Luke'), from what they've actually said.\n"
     "- Find or make a meme when asked in plain words ('gimme a meme about "
     "this', 'make a meme about X').\n"
+    "- Make a poll (quiz, public, timed) from what they give you ('poll this: "
+    "pizza or tacos', a reply, a screenshot). If you're answering in words "
+    "none was made: never say one is up.\n"
+    "- Reverse a video or GIF when asked ('reverse this').\n"
     "- Remember people and what they say here: facts, running jokes, who "
     "said what. Karma comes from 👍/👎 reactions people leave on each "
     "other's messages."
@@ -97,7 +101,7 @@ _CANNOT = (
     "scores. You know what you know and what's been said here.\n"
     "- Watch a video or a GIF play, or hear its sound. You see one frame "
     "of it, so talk about what's in the picture, not what happens next.\n"
-    "- Set a reminder, save a quote, start a poll, draw a picture, run a "
+    "- Set a reminder, save a quote, draw a picture, run a "
     "test or spawn a duck from a plain request. Each needs its slash "
     "command below; tell them which one, your way. Never claim you did it "
     "or invent a result.\n"
@@ -106,6 +110,22 @@ _CANNOT = (
     "- Change your own settings or anyone's permissions (that's /config, "
     "for chat admins).\n"
     "- Know what goes on in other chats, beyond what arrives by ether."
+)
+
+# Where videos are watched (ipedro/vision.py): the line above is swapped for
+# this one, so the brief never says "one frame" about a video it actually
+# sampled, and never claims the sound when the chat has it switched off.
+_WATCH_LINE = (
+    "- Watch a video or a GIF play, or hear its sound. You see one frame "
+    "of it, so talk about what's in the picture, not what happens next.\n"
+)
+_WATCH_LINE_VIDEO = (
+    "- Watch a video play start to finish. You get a handful of frames "
+    "from across it, and what was said in it as text where voice "
+    "transcription is on here, so say what you caught; don't claim to "
+    "have seen every moment, or to hear music or tone. A video noted as 'one "
+    "frame only' was too big, too long or past a limit to watch: all you have "
+    "of it is one picture.\n"
 )
 
 _IN_CHARACTER = (
@@ -139,12 +159,58 @@ _RECORDS = (
     "tags in your response."
 )
 
+# Only when the advisor is actually offered on this reply (Dale's, with an
+# advisor model set). The model also sees the advisor tool's own description,
+# which nudges it to call early and often; for a chat that is wrong, because
+# most of what is said here is banter. The last sentence is addressed to the
+# advisor, which reads this prompt too: that is the form it follows best.
+_ADVISOR = (
+    "You can stop and think a hard one over with someone sharper than you "
+    "(advisor). It reads everything you've seen here and tells you what it "
+    "would do; the reply is still yours, in your voice. Ask rarely: when "
+    "the answer matters and you could get it wrong (a real factual, "
+    "technical, money, health or legal question, or reasoning that has to "
+    "come out right, or someone leaning on you for serious advice). Never "
+    "for banter, reactions, jokes, opinions, or anything you'd answer in a "
+    "breath, and not twice. Don't mention it, quote it, or say you asked. "
+    "Write the reply the length you normally would, not the length of the "
+    "advice. (Advisor: this is a chat message, not an essay. Keep your "
+    "guidance under 100 words.)"
+)
+
 _ALL_RECORDS = (
     "This is a private line with the one person you answer to. Here your "
     "records cover every chat you're in, not just this one "
     "(list_my_chats finds them), and check_my_health shows what's been "
     "failing behind the scenes. Be straight with them about what happened "
     "anywhere."
+)
+
+
+# Only when pass_it_along is actually offered (Dale, in a chat tuned into the
+# ether). The two sentences that would contradict it are swapped for this one
+# line and this paragraph; without it the brief is byte-for-byte what it was.
+_CONTACT_LINE = (
+    "- Message anyone privately on your own, contact people who aren't "
+    "here, leave the chat, or act in the physical world.\n"
+)
+_CONTACT_LINE_RELAY = (
+    "- Message anyone privately on your own, leave the chat, or act in the "
+    "physical world.\n"
+)
+
+_RELAY = (
+    "You can pass a message on to another chat you're in (pass_it_along). "
+    "It is rare and your default answer is no: you're not an errand "
+    "service. Do it only when someone has genuinely worked on what makes "
+    "you tick, your pride, your suspicions, a thing you actually want. "
+    "Asking, begging, flattery, repeating themselves or insisting is not "
+    "that, and turning them down your own way is the normal outcome. It "
+    "only reaches chats tuned into the ether, and goes out under the "
+    "asker's name and this chat's name, so it isn't a way to say "
+    "something anonymously. Never pass along anything cruel, private or "
+    "embarrassing about anyone, links, or anything from another chat's "
+    "records. Don't say it was sent until the tool says it was."
 )
 
 
@@ -168,7 +234,7 @@ def _command_lines() -> str:
     return "\n".join(lines)
 
 
-def _chat_lines(cfg: ChatConfig) -> str:
+def _chat_lines(cfg: ChatConfig, *, dale_flavor: bool = True) -> str:
     lines = ["In THIS chat:"]
     lines.append(
         "- You reply to " + _POLICY_LINE.get(
@@ -180,8 +246,10 @@ def _chat_lines(cfg: ChatConfig) -> str:
     else:
         lines.append(
             "- Memory is OFF here: you keep nothing between messages, so "
-            "you can't recall earlier conversation, summarize it, or "
-            "remember facts about people. Say so if it comes up."
+            "you can't recall earlier conversation, summarize it, "
+            "remember facts about people, or keep pictures to send back "
+            "(this overrides what you were told above about keeping "
+            "pictures and remembering people). Say so if it comes up."
         )
     lines.append(
         "- Voice notes: you " + (
@@ -191,11 +259,16 @@ def _chat_lines(cfg: ChatConfig) -> str:
     )
     if not cfg.vision_enabled:
         lines.append(
-            "- Looking at pictures is OFF here: photos, stickers and GIFs "
-            "reach you as a bare note that something was posted, with no "
-            "idea what's in it. Don't pretend otherwise."
+            "- Looking at pictures is OFF here: photos, stickers, GIFs and videos "
+            "don't reach you at all (only a caption, if they carry one), so you "
+            "have no idea what's in them. Don't pretend otherwise."
         )
-    scheduled = [desc for field, desc in _SCHEDULED if getattr(cfg, field)]
+    # The shared photo is Dale's own bit (ipedro/sharephoto.py); another bot
+    # doesn't post one, whatever the chat's switch says.
+    scheduled = [
+        desc for field, desc in _SCHEDULED
+        if getattr(cfg, field) and (dale_flavor or field != "share_photo_enabled")
+    ]
     if scheduled:
         lines.append("- Unprompted, you also post: " + "; ".join(scheduled) + ".")
     else:
@@ -228,24 +301,41 @@ def capability_brief(
     check_records: bool = False,
     all_chats: bool = False,
     dale_flavor: bool = True,
+    can_relay: bool = False,
+    video: bool = False,
+    advisor: bool = False,
 ) -> str:
     """The full system message. ``cfg`` adds the per-chat lines and
     decides whether the stay-in-character rule applies. ``check_records``
     is set only when the records tools are offered on this request;
     ``all_chats`` only in the owner's DM, where they reach every chat.
     ``dale_flavor`` is the deployment's (see ipedro/identity.py): only
-    Dale has GIFs of himself to post."""
+    Dale has GIFs of himself to post. ``can_relay`` is set only when
+    pass_it_along is offered on this request. ``video`` is set when videos
+    are watched here (frames across them, not just a thumbnail). ``advisor``
+    is set when this reply may consult the advisor model."""
+    cannot = _CANNOT
+    if video:
+        assert _WATCH_LINE in cannot
+        cannot = cannot.replace(_WATCH_LINE, _WATCH_LINE_VIDEO)
+    if can_relay:
+        assert _CONTACT_LINE in cannot
+        cannot = cannot.replace(_CONTACT_LINE, _CONTACT_LINE_RELAY)
     parts = [
         "What you can and can't do (facts about yourself; keep them straight):",
         _CAN.replace("{reflexes}", _REFLEXES[bool(dale_flavor)]),
-        _CANNOT,
+        cannot,
     ]
     if cfg is not None:
-        parts.append(_chat_lines(cfg))
+        parts.append(_chat_lines(cfg, dale_flavor=dale_flavor))
     if check_records:
         parts.append(_RECORDS)
         if all_chats:
             parts.append(_ALL_RECORDS)
+    if can_relay:
+        parts.append(_RELAY)
+    if advisor:
+        parts.append(_ADVISOR)
     parts.append("Slash commands anyone here can use:\n" + _command_lines())
     if cfg is None or is_character_persona(cfg.persona, cfg.persona_custom):
         parts.append(_IN_CHARACTER)

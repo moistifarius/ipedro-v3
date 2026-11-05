@@ -57,7 +57,12 @@ def track(
     # intercept) mostly don't call track() at all, so they don't open the
     # window either. Doing it at the main AI reply alone used to mean an
     # ambient bit's own "why?" follow-up went unanswered; that's fixed.
-    addressed.note_bot_reply(chat_id, replied_to_user_id=replied_to_user_id)
+    #
+    # Except when this line answered ANOTHER BOT (hub_depth > 0): that isn't
+    # a conversation with a human, and opening the window made every bot in
+    # the exchange treat the next human "why?" as theirs, so each answered.
+    if hub_depth == 0:
+        addressed.note_bot_reply(chat_id, replied_to_user_id=replied_to_user_id)
     # …and the one place every bot's group lines pass through, so it's
     # where the other bots get to hear them (ipedro/hub.py). `hub_depth`
     # is set only when this line answered another bot.

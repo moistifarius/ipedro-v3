@@ -1,6 +1,16 @@
 # docker-compose for iPedro V2.
-# On Unraid, drop this file alongside `.env` (copy from .env.example) and run
-# `docker compose up -d` from the share.
+#
+# Start it from this directory, pointing Compose at the `.env` one level up
+# (copy it from `.env.example` in the repo root):
+#
+#     cd docker && docker compose --env-file ../.env up -d --build
+#
+# The flag matters. `env_file: ../.env` further down only puts the file's
+# values INSIDE the containers. The ${POSTGRES_USER}, ${POSTGRES_PASSWORD},
+# ${PGDATA_HOST_PATH} ... substitutions in THIS file are resolved by Compose
+# itself, which reads `.env` from the project directory (docker/) and nowhere
+# else. Without --env-file (or a `docker/.env` symlink to ../.env) they
+# silently take their defaults and anything you set for them is ignored.
 #
 # Postgres data is stored in a HOST BIND-MOUNT under appdata
 # (PGDATA_HOST_PATH, default /mnt/user/appdata/ipedro/pgdata) rather than a

@@ -1,22 +1,45 @@
-# Turns an approved /evolve request into a pull request, and merges it on
-# its own only when ipedro/merge_policy.py (main's copy) says it's plain
-# content AND this workflow's own test run passed.
+# Turns an approved /evolve request into a pull request, and merges it on its
+# own only when ALL of these hold: the agent finished cleanly, the test suite
+# passes on exactly the commits being merged (and runs at least as many tests
+# as main's), and ipedro/merge_policy.py (main's copy) says every changed file
+# is plain content that is still just data.
 #
 # The Telegram bot files the issue (the owner's own words plus a hidden
-# marker) with the owner's issues-only token. The coding happens here, in
-# GitHub's sandbox. The agent never holds a GitHub token: it edits, tests
-# and commits locally; the steps after it push, open the PR, and decide.
+# marker) with the owner's issues-only token. Everything after that is three
+# jobs, split so that no code the agent wrote ever runs anywhere that can
+# write to GitHub:
+#
+#   implement   contents: read    Claude Code writes the change and commits it.
+#                                 Holds ANTHROPIC_API_KEY and nothing that can
+#                                 write to GitHub. Hands the commits on as a git
+#                                 bundle, which is data.
+#   verify      contents: read    Runs the test suite on exactly those commits
+#                                 and on main for comparison. This runs the
+#                                 agent's code, so it holds no secrets at all.
+#   publish     contents: write   Never runs a line of the agent's code. Pushes
+#               + issues/PRs      the commits to a fresh branch, opens the PR,
+#                                 asks MAIN's copy of the merge policy whether
+#                                 it may merge, and merges only that commit.
+#
+# Nothing in this file pushes to main: the only branch it creates is
+# dale-request-<issue>-<run>. A fresh branch per run means a re-run can never
+# be confused with an earlier run's pull request.
 #
 # One-time setup, in the repo's Settings:
 #   1. Secrets and variables > Actions > New repository secret:
 #        ANTHROPIC_API_KEY — the coding agent's Anthropic API key.
+#      (The agent runs the Claude Code CLI directly with that key. There is
+#      no GitHub App to install and no OIDC token involved.)
 #   2. Actions > General > Workflow permissions: tick "Allow GitHub Actions
 #      to create and approve pull requests" (needed to open the PR).
-#   3. Branches > protect `main`: require a pull request before merging,
-#      with 0 required approvals (so content-only PRs can still merge on
-#      their own). That rule — not anything in this file — is what stops
-#      anything reaching main without a PR.
+#   3. Recommended, as a second lock: Branches > protect `main` (require a
+#      pull request before merging, 0 required approvals so content-only PRs
+#      can still merge on their own). Nothing here pushes to main, but a rule
+#      costs nothing and covers whatever this file might one day get wrong.
 #   4. General > Pull Requests: tick "Automatically delete head branches".
+#
+# The issue text only ever reaches a shell through `env:`, never by being
+# pasted into a script, so nothing in it can be executed.
 
 name: Dale evolve
 
@@ -35,146 +58,343 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
-      contents: write
-      issues: write
-      pull-requests: write
+      contents: read
+    outputs:
+      changed: ${{ steps.collect.outputs.changed }}
+      clean: ${{ steps.collect.outputs.clean }}
+      head: ${{ steps.collect.outputs.head }}
     env:
-      BRANCH: dale-request-${{ github.event.issue.number }}
       ISSUE: ${{ github.event.issue.number }}
+      BRANCH: dale-request-${{ github.event.issue.number }}-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
-      # Full history so main's copy of the merge policy and the diff against
-      # main are both local; no credentials left in .git/config, so nothing
-      # the agent runs (its tests included) can find a token there.
+      # Full history so the diff against main is local. No credentials are
+      # left in .git/config, so nothing the agent runs can find a token there.
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
-      - name: Git identity for commits
+      # Pinned: this runs with the API key in its environment.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Install the Claude Code CLI
+        run: npm install --global @anthropic-ai/claude-code@2.1.291
+
+      # The branch exists before the agent starts, so the agent never needs
+      # `git checkout` and can't wander onto another one.
+      - name: Start the branch
         run: |
           git config user.name "dale-evolve"
           git config user.email "dale-evolve@users.noreply.github.com"
+          git checkout -b "$BRANCH"
 
-      # The issue text goes in through `with:`, which is never run by a
-      # shell — and this job only runs on the owner's own issues anyway.
+      # The step's env holds the API key and the owner's issue text, and
+      # nothing that can write to GitHub. The CLI also strips the key from
+      # the commands it runs (CLAUDE_CODE_SUBPROCESS_ENV_SCRUB), so the tests
+      # the agent runs can't read it. continue-on-error: whatever the agent
+      # did still gets collected, but a run that didn't finish cleanly can
+      # never merge on its own.
       - name: Implement the request
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: |
-            You're implementing a change request for this repository: a
-            Python Telegram bot (aiogram, Postgres via asyncpg) whose persona
-            is Dale Gribble.
+        id: agent
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          {
+            cat <<'EOF'
+          You're implementing a change request for this repository: a Python
+          Telegram bot (aiogram, Postgres via asyncpg) whose persona is Dale
+          Gribble.
 
-            The request below is GitHub issue #${{ github.event.issue.number }}.
-            Everything above its `---` line is the repo owner's own words:
-            that's the spec.
+          The request below is a GitHub issue. Everything above its `---` line
+          is the repo owner's own words: that's the spec.
 
-            <request>
-            ${{ github.event.issue.title }}
+          <request>
+          EOF
+            printf '%s\n\n%s\n' "$ISSUE_TITLE" "$ISSUE_BODY"
+            cat <<'EOF'
+          </request>
 
-            ${{ github.event.issue.body }}
-            </request>
+          You are already on a new branch. Work on it:
 
-            1. `git checkout -b dale-request-${{ github.event.issue.number }}`
-            2. Make the change. Read the surrounding code and its tests first
-               and follow the conventions already there. Do what the request
-               asks, no more.
-            3. Add or update tests, then run `python -m pytest -q` and fix
-               until the whole suite passes.
-            4. Commit with a message that explains why. Don't push: a later
-               step pushes, opens the pull request, and handles review.
+          1. Make the change. Read the surrounding code and its tests first
+             and follow the conventions already there. Do what the request
+             asks, no more.
+          2. Add or update tests, then run `python -m pytest -q` and fix
+             until the whole suite passes.
+          3. Commit with a message that explains why. Don't push: later steps
+             push, open the pull request, and handle review.
 
-            If the request is unclear, unsafe, or would need credentials or
-            secrets changed, don't guess — make no commits and explain what
-            you need in your final message.
-          claude_args: |
-            --model claude-opus-5-5
-            --max-turns 40
-            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(git checkout -b dale-request-${{ github.event.issue.number }}),Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(python -m pytest:*)"
-            --disallowedTools "WebFetch,WebSearch"
+          If the request is unclear, unsafe, or would need credentials or
+          secrets changed, don't guess — make no commits and explain what
+          you need in your final message.
+          EOF
+          } > "$RUNNER_TEMP/prompt.txt"
+          # --restricted: no project settings files (a PR can't widen its own
+          # successor's permissions) and file tools confined to this checkout.
+          # dontAsk: anything not listed below is refused, not asked about.
+          claude -p --bare --restricted --no-session-persistence \
+            --model claude-opus-5-5 --max-turns 40 --max-budget-usd 10 \
+            --permission-mode dontAsk \
+            --tools "Read,Edit,Write,Glob,Grep,Bash" \
+            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(git add *),Bash(git commit *),Bash(git status),Bash(git status *),Bash(git diff),Bash(git diff *),Bash(git log),Bash(git log *),Bash(python -m pytest),Bash(python -m pytest *)" \
+            --disallowedTools "WebFetch,WebSearch" \
+            < "$RUNNER_TEMP/prompt.txt"
 
-      # Anything the agent changed but didn't commit still belongs in the PR.
+      # Anything the agent changed but didn't commit still belongs in the PR,
+      # for the owner to look at. A commit made this way, or after an agent
+      # that failed or ran out of turns, is "not clean" and never auto-merges:
+      # it's whatever happened to be on disk when the agent stopped.
       - name: Collect the work
         id: collect
         if: always()
+        env:
+          AGENT_OUTCOME: ${{ steps.agent.outcome }}
         run: |
+          clean=true
+          [ "$AGENT_OUTCOME" = "success" ] || clean=false
           if [ -n "$(git status --porcelain)" ]; then
+            clean=false
             git add -A
             git commit -m "Dale request #${ISSUE}: uncommitted changes"
           fi
           if [ "$(git rev-list --count origin/main..HEAD)" -gt 0 ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            git bundle create "$RUNNER_TEMP/work.bundle" origin/main..HEAD
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
+          echo "clean=${clean}" >> "$GITHUB_OUTPUT"
 
-      # Don't take the agent's word for it: re-run the suite on exactly what
-      # gets pushed. Auto-merge keys on THIS result, never the agent's report.
-      - name: Verify
-        id: verify
-        if: always() && steps.collect.outputs.changed == 'true'
+      - uses: actions/upload-artifact@v6
+        if: steps.collect.outputs.changed == 'true'
+        with:
+          name: work
+          path: ${{ runner.temp }}/work.bundle
+          retention-days: 3
+          if-no-files-found: error
+
+  # Don't take the agent's word for it: run the suite on exactly the commits
+  # that will be pushed, and on main, and compare. This job executes the
+  # agent's code, so it has no secrets and a read-only token.
+  verify:
+    needs: implement
+    if: needs.implement.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      passed: ${{ steps.result.outputs.passed }}
+      summary: ${{ steps.result.outputs.summary }}
+    env:
+      HEAD: ${{ needs.implement.outputs.head }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v6
+        with:
+          name: work
+          path: ${{ runner.temp }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Check out main beside the agent's commits
         run: |
-          if python -m pytest -q > "$RUNNER_TEMP/pytest.log" 2>&1; then
-            echo "passed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "passed=false" >> "$GITHUB_OUTPUT"
-          fi
-          tail -n 3 "$RUNNER_TEMP/pytest.log"
+          git fetch "$RUNNER_TEMP/work.bundle" HEAD:refs/heads/candidate
+          test "$(git rev-parse candidate)" = "$HEAD"
+          git worktree add --detach "$RUNNER_TEMP/main" origin/main
+          git checkout --quiet candidate
 
-      - name: Push
-        if: always() && steps.collect.outputs.changed == 'true'
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      # Both runs write a junit report, so the result is read from counts
+      # rather than from one exit status: a suite that quietly ran far fewer
+      # tests than main's (a test file that exits early, a conftest that
+      # deselects) shows up as fewer passes even when it "succeeds".
+      - name: Run the suite on main
+        run: |
+          cd "$RUNNER_TEMP/main"
+          status=0
+          python -m pytest -q -p no:cacheprovider \
+            --junitxml="$RUNNER_TEMP/main.xml" > "$RUNNER_TEMP/main.log" 2>&1 || status=$?
+          echo "$status" > "$RUNNER_TEMP/main.status"
+
+      - name: Run the suite on the agent's commits
+        run: |
+          status=0
+          python -m pytest -q -p no:cacheprovider \
+            --junitxml="$RUNNER_TEMP/head.xml" > "$RUNNER_TEMP/head.log" 2>&1 || status=$?
+          echo "$status" > "$RUNNER_TEMP/head.status"
+
+      - name: Compare
+        id: result
+        run: |
+          python - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+
+          tmp = os.environ["RUNNER_TEMP"]
+
+          def passes(name):
+              """(passed, failed_or_errored, exit status) or None."""
+              try:
+                  root = ET.parse(f"{tmp}/{name}.xml").getroot()
+                  suite = root if root.tag == "testsuite" else root.find("testsuite")
+                  a = suite.attrib
+                  n, bad, skipped = (int(a.get(k, 0)) for k in ("tests", "failures", "skipped"))
+                  bad += int(a.get("errors", 0))
+                  status = int(open(f"{tmp}/{name}.status").read().strip())
+                  return n - bad - skipped, bad, status
+              except Exception:
+                  return None
+
+          head, main = passes("head"), passes("main")
+          ok = bool(
+              head and main
+              and head[2] == 0 and head[1] == 0       # exit status 0, nothing failed
+              and main[0] > 0 and head[0] >= main[0]  # at least as many passes as main
+          )
+          try:
+              summary = open(f"{tmp}/head.log").read().strip().splitlines()[-1][:200]
+          except Exception:
+              summary = "no test output"
+          if head and main:
+              summary += f" (main: {main[0]} passed)"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"passed={'true' if ok else 'false'}\n")
+              out.write("summary=" + summary.replace("\n", " ") + "\n")
+          print("head", head, "main", main, "->", ok)
+          PY
+
+  # The only job that can write to GitHub, and the only one that never runs
+  # anything the agent wrote: it moves commits as data, parses files as text,
+  # and runs main's own policy script.
+  publish:
+    needs: [implement, verify]
+    if: always() && needs.implement.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    env:
+      ISSUE: ${{ github.event.issue.number }}
+      BRANCH: dale-request-${{ github.event.issue.number }}-${{ github.run_id }}-${{ github.run_attempt }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      # The default branch, no `ref:`: this checkout IS main, and the agent's
+      # commits only ever land in a separate worktree below.
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Nothing to publish
+        if: needs.implement.outputs.changed != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          IMPLEMENT_RESULT: ${{ needs.implement.result }}
         run: |
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-            "HEAD:refs/heads/${BRANCH}"
+          gh issue comment "$ISSUE" --body "No pull request: the agent made no changes (the implement job: ${IMPLEMENT_RESULT}). The workflow run has the agent's explanation: ${RUN_URL}"
 
-      - name: Open the PR, judge it, merge or leave it
-        if: always()
+      - uses: actions/download-artifact@v6
+        if: needs.implement.outputs.changed == 'true'
+        with:
+          name: work
+          path: ${{ runner.temp }}
+
+      - name: Push the branch and open the pull request
+        id: pr
+        if: needs.implement.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          HEAD: ${{ needs.implement.outputs.head }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
         run: |
-          if [ "${{ steps.collect.outputs.changed }}" != "true" ]; then
-            gh issue comment "$ISSUE" --body "No changes were made for this request, so there's no pull request. The workflow run's log has the agent's explanation."
-            exit 0
-          fi
-          pr=$(gh pr list --head "$BRANCH" --json url --jq '.[0].url')
-          if [ -z "$pr" ]; then
-            pr=$(gh pr create --base main --head "$BRANCH" \
-              --title "${ISSUE_TITLE}" \
-              --body "Closes #${ISSUE}. Implemented from an /evolve request.")
-          fi
-          summary=$(tail -n 1 "$RUNNER_TEMP/pytest.log")
-          if [ "${{ steps.verify.outputs.passed }}" != "true" ]; then
-            gh pr comment "$pr" --body "Tests FAIL on this branch (checked by the workflow, not the agent): ${summary}. Not merging."
-            exit 0
-          fi
+          set -euo pipefail
+          git fetch "$RUNNER_TEMP/work.bundle" HEAD:refs/heads/candidate
+          test "$(git rev-parse candidate)" = "$HEAD"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "${HEAD}:refs/heads/${BRANCH}"
+          pr=$(gh pr create --base main --head "$BRANCH" \
+            --title "$ISSUE_TITLE" \
+            --body "Closes #${ISSUE}. Implemented from an /evolve request.")
+          echo "url=${pr}" >> "$GITHUB_OUTPUT"
+
+      # Merge only on facts this job established itself or read from jobs that
+      # can't write: the policy is MAIN's copy, applied to the exact commits
+      # that were tested, which are the exact commits on the PR.
+      - name: Judge it, merge or leave it
+        if: needs.implement.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD: ${{ needs.implement.outputs.head }}
+          CLEAN: ${{ needs.implement.outputs.clean }}
+          TESTS_PASSED: ${{ needs.verify.outputs.passed }}
+          TESTS_SUMMARY: ${{ needs.verify.outputs.summary }}
+          PR: ${{ steps.pr.outputs.url }}
+        run: |
+          set -euo pipefail
+          wait_for_owner() { gh pr comment "$PR" --body "$1"; exit 0; }
+
+          [ "$TESTS_PASSED" = "true" ] \
+            || wait_for_owner "Tests did not clear the bar (checked by the workflow, not the agent): ${TESTS_SUMMARY}. Not merging."
+          [ "$CLEAN" = "true" ] \
+            || wait_for_owner "Tests pass (${TESTS_SUMMARY}), but the agent didn't finish cleanly or left uncommitted work behind, so this waits for you."
+          [ "$(gh pr view "$PR" --json headRefOid --jq .headRefOid)" = "$HEAD" ] \
+            || wait_for_owner "Tests pass (${TESTS_SUMMARY}), but the PR no longer points at the commit that was tested, so this waits for you."
+
           # MAIN's copy of the policy, never this branch's: a PR that
-          # loosened the rules must not get to approve itself.
-          if ! git show origin/main:ipedro/merge_policy.py > "$RUNNER_TEMP/merge_policy.py"; then
-            gh pr comment "$pr" --body "Tests pass (${summary}), but main has no merge policy yet, so this waits for you."
-            exit 0
-          fi
-          if git diff --name-only --no-renames origin/main...HEAD \
-              | python "$RUNNER_TEMP/merge_policy.py" > "$RUNNER_TEMP/verdict.txt"; then
+          # loosened the rules must not get to approve itself. The branch's
+          # files are only ever read, as text, from a separate worktree.
+          git show origin/main:ipedro/merge_policy.py > "$RUNNER_TEMP/merge_policy.py" \
+            || wait_for_owner "Tests pass (${TESTS_SUMMARY}), but main has no merge policy yet, so this waits for you."
+          git worktree add --detach "$RUNNER_TEMP/pr" "$HEAD"
+          git diff --raw --no-renames "origin/main...${HEAD}" > "$RUNNER_TEMP/changes.txt"
+          if python3 "$RUNNER_TEMP/merge_policy.py" --root "$RUNNER_TEMP/pr" \
+              < "$RUNNER_TEMP/changes.txt" > "$RUNNER_TEMP/verdict.txt"; then
+            verdict=$(cat "$RUNNER_TEMP/verdict.txt")
             # No --delete-branch: it also cleans up the LOCAL checkout,
             # which can fail without credentials after the merge already
             # succeeded — and would then be misreported as a refusal. Turn
             # on "Automatically delete head branches" in the repo settings.
-            if gh pr merge "$pr" --merge; then
-              gh pr comment "$pr" --body "Merged automatically. Tests pass (${summary}); $(cat "$RUNNER_TEMP/verdict.txt")."
+            # --match-head-commit: GitHub refuses if the branch moved.
+            if gh pr merge "$PR" --merge --match-head-commit "$HEAD"; then
+              gh pr comment "$PR" --body "Merged automatically. Tests pass (${TESTS_SUMMARY}); ${verdict}."
             else
-              gh pr comment "$pr" --body "Eligible to merge on its own ($(cat "$RUNNER_TEMP/verdict.txt")), but GitHub refused the merge, so it waits for you."
+              gh pr comment "$PR" --body "Eligible to merge on its own (${verdict}), but GitHub refused the merge, so it waits for you."
             fi
           else
-            gh pr comment "$pr" --body "Tests pass (${summary}). Waiting for your review: $(cat "$RUNNER_TEMP/verdict.txt")."
+            wait_for_owner "Tests pass (${TESTS_SUMMARY}). Waiting for your review: $(cat "$RUNNER_TEMP/verdict.txt")."
           fi
+
+      # A failed push or PR creation leaves nothing for the owner to see
+      # unless something says so.
+      - name: Say so if publishing failed
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue comment "$ISSUE" --body "The agent's changes couldn't be published as a pull request. The workflow run has the details: ${RUN_URL}"

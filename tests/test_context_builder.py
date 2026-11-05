@@ -708,3 +708,116 @@ async def test_the_style_reminder_stands_down_for_impersonation_too():
         persona_override="IMPERSONATION MODE: you are Luke.",
     )
     assert "Rhythm check" not in _system_text(built)
+
+
+# ── what the token budget leaves out is said out loud ────────────────────────
+
+@pytest.mark.asyncio
+async def test_a_persona_bigger_than_the_budget_is_warned_about_once(caplog):
+    """The budget drops what doesn't fit, and the persona is the first thing in
+    line. A bot that quietly answers with no persona at all is the worst way
+    to find that out, so the log says so, once per chat rather than per reply."""
+    import logging
+
+    s = _settings()
+    s.context_max_tokens = 200
+    big = "You are a very elaborate character. " * 100
+
+    async def go(chat_id):
+        return await build_context(
+            store=FakeStore(recent=[_msg("hi")]), settings=s, chat_id=chat_id,
+            persona="dude", persona_custom=big, latest_user_text="hi",
+        )
+
+    with caplog.at_level(logging.WARNING, logger="ipedro.memory.context_builder"):
+        built = await go(1)
+        await go(1)
+        await go(2)
+
+    assert big not in "\n".join(m["content"] for m in built.messages)
+    warned = [r.getMessage() for r in caplog.records if "persona" in r.getMessage()]
+    assert len(warned) == 2, warned                       # chat 1 once, chat 2 once
+    assert "chat 1" in warned[0] and "CONTEXT_MAX_TOKENS" in warned[0]
+
+
+@pytest.mark.asyncio
+async def test_nothing_is_warned_when_everything_fits(caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="ipedro.memory.context_builder"):
+        await build_context(
+            store=FakeStore(recent=[_msg("hi")]), settings=_settings(), chat_id=1,
+            persona="dude", persona_custom=None, latest_user_text="hi",
+        )
+    assert not caplog.records
+
+
+@pytest.mark.asyncio
+async def test_an_impersonation_turn_asks_for_no_cache_write():
+    """Its persona is a one-off sample of one member's lines, so nothing
+    would ever read the prefix back: the 1h write premium bought nothing."""
+    from ipedro.openai_client import CACHE_BREAKPOINT
+
+    store = FakeStore(recent=[_msg("hi")])
+    normal = await build_context(
+        store=store, settings=_settings(), chat_id=1, persona="dude",
+        persona_custom=None, latest_user_text="hi",
+    )
+    impersonating = await build_context(
+        store=store, settings=_settings(), chat_id=1, persona="dude",
+        persona_custom=None, latest_user_text="hi",
+        persona_override="IMPERSONATION MODE: you are Luke.",
+    )
+    assert any(m.get(CACHE_BREAKPOINT) for m in normal.messages)
+    assert not any(m.get(CACHE_BREAKPOINT) for m in impersonating.messages)
+
+
+# ── the length rule for bots that aren't Dale ────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_the_length_rule_is_only_there_when_asked_for():
+    from ipedro.memory.context_builder import _TERSE_REMINDER, _TERSE_SYSTEM
+
+    store = FakeStore(recent=[_msg("hi")])
+    base = dict(store=store, settings=_settings(), chat_id=1, persona="dude",
+                persona_custom=None, latest_user_text="hi")
+    dale = await build_context(**base)
+    default = await build_context(**base, terse=False)
+    plain = await build_context(**base, terse=True)
+
+    assert _TERSE_SYSTEM not in _system_text(dale)
+    assert _TERSE_REMINDER not in _system_text(dale)
+    # Dale's prompt is byte-for-byte what it was, so his prompt cache holds
+    assert dale.messages == default.messages
+    assert _TERSE_SYSTEM in _system_text(plain)
+    assert _TERSE_REMINDER in _system_text(plain)
+    assert len(plain.messages) == len(dale.messages) + 2
+
+
+@pytest.mark.asyncio
+async def test_the_length_rule_sits_in_the_cached_prefix_and_the_reminder_after_it():
+    from ipedro.memory.context_builder import _TERSE_REMINDER, _TERSE_SYSTEM
+    from ipedro.openai_client import CACHE_BREAKPOINT
+
+    built = await build_context(
+        store=FakeStore(recent=[_msg("hi")]), settings=_settings(), chat_id=1,
+        persona="dude", persona_custom=None, latest_user_text="hi", terse=True,
+    )
+    texts = [m["content"] for m in built.messages]
+    marked = max(i for i, m in enumerate(built.messages) if m.get(CACHE_BREAKPOINT))
+    assert texts.index(_TERSE_SYSTEM) <= marked          # stable, so cached
+    assert texts.index(_TERSE_REMINDER) > marked         # right before generation
+
+
+@pytest.mark.asyncio
+async def test_an_impersonation_turn_gets_no_length_rule_either():
+    from ipedro.memory.context_builder import _TERSE_REMINDER, _TERSE_SYSTEM
+
+    built = await build_context(
+        store=FakeStore(recent=[_msg("act like Luke")]), settings=_settings(),
+        chat_id=1, persona="dude", persona_custom=None,
+        latest_user_text="act like Luke",
+        persona_override="IMPERSONATION MODE: you are Luke.", terse=True,
+    )
+    assert _TERSE_SYSTEM not in _system_text(built)
+    assert _TERSE_REMINDER not in _system_text(built)

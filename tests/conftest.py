@@ -43,6 +43,34 @@ def _no_ambient_dice(monkeypatch):
     # test must not make the next test's message look like a follow-up.
     addressed.reset()
     context_builder.reset_windows()
+    # Name resolution for the public-URL guard (ipedro/net_safety.py): tests
+    # mustn't need a network, and the mock transports use made-up hosts. A
+    # test about the guard itself patches _resolve again.
+    from ipedro import net_safety
+
+    async def _public(host, port):
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(net_safety, "_resolve", _public)
     monkeypatch.setattr(chat, "_REACT_PROBABILITY", 0.0)
     monkeypatch.setattr(chat, "_DALE_GIF_PROBABILITY", 0.0)
     monkeypatch.setattr(chat, "_CREDIT_PROBABILITY", 0.0)
+
+
+@pytest.fixture(autouse=True)
+def _no_leftover_state_between_tests():
+    """Module-level state a test can leave behind and a later one trip over.
+
+    A poll question he asked (ipedro/poll_maker.py) waits three minutes for the
+    asker's answer, and in a DM the asker's NEXT message is the answer: one
+    test's unanswered question would swallow another test's message. The GIF
+    pacing (ipedro/dale_gifs.py, ipedro/gif_reaction.py) is per chat and
+    time-based, so one test's GIF would hold back the next test's.
+    """
+    from ipedro import dale_gifs, gif_reaction, poll_maker
+
+    poll_maker._PENDING.clear()
+    dale_gifs.forget_state()
+    gif_reaction.forget_state()
+    yield
+    poll_maker._PENDING.clear()

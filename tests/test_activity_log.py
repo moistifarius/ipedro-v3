@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from ipedro import gif_reaction
 from ipedro.handlers import chat
 from tests.test_addressed import _mention_rt
 from tests.test_captcha_intercept import _msg, _rt_with
@@ -61,7 +62,7 @@ async def test_automod_text_trigger_logs_itself():
 
 @pytest.mark.asyncio
 async def test_ambient_gif_logs_itself(monkeypatch):
-    monkeypatch.setattr(chat.dale, "send_random", AsyncMock(return_value=True))
+    monkeypatch.setattr(gif_reaction, "ambient", AsyncMock(return_value=True))
     monkeypatch.setattr(chat, "_DALE_GIF_PROBABILITY", 1.0)
     monkeypatch.setattr(chat, "_REACT_PROBABILITY", 0.0)
     rt = _rt()
@@ -89,6 +90,21 @@ async def test_credit_line_logs_itself_distinctly_from_no_reply(monkeypatch):
     rt.activity.log.assert_awaited_once()
     args = rt.activity.log.await_args.args
     assert args[1] == "credit_line"
+
+
+@pytest.mark.asyncio
+async def test_a_model_that_returns_nothing_is_logged_not_silent(monkeypatch):
+    """A rejected model setting makes every reply a swallowed error. It
+    used to leave no trace at all: 'why didn't he answer?' had no answer."""
+    rt = _mention_rt(monkeypatch)
+    rt.openai.chat = AsyncMock(return_value=None)
+    msg = _msg(text="dale what do you think")
+    await _handler(rt)(msg)
+    rt.activity.log.assert_awaited_once()
+    args = rt.activity.log.await_args.args
+    assert args[1] == "no_reply"
+    assert args[2].startswith("model returned nothing")
+    msg.answer.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -139,3 +155,26 @@ async def test_activity_log_failure_never_breaks_the_handler(monkeypatch):
     msg = _msg(text="thanks dale appreciate it")
     await _handler(rt)(msg)  # must not raise
     msg.reply.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_canned_bit_still_gives_summarization_its_turn(monkeypatch):
+    """The automod exit recorded the message and returned without it, unlike
+    every other exit that skips the model: a long run of canned bits let the
+    chat grow past its trigger unsummarized."""
+    summarized = AsyncMock()
+    monkeypatch.setattr(chat, "maybe_summarize", summarized)
+    rt = _rt()
+    rt.chats.get_config.return_value.memory_enabled = True
+    rt.memory.record_message = AsyncMock()
+    await _handler(rt)(_msg(text="thats gay"))
+    summarized.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_summarizer_failure_after_a_canned_bit_goes_unnoticed_by_the_chat(monkeypatch):
+    monkeypatch.setattr(chat, "maybe_summarize", AsyncMock(side_effect=RuntimeError("model down")))
+    rt = _rt()
+    rt.chats.get_config.return_value.memory_enabled = True
+    rt.memory.record_message = AsyncMock()
+    await _handler(rt)(_msg(text="thats gay"))          # must not raise

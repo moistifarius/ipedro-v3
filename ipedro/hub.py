@@ -15,6 +15,8 @@ whenever they're addressed will happily address each other forever, so:
   speaking on its own), parent + 1 when it was answering another bot.
   Nothing answers a post at MAX_DEPTH, so one human line sets off at
   most MAX_DEPTH bot-to-bot replies, however many bots there are.
+* Hub-wide, a chat gets one bot-to-bot reply per CHAT_GAP_SECONDS, claimed
+  atomically in Postgres, so N bots hearing one post produce one answer.
 * Each bot leaves MIN_GAP_SECONDS between its own bot-triggered replies
   in a chat, so even a legal chain can't machine-gun the room.
 * A human's /shutup on a bot holds here too, and a commands-only chat
@@ -28,14 +30,39 @@ import logging
 import time
 from dataclasses import dataclass
 
+from ipedro import vision
+from ipedro.chat_policy import IncomingMessage, should_respond
+
 log = logging.getLogger(__name__)
 
 CHANNEL = "bot_posts"
-MAX_DEPTH = 3
+# A listening connection mostly waits, but its keepalive ("SELECT 1") is a
+# command, and with no timeout a silently dropped connection stalled that
+# probe for the kernel's TCP timeout (many minutes) instead of seconds.
+_LISTEN_COMMAND_TIMEOUT = 15.0
+MAX_DEPTH = 2
 MIN_GAP_SECONDS = 20.0
+# Hub-wide: across ALL bots, a chat gets at most one bot-to-bot reply per
+# this many seconds. The per-bot gap above can't stop a loop by itself —
+# every bot hears a post at the same instant, so with N bots one post
+# drew N replies, and each of those drew N more.
+CHAT_GAP_SECONDS = 90.0
 _KEEPALIVE_SECONDS = 30.0
+_POLL_SECONDS = 1.0            # how often the listen loop looks up from the queue
 _PRUNE_EVERY_SECONDS = 3600.0
 _TEXT_MAX = 4096
+_MAX_CONCURRENT_POSTS = 4      # handlers running at once; the rest queue
+# Supergroups and channels have ids of the form -100<digits>, i.e. at or
+# below this. Only there is a message id the same number for every member;
+# in a basic group each account numbers its own messages.
+_SUPERGROUP_MAX_ID = -1_000_000_000_000
+
+
+def shares_message_ids(chat_id: int) -> bool:
+    """Is a message id in this chat the same for every bot in it? True in
+    supergroups and channels; in a basic group another bot's message_id is
+    from its own sequence and can collide with ours."""
+    return chat_id <= _SUPERGROUP_MAX_ID
 
 
 @dataclass(frozen=True)
@@ -58,6 +85,12 @@ class Post:
             bot_name=r["bot_name"], text=r["text"],
             reply_to_user_id=r["reply_to_user_id"], depth=r["depth"],
         )
+
+
+async def _connect_listener(dsn: str):
+    import asyncpg
+
+    return await asyncpg.connect(dsn, command_timeout=_LISTEN_COMMAND_TIMEOUT)
 
 
 class Hub:
@@ -98,6 +131,27 @@ class Hub:
         last = self._last_bot_reply.get(chat_id)
         return last is None or now - last >= MIN_GAP_SECONDS
 
+    async def claim_chat(self, chat_id: int) -> bool:
+        """Win the right to answer a bot in this chat, hub-wide. One atomic
+        upsert, so when several bots hear the same post only one wins.
+        Fails closed: if the claim can't be made, nobody answers."""
+        try:
+            won = await self.db.fetchval(
+                """
+                INSERT INTO hub_chat_claims (chat_id, claimed_at)
+                VALUES ($1, NOW())
+                ON CONFLICT (chat_id) DO UPDATE SET claimed_at = NOW()
+                WHERE hub_chat_claims.claimed_at
+                      < NOW() - make_interval(secs => $2)
+                RETURNING 1
+                """,
+                chat_id, CHAT_GAP_SECONDS,
+            )
+        except Exception as exc:
+            log.info("hub: couldn't claim %s (%s); not answering", chat_id, exc)
+            return False
+        return won is not None
+
     def answered(self, chat_id: int, *, now: float | None = None) -> None:
         self._last_bot_reply[chat_id] = time.monotonic() if now is None else now
 
@@ -112,8 +166,7 @@ class Hub:
         with backoff; posts that land while disconnected are missed, which
         only means a bot didn't hear a line."""
         if connect is None:
-            import asyncpg
-            connect = asyncpg.connect
+            connect = _connect_listener
         backoff = 1.0
         last_prune = 0.0
         while not stop.is_set():
@@ -125,12 +178,27 @@ class Hub:
                 backoff = min(backoff * 2, 60.0)
                 continue
             queue: asyncio.Queue[str] = asyncio.Queue()
-            await conn.add_listener(
-                CHANNEL, lambda _c, _pid, _ch, payload: queue.put_nowait(payload),
-            )
-            backoff = 1.0
             idle = 0.0
+            # Handlers run as tasks, not inline: a reply is several seconds
+            # of model call, and awaiting one here froze delivery of every
+            # other post and the keepalive below until it finished.
+            gate = asyncio.Semaphore(_MAX_CONCURRENT_POSTS)
+            running: set[asyncio.Task] = set()
+
+            async def _handle(payload: str) -> None:
+                async with gate:
+                    await self._deliver(payload, on_post)
+
             try:
+                # Inside the try: a failure here (LISTEN refused, the
+                # connection dropping right after connect) used to escape
+                # this loop and end the hub for the life of the process,
+                # leaking the connection.
+                await conn.add_listener(
+                    CHANNEL,
+                    lambda _c, _pid, _ch, payload: queue.put_nowait(payload),
+                )
+                backoff = 1.0
                 while not stop.is_set():
                     if prune and time.monotonic() - last_prune >= _PRUNE_EVERY_SECONDS:
                         last_prune = time.monotonic()
@@ -139,18 +207,26 @@ class Hub:
                         except Exception as exc:
                             log.info("hub: prune failed: %s", exc)
                     try:
-                        payload = await asyncio.wait_for(queue.get(), 5.0)
+                        payload = await asyncio.wait_for(queue.get(), _POLL_SECONDS)
                     except asyncio.TimeoutError:
-                        idle += 5.0
+                        idle += _POLL_SECONDS
                         if idle >= _KEEPALIVE_SECONDS:
                             idle = 0.0
                             await conn.execute("SELECT 1")   # raises if it's gone
                         continue
                     idle = 0.0
-                    await self._deliver(payload, on_post)
+                    task = asyncio.create_task(_handle(payload), name="hub-post")
+                    running.add(task)
+                    task.add_done_callback(running.discard)
             except Exception as exc:
                 log.info("hub: listener dropped (%s); reconnecting", exc)
+                await _sleep(stop, backoff)
+                backoff = min(backoff * 2, 60.0)
             finally:
+                for task in running:
+                    task.cancel()
+                if running:
+                    await asyncio.gather(*running, return_exceptions=True)
                 try:
                     await conn.close()
                 except Exception:
@@ -219,6 +295,24 @@ def publish_soon(
 
 # ── hearing another bot ──────────────────────────────────────────────────────
 
+# Chats Telegram told us we can't post in (kicked, or the chat is gone), and
+# until when. A chat keeps its config row after the bot is removed, so without
+# this every line another bot says there that names this one would pay for a
+# model call and then fail to send, for as long as the other bot stays.
+_LEFT_FOR_SECONDS = 3600.0
+_left_until: dict[int, float] = {}
+
+
+def _has_left(chat_id: int) -> bool:
+    until = _left_until.get(chat_id)
+    if until is None:
+        return False
+    if time.monotonic() >= until:
+        del _left_until[chat_id]
+        return False
+    return True
+
+
 def _addressed(post: Post, hub: Hub, ident) -> bool:
     return (
         post.reply_to_user_id == hub.bot_id
@@ -235,27 +329,48 @@ async def handle_post(rt, ident, hub: Hub, post: Post) -> None:
     from ipedro.memory.context_builder import build_context
     from ipedro.user_flags import has_flag
 
+    if _has_left(post.chat_id):
+        return
     cfg = await rt.chats.get_config(post.chat_id)
     if cfg is None:
         return                      # not a chat this bot has ever been in
     await rt.users.upsert_user(
         post.bot_id, post.bot_username or None, post.bot_name, None, True,
     )
+    shared_ids = shares_message_ids(post.chat_id)
     if cfg.memory_enabled:
         await rt.memory.record_message(
             chat_id=post.chat_id, role="user", content=post.text,
-            message_id=post.message_id, user_id=post.bot_id,
+            # The other bot's id is only a valid key here when ids are
+            # shared (supergroups). In a basic group it's from that bot's
+            # own sequence and collides with a real message of ours, whose
+            # row the dedupe then kept and whose embedding we overwrote.
+            message_id=post.message_id if shared_ids else None,
+            user_id=post.bot_id,
         )
 
+    named = ident.name_re.search(post.text) is not None
+    replied = post.reply_to_user_id == hub.bot_id
     if (
         post.depth >= MAX_DEPTH
-        or cfg.response_policy == "commands"
-        or not _addressed(post, hub, ident)
+        or not (named or replied)
+        # The chat's own rule decides whether being named or replied to is
+        # enough ('commands' never; 'reply' only a reply; and so on).
+        or not should_respond(
+            cfg.response_policy,
+            IncomingMessage(
+                text=post.text, has_mention_of_bot=named, is_reply_to_bot=replied,
+                is_command=False, chat_type="supergroup",
+            ),
+        )
         or not hub.may_answer(post.chat_id)
         or await has_flag(rt.db, post.chat_id, post.bot_id, "shutup")
+        # Last, because it spends the chat's one slot: only one bot, of all
+        # that heard this, gets to answer.
+        or not await hub.claim_chat(post.chat_id)
     ):
         return
-    hub.answered(post.chat_id)      # claim the slot before the slow part
+    hub.answered(post.chat_id)     # claim the slot before the slow part
 
     ctx = await build_context(
         store=rt.memory, settings=rt.settings, chat_id=post.chat_id,
@@ -263,19 +378,38 @@ async def handle_post(rt, ident, hub: Hub, post: Post) -> None:
         latest_user_text=post.text, latest_user_name=post.bot_name,
         extra_system=None, memory_enabled=cfg.memory_enabled,
         persona_override=None,
-        capabilities=capability_brief(cfg, dale_flavor=ident.dale_flavor),
+        capabilities=capability_brief(
+            cfg, dale_flavor=ident.dale_flavor,
+            # Said only where videos really are watched, like the chat path.
+            **({"video": True} if (
+                getattr(cfg, "vision_enabled", False) and vision.watching(rt)
+            ) else {}),
+        ),
+        terse=ident.terse,
     )
-    reply = await rt.openai.chat(ctx.messages, max_tokens=300, chat_id=post.chat_id)
+    reply = await rt.openai.chat(
+        ctx.messages, max_tokens=ident.hub_reply_tokens, chat_id=post.chat_id,
+    )
     if not reply or not reply.strip():
         return
+    from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
     from aiogram.types import ReplyParameters
-    sent = await rt.bot.send_message(
-        post.chat_id, reply,
-        reply_parameters=ReplyParameters(
+    kwargs = {}
+    if shared_ids:                  # else it would quote the wrong message
+        kwargs["reply_parameters"] = ReplyParameters(
             message_id=post.message_id, allow_sending_without_reply=True,
-        ),
-        disable_notification=True,
-    )
+        )
+    try:
+        sent = await rt.bot.send_message(
+            post.chat_id, reply, disable_notification=True, **kwargs,
+        )
+    except (TelegramForbiddenError, TelegramBadRequest) as exc:
+        # Removed from the chat, or it's gone: nothing to answer into. Stop
+        # spending model calls on it for a while.
+        log.info("hub: can't answer in %s: %s", post.chat_id, exc)
+        if isinstance(exc, TelegramForbiddenError) or "chat not found" in str(exc).lower():
+            _left_until[post.chat_id] = time.monotonic() + _LEFT_FOR_SECONDS
+        return
     track(
         post.chat_id, sent.message_id, reply,
         replied_to_user_id=post.bot_id, hub_depth=post.depth + 1,
@@ -291,8 +425,8 @@ async def handle_post(rt, ident, hub: Hub, post: Post) -> None:
             f"answered {post.bot_name} (another bot, depth {post.depth})",
             message_id=sent.message_id,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("hub: couldn't log the answer in %s: %s", post.chat_id, exc)
 
 
 async def run(rt, settings, stop: asyncio.Event) -> None:
@@ -301,12 +435,28 @@ async def run(rt, settings, stop: asyncio.Event) -> None:
     from ipedro.db.pool import Database
 
     dsn = settings.hub_database_url or settings.database_url
-    try:
-        db = await Database.connect(dsn, min_size=1, max_size=2)
-        me = await rt.bot.me()
-    except Exception as exc:
-        log.warning("hub: not joining (%s); bots won't hear this one", exc)
-        return
+    # Retry rather than give up: one hiccup at startup (Postgres still
+    # coming up, a slow getMe) used to leave this bot deaf and mute on the
+    # hub until its next restart, with the rest of it running fine.
+    backoff = 1.0
+    db = me = None
+    while not stop.is_set():
+        try:
+            # One pooled connection: this side only publishes, which is
+            # rare. Every bot holds a pool, this, and the listener, against
+            # one Postgres (see docs/DEPLOY.md on max_connections).
+            db = await Database.connect(dsn, min_size=1, max_size=1)
+            me = await rt.bot.me()
+            break
+        except Exception as exc:
+            log.warning("hub: not joined yet (%s); retrying in %ss", exc, backoff)
+            if db is not None:
+                await db.close()
+                db = None
+            await _sleep(stop, backoff)
+            backoff = min(backoff * 2, 60.0)
+    if db is None or me is None:
+        return                      # asked to stop before it could join
     ident = identity.from_settings(settings)
     hub = Hub(db, bot_id=me.id, bot_username=me.username or "",
               bot_name=ident.name)

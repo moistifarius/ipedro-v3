@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
 import time
+import weakref
 from collections import deque
 
 from aiogram import F, Router
@@ -13,17 +15,21 @@ from aiogram.types import BufferedInputFile, Message
 
 from ipedro.bot_messages import track
 from ipedro.duckhunt.captcha_gen import make_captcha
+from ipedro.duckhunt.captcha_gen import matches as captcha_matches
 from ipedro.duckhunt.debug_toggles import is_on as debug_is_on
 from ipedro.duckhunt.scoring import (
-    challenge_time_limit_seconds, should_challenge_on_miss,
+    challenge_is_over_time, challenge_time_limit_seconds,
+    should_challenge_on_miss,
 )
 from ipedro.duckhunt.spawner import build_quack_message_for
 from ipedro.duckhunt.verdicts import parse_verdict
-from ipedro.handlers.common import display_name, get_or_create_chat_config
+from ipedro.handlers.common import display_name, get_or_create_chat_config, over_limit
 from ipedro.prompts import (
-    DUCK_BEF_CHALLENGE_PROMPT, DUCK_BEF_DECIDE_PROMPT,
+    DUCK_BEF_CHALLENGE_JUDGE_PROMPT, DUCK_BEF_CHALLENGE_PROMPT,
+    DUCK_BEF_DECIDE_PROMPT, DUCK_STEAL_JUDGE_PROMPT,
 )
 from ipedro.runtime import Runtime
+from ipedro.user_flags import has_flag
 
 log = logging.getLogger(__name__)
 
@@ -283,8 +289,13 @@ async def _issue_bef_challenge(
     rt: Runtime, msg: Message, who: str, *,
     from_action: str = "bef",
     force_kind: str | None = None,
+    duck_id: int | None = None,
 ) -> bool:
     """Generate a captcha/trivia/recipe challenge and store it as pending.
+
+    ``duck_id`` is the duck it is issued over: it is what lets another
+    player who answers first take that duck (see attempt_steal). Left out,
+    as the admin's forced challenges do, the challenge has nothing to steal.
 
     Captcha is a real image captcha rendered server-side; the stored
     `challenge` text IS the answer (judged by exact match later). Trivia
@@ -315,6 +326,7 @@ async def _issue_bef_challenge(
             return False
         await rt.duckhunt.set_bef_challenge(
             msg.chat.id, msg.from_user.id, answer, kind, prompt_msg.message_id,
+            duck_id=duck_id,
         )
         return True
 
@@ -344,9 +356,214 @@ async def _issue_bef_challenge(
     )
     await rt.duckhunt.set_bef_challenge(
         msg.chat.id, msg.from_user.id, challenge_text, kind,
-        prompt_msg.message_id,
+        prompt_msg.message_id, duck_id=duck_id,
     )
     return True
+
+
+async def judge_challenge(
+    rt: Runtime, challenge, answer: str, *, strict: bool = False,
+) -> tuple[bool | None, str | None]:
+    """Is `answer` right for this challenge? (verdict, optional flavor line).
+    A captcha is an exact match; trivia and recipe go to the cheap model, and
+    a verdict of None means it couldn't say. The owner clearing their own
+    gate is judged generously; `strict` is for taking someone else's duck."""
+    if challenge.kind == "captcha":
+        return captcha_matches(challenge.challenge, answer), None
+    prompt = DUCK_STEAL_JUDGE_PROMPT if strict else DUCK_BEF_CHALLENGE_JUDGE_PROMPT
+    ai_text = await rt.openai.cheap_chat(
+        [{
+            "role": "user",
+            "content": prompt.format(
+                challenge=challenge.challenge, answer=answer,
+            ),
+        }],
+        max_tokens=120, temperature=1.0,
+    )
+    return parse_verdict(ai_text, "PASS", "FAIL")
+
+
+# One at a time per challenge, in the order the answers ARRIVED. Judging takes
+# a model call of a second or two, so without this the winner was whichever
+# judge call happened to finish first: an owner who answered first could lose
+# to a thief whose answer was judged quicker. Both the owner's own path
+# (handlers/chat.py) and attempt_steal hold this around judge-then-claim;
+# asyncio.Lock wakes its waiters in order. Weakly held, so an idle challenge's
+# lock goes away on its own.
+_challenge_locks: "weakref.WeakValueDictionary[tuple[int, int], asyncio.Lock]" = (
+    weakref.WeakValueDictionary()
+)
+
+
+def challenge_lock(chat_id: int, owner_id: int) -> asyncio.Lock:
+    key = (chat_id, owner_id)
+    lock = _challenge_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _challenge_locks[key] = lock
+    return lock
+
+
+# ── stealing a duck by answering someone else's challenge ────────────────────
+#
+# When a bef is refused (or a bang spooks the duck) the shooter gets a
+# challenge to clear before trying again, and the duck stays where it is.
+# Anyone else may reply to that prompt and answer it: the first correct
+# answer, while the owner's clock is still running, takes the duck. The owner
+# is gated, so they can't answer for it in the meantime; this is what makes
+# the challenge a race and not a private lock.
+#
+# Only a REPLY to the prompt counts for anyone but its owner. Plain chatter
+# is never judged as somebody's answer (that would put a model call behind
+# every message in a busy chat), and a few tries each keeps a wrong-answer
+# volley from running up the bill.
+STEAL_TRIES = 3
+_steal_tries: dict[tuple[int, int, int], int] = {}
+
+
+def _spend_steal_try(chat_id: int, prompt_id: int | None, user_id: int) -> bool:
+    """Count one try at this challenge; False once they've used their few."""
+    if len(_steal_tries) > 2000:
+        _steal_tries.clear()          # a restart-sized reset, not a leak
+    key = (chat_id, prompt_id or 0, user_id)
+    used = _steal_tries.get(key, 0)
+    if used >= STEAL_TRIES:
+        return False
+    _steal_tries[key] = used + 1
+    return True
+
+
+def _refund_steal_try(chat_id: int, prompt_id: int | None, user_id: int) -> None:
+    key = (chat_id, prompt_id or 0, user_id)
+    if _steal_tries.get(key):
+        _steal_tries[key] -= 1
+
+
+async def _name_of(rt: Runtime, user_id: int) -> str:
+    try:
+        name = await rt.db.fetchval(
+            "SELECT COALESCE(NULLIF(TRIM(CONCAT_WS(' ', first_name, last_name)), ''), "
+            "       username) FROM users WHERE user_id = $1",
+            user_id,
+        )
+    except Exception:
+        name = None
+    return (name or "").strip()[:40] or "the other player"
+
+
+async def attempt_steal(rt: Runtime, msg: Message, challenge) -> bool:
+    """`msg` replies to somebody else's open challenge. True when this
+    message was a try at it (and so is handled); False when it was ordinary
+    chatter that should carry on through the normal handlers."""
+    thief = msg.from_user
+    if thief is None or thief.is_bot or thief.id == challenge.user_id:
+        return False
+    chat_id = msg.chat.id
+    # Their clock is the window. After it, nobody can take the duck through
+    # this challenge, and a reply to it is just a reply.
+    if challenge_is_over_time(challenge.kind, challenge.created_at):
+        return False
+    if await has_flag(rt.db, chat_id, thief.id, "shutup"):
+        return False
+    if await rt.duckhunt.stealable_duck(challenge) is None:
+        return False
+
+    # Taking a duck is a duck action: the same gate and the same cooldown.
+    # A challenge of their own that has already run out of time is no gate.
+    own = await rt.duckhunt.get_bef_challenge(chat_id, thief.id)
+    if own is not None:
+        if challenge_is_over_time(own.kind, own.created_at):
+            await rt.duckhunt.clear_bef_challenge(chat_id, thief.id)
+        else:
+            await msg.reply(
+                "Solve your own challenge first (reply to the prompt above).",
+                disable_notification=True,
+            )
+            return True
+    if not debug_is_on(thief.id, "bypass_cooldowns") and not await rt.duckhunt.cooldown_ok(
+        chat_id, thief.id, rt.settings.duckhunt_action_cooldown_seconds,
+    ):
+        await msg.reply(_cooldown_line(), disable_notification=True)
+        return True
+    if not _spend_steal_try(chat_id, challenge.prompt_message_id, thief.id):
+        await msg.reply(
+            "You've had your tries at that one.", disable_notification=True,
+        )
+        return True
+
+    answer = (msg.text or msg.caption or "").strip()
+    async with challenge_lock(chat_id, challenge.user_id):
+        # Whoever got here first has been judged first. If that settled it
+        # (the owner passed, or another thief won), or the clock ran out
+        # while this waited, there is nothing left to take.
+        if challenge_is_over_time(challenge.kind, challenge.created_at):
+            _refund_steal_try(chat_id, challenge.prompt_message_id, thief.id)
+            return False
+        current = await rt.duckhunt.get_bef_challenge(chat_id, challenge.user_id)
+        if (
+            current is None
+            or current.prompt_message_id != challenge.prompt_message_id
+        ):
+            _refund_steal_try(chat_id, challenge.prompt_message_id, thief.id)
+            await msg.reply(
+                "Too late: that challenge is already closed.",
+                disable_notification=True,
+            )
+            return True
+        verdict, _ = await judge_challenge(rt, challenge, answer, strict=True)
+        if verdict is None:
+            _refund_steal_try(chat_id, challenge.prompt_message_id, thief.id)
+            await msg.reply(
+                "Couldn't judge that one. Try again.", disable_notification=True,
+            )
+            return True
+        if verdict is False:
+            # Not the judge's own line: it is read by everyone still racing.
+            await msg.reply("Not quite.", disable_notification=True)
+            return True
+        who = display_name(thief)
+        result = await rt.duckhunt.handle_steal(
+            challenge=challenge, thief_id=thief.id, thief_name=who, ai_line=None,
+        )
+    if result.status == "too_late":
+        await msg.reply(
+            "Too late: that challenge is already closed.",
+            disable_notification=True,
+        )
+        return True
+    if result.status != "stolen":
+        await msg.reply(
+            "That duck's already gone.", disable_notification=True,
+        )
+        return True
+
+    victim = await _name_of(rt, challenge.user_id)
+    announce = (
+        f"🦆 {who} got the answer in first, so {victim}'s duck is {who}'s "
+        f"now. +{result.outcome.points_delta}"
+    )
+    sent = await msg.reply(announce, disable_notification=True)
+    track(chat_id, sent.message_id, announce)
+    try:
+        total = await rt.duckhunt.friend_count(chat_id, thief.id)
+        follow_up = _bef_celebration_message(result.duck.id, total)
+        named = await msg.answer(follow_up, disable_notification=True)
+        track(chat_id, named.message_id, follow_up)
+        _register_pending_name(chat_id, named.message_id, thief.id, result.duck.id)
+    except Exception as exc:
+        log.warning("steal follow-up failed: %s", exc)
+    return True
+
+
+_MAX_NAMES_PAGE = 10_000
+_DUCK_NAME_MAX = 60
+
+
+def _clean_duck_name(raw: str) -> str:
+    """A name is one short line. /ducknames lists names from every chat as
+    "  • <name> — <owner>", so a name with a newline could forge a line of
+    someone else's."""
+    return " ".join((raw or "").split())[:_DUCK_NAME_MAX]
 
 
 def build_router(rt: Runtime) -> Router:
@@ -368,6 +585,8 @@ def build_router(rt: Runtime) -> Router:
                 disable_notification=True,
             )
             return
+        if await over_limit(rt, msg, "duck"):
+            return
         duck = await rt.duckhunt.spawn_duck(
             msg.chat.id, rt.settings.duckhunt_duck_lifetime_seconds,
         )
@@ -375,10 +594,14 @@ def build_router(rt: Runtime) -> Router:
             "Manual spawn in chat %s by user %s -> duck_id=%s",
             msg.chat.id, msg.from_user.id if msg.from_user else None, duck.id,
         )
-        await msg.answer(
-            await build_quack_message_for(rt.openai, duck),
-            disable_notification=True,
-        )
+        try:
+            await msg.answer(
+                await build_quack_message_for(rt.openai, duck),
+                disable_notification=True,
+            )
+        except Exception:
+            await rt.duckhunt.retire_unannounced(duck.id)     # nobody saw it
+            raise
 
     @r.message(Command("quackflag"))
     async def quackflag(msg: Message) -> None:
@@ -450,7 +673,9 @@ def build_router(rt: Runtime) -> Router:
         parts = (msg.text or "").split()
         if len(parts) >= 2:
             try:
-                page = max(1, int(parts[1]))
+                # Capped: OFFSET beyond int64 is a Postgres error, and no
+                # list has a million pages anyway ("past the end" says so).
+                page = min(max(1, int(parts[1])), _MAX_NAMES_PAGE)
             except ValueError:
                 pass
         per_page = 100
@@ -528,7 +753,10 @@ def build_router(rt: Runtime) -> Router:
         except ValueError:
             await msg.reply("Bad duck id.", disable_notification=True)
             return
-        name = parts[2].strip()[:60]
+        name = _clean_duck_name(parts[2])
+        if not name:
+            await msg.reply("Give it a name.", disable_notification=True)
+            return
         ok = await rt.duckhunt.name_duck(
             msg.chat.id, msg.from_user.id, duck_id, name,
         )
@@ -585,13 +813,13 @@ def build_router(rt: Runtime) -> Router:
                 forced = True
             elif debug_is_on(admin_id, "always_miss"):
                 forced = False
-            outcome, _ = await rt.duckhunt.handle_bang(
+            outcome, shot_at = await rt.duckhunt.handle_bang(
                 chat_id=msg.chat.id, user_id=msg.from_user.id,
                 display_name=display_name(msg.from_user),
                 forced_success=forced,
             )
         else:
-            outcome, _ = await rt.duckhunt.handle_ignore(
+            outcome, shot_at = await rt.duckhunt.handle_ignore(
                 chat_id=msg.chat.id, user_id=msg.from_user.id,
                 display_name=display_name(msg.from_user),
             )
@@ -621,6 +849,7 @@ def build_router(rt: Runtime) -> Router:
             await _issue_bef_challenge(
                 rt, msg, display_name(msg.from_user),
                 from_action="bang_miss",
+                duck_id=getattr(shot_at, "id", None),
             )
 
     @r.message(F.text.lower() == "bef")
@@ -675,7 +904,9 @@ def build_router(rt: Runtime) -> Router:
             who = display_name(msg.from_user)
             # Cooldown branch — reuse the bef flavor pool, not the
             # bang_miss one (still a bef attempt the user fired).
-            issued = await _issue_bef_challenge(rt, msg, who, from_action="bef")
+            issued = await _issue_bef_challenge(
+                rt, msg, who, from_action="bef", duck_id=duck.id,
+            )
             if not issued:
                 await msg.reply(_cooldown_line(), disable_notification=True)
             return
@@ -755,7 +986,9 @@ def build_router(rt: Runtime) -> Router:
         # retrying. The challenge's own intro carries the refusal flavor
         # (we suppressed outcome.message above to avoid the duplicate).
         if not outcome.success:
-            await _issue_bef_challenge(rt, msg, who, from_action="bef")
+            await _issue_bef_challenge(
+                rt, msg, who, from_action="bef", duck_id=duck.id,
+            )
 
     @r.message(_is_naming_reply)
     async def name_on_reply(msg: Message) -> None:
@@ -772,7 +1005,9 @@ def build_router(rt: Runtime) -> Router:
         if entry is None:
             return  # raced with another reply; safe to drop
         _user_id, duck_id, _ts = entry
-        name = (msg.text or msg.caption or "").strip()[:60]
+        name = _clean_duck_name(msg.text or msg.caption or "")
+        if not name:
+            return
         ok = await rt.duckhunt.name_duck(
             msg.chat.id, msg.from_user.id, duck_id, name,
         )

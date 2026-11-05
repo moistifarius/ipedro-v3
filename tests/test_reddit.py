@@ -680,3 +680,68 @@ async def test_download_media_returns_the_real_result_within_budget(monkeypatch)
     monkeypatch.setattr(reddit_module, "_download_media", fast)
     media = Media(kind="photo", url="https://i.redd.it/x.jpg")
     assert await reddit_module.download_media(media) == b"the bytes"
+
+
+@pytest.mark.asyncio
+async def test_the_mux_does_its_file_io_off_the_event_loop(monkeypatch):
+    """Up to 64 MB written and read back synchronously stalled every chat."""
+    import asyncio
+    import threading
+
+    from ipedro import reddit
+
+    main = threading.get_ident()
+    seen: dict[str, int] = {}
+    real_write, real_read = reddit._write_temp, reddit._read_file
+
+    def write(data):
+        seen["write"] = threading.get_ident()
+        return real_write(data)
+
+    def read(path):
+        seen["read"] = threading.get_ident()
+        return real_read(path)
+
+    class Proc:
+        returncode = 0
+
+        async def wait(self):
+            return 0
+
+    async def fake_exec(*cmd, **kw):
+        open(cmd[-1], "wb").write(b"muxed")                    # ffmpeg's output file
+        return Proc()
+
+    monkeypatch.setattr(reddit, "_write_temp", write)
+    monkeypatch.setattr(reddit, "_read_file", read)
+    monkeypatch.setattr(reddit, "ffmpeg_available", lambda: True)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    assert await reddit._mux(b"video", b"audio") == b"muxed"
+    assert seen["write"] != main and seen["read"] != main
+
+
+# ── talk ABOUT memes is not a request for one ────────────────────────────────
+
+@pytest.mark.parametrize("text", [
+    "I want a meme-free zone in here",           # 'meme' as half of a hyphenated word
+    "lol, send memes to the group later",        # a topic-less ask that goes on
+    "we need some memes in the wiki",
+    "send memes to the group",
+    "memes are ruining this chat",
+])
+def test_talking_about_memes_is_not_a_request_for_one(text):
+    from ipedro.reddit import detect_meme_request
+
+    assert detect_meme_request(text) is None
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("gimme a meme", ""), ("gimme a meme please", ""), ("dale, gimme a meme", ""),
+    ("post a meme, dale", ""), ("give me a meme lol", ""), ("i want a meme", ""),
+    ("hey gimme a meme about cats", "cats"),
+    ("that was wild. get a meme about it later maybe", ""),   # filler peeled: "about it"
+])
+def test_a_real_ask_with_nothing_after_it_still_is_one(text, expected):
+    from ipedro.reddit import detect_meme_request
+
+    assert detect_meme_request(text) == expected

@@ -57,6 +57,30 @@ async def test_chat_returns_stripped_content(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("finish, expected", [
+    ("length", "First point made. Second point made in full."),   # cut at the cap
+    ("stop", "First point made. Second point made in full. And the third poi"),
+])
+async def test_a_reply_the_cap_cut_off_is_trimmed_to_its_last_sentence(
+    finish, expected, monkeypatch,
+):
+    """The same rule the Claude path has: nothing posts stopping mid-word."""
+    client = OpenAIClient(api_key="x", text_provider="openai")
+    ns = _FakeChatNamespace(
+        "First point made. Second point made in full. And the third poi")
+    real = ns._Completions.create
+
+    async def create(self, **kwargs):
+        resp = await real(self, **kwargs)
+        resp.choices[0].finish_reason = finish
+        return resp
+
+    monkeypatch.setattr(ns._Completions, "create", create)    # undone after
+    client._client.chat = ns
+    assert await client.chat([{"role": "user", "content": "hi"}]) == expected
+
+
+@pytest.mark.asyncio
 async def test_chat_returns_none_on_empty_content():
     client = OpenAIClient(api_key="x", text_provider="openai")
     client._client.chat = _FakeChatNamespace("   ")
@@ -89,7 +113,7 @@ class _FakeEmbeddingsOk:
 
 @pytest.mark.asyncio
 async def test_embed_returns_vector():
-    client = OpenAIClient(api_key="x", text_provider="openai")
+    client = OpenAIClient(api_key="x", text_provider="openai", embedding_dim=3)
     client._client.embeddings = _FakeEmbeddingsOk()
     out = await client.embed("hello")
     assert out == [0.1, 0.2, 0.3]
@@ -127,7 +151,7 @@ async def test_embed_retries_transient_connection_error():
         def __init__(self):  # skip the SDK's required httpx request arg
             pass
 
-    client = OpenAIClient(api_key="x", text_provider="openai")
+    client = OpenAIClient(api_key="x", text_provider="openai", embedding_dim=2)
     flaky = _FlakyEmbeddings(_ConnError())
     client._client.embeddings = flaky
     out = await client.embed("hello")
@@ -416,3 +440,139 @@ async def test_describe_image_swallows_a_total_failure():
     client._anthropic = None
     client._client.chat = _ExplodingChatNamespace()
     assert await client.describe_image(b"x", prompt="p") is None
+
+
+# ── one retry layer, and real timeouts ───────────────────────────────────────
+
+def test_the_sdk_clients_do_not_retry_underneath_tenacity():
+    """The SDKs retry 408/409/429/5xx by default. Stacked under tenacity
+    that made one failing call up to nine requests and retried 429s the
+    module swears it never retries."""
+    from ipedro.openai_client import OpenAIClient
+
+    client = OpenAIClient(api_key="k", anthropic_api_key="k")
+    assert client._anthropic.max_retries == 0
+    assert client._openai.max_retries == 0
+
+
+def test_the_sdk_clients_have_real_timeouts_not_ten_minutes():
+    from ipedro.openai_client import OpenAIClient
+
+    client = OpenAIClient(api_key="k", anthropic_api_key="k")
+    assert client._anthropic.timeout == 45.0
+    assert client._openai.timeout == 120.0
+
+
+def test_overload_is_retried_like_other_transient_upstream_errors():
+    """529 is not an InternalServerError, so tenacity never saw it; the
+    SDK's own retry used to cover it, and now that it's off this must."""
+    from anthropic import OverloadedError
+    from ipedro.openai_client import _CLAUDE_RETRY
+
+    class _Pred:
+        def __init__(self, p):
+            self.p = p
+
+    predicate = _CLAUDE_RETRY["retry"]
+    classes = predicate.exception_types
+    assert OverloadedError in classes
+    from anthropic import RateLimitError
+    assert not issubclass(RateLimitError, classes)
+
+
+# ── the embedding size the model returns is the size the column holds ────────
+
+def _embedding_client(*, model="text-embedding-3-small", dim=1536, returns=1536):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    client = OpenAIClient(api_key="x", embedding_model=model, embedding_dim=dim)
+    create = AsyncMock(return_value=SimpleNamespace(
+        data=[SimpleNamespace(embedding=[0.1] * returns)],
+        usage=SimpleNamespace(prompt_tokens=3),
+    ))
+    client._openai = SimpleNamespace(embeddings=SimpleNamespace(create=create))
+    client._log_usage = AsyncMock()
+    return client, create
+
+
+@pytest.mark.asyncio
+async def test_the_configured_size_is_requested_from_the_v3_models():
+    client, create = _embedding_client(dim=512, returns=512)
+    assert len(await client.embed("hello")) == 512
+    assert create.await_args.kwargs["dimensions"] == 512
+
+
+@pytest.mark.asyncio
+async def test_models_that_cannot_be_resized_are_not_asked_to():
+    client, create = _embedding_client(model="text-embedding-ada-002")
+    assert len(await client.embed("hello")) == 1536
+    assert "dimensions" not in create.await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_a_vector_of_the_wrong_size_is_refused_with_a_reason(caplog):
+    import logging
+
+    client, _ = _embedding_client(model="text-embedding-ada-002", dim=1024, returns=1536)
+    with caplog.at_level(logging.ERROR, logger="ipedro.openai_client"):
+        assert await client.embed("hello") is None
+        assert await client.embed("again") is None          # still refused...
+    errors = [r for r in caplog.records if "EMBEDDING_DIM" in r.getMessage()]
+    assert len(errors) == 1                                  # ...but said once
+
+
+# ── describing several images at once (the frames of a video) ────────────────
+
+@pytest.mark.asyncio
+async def test_describe_images_sends_every_frame_in_order_then_the_prompt():
+    import base64
+    msgs = _FakeAnthropicMessages(text="a man waves, then leaves")
+    client = _claude_client(msgs)
+    frames = [b"\xff\xd8\xffone", b"\xff\xd8\xfftwo", b"\xff\xd8\xffthree"]
+
+    out = await client.describe_images(frames, prompt="what happens", max_tokens=400)
+
+    assert out == "a man waves, then leaves"
+    call = msgs.calls[0]
+    assert call["model"] == client.cheap_claude_model and call["max_tokens"] == 400
+    content = call["messages"][0]["content"]
+    assert [c["type"] for c in content] == ["image", "image", "image", "text"]
+    assert [base64.b64decode(c["source"]["data"]) for c in content[:3]] == frames
+    assert content[3]["text"] == "what happens"
+
+
+@pytest.mark.asyncio
+async def test_a_single_image_request_is_exactly_what_it_always_was():
+    msgs_a, msgs_b = _FakeAnthropicMessages(text="x"), _FakeAnthropicMessages(text="x")
+    await _claude_client(msgs_a).describe_image(b"\xff\xd8\xffz", prompt="p")
+    await _claude_client(msgs_b).describe_images([b"\xff\xd8\xffz"], prompt="p")
+    assert msgs_a.calls == msgs_b.calls
+    assert [c["type"] for c in msgs_a.calls[0]["messages"][0]["content"]] == ["image", "text"]
+
+
+@pytest.mark.asyncio
+async def test_describe_images_with_nothing_to_look_at_makes_no_call():
+    msgs = _FakeAnthropicMessages(text="x")
+    assert await _claude_client(msgs).describe_images([], prompt="p") is None
+    assert msgs.calls == []
+
+
+@pytest.mark.asyncio
+async def test_describe_images_falls_back_to_openai_with_every_frame():
+    seen = {}
+
+    class _Comp:
+        async def create(self, **kw):
+            seen.update(kw)
+            return type("R", (), {
+                "choices": [type("C", (), {"message": type("M", (), {"content": " ok "})()})()],
+                "usage": type("U", (), {"prompt_tokens": 1, "completion_tokens": 1})(),
+            })()
+
+    msgs = _FakeAnthropicMessages(error=RuntimeError("anthropic down"))
+    client = _claude_client(msgs)
+    client._openai = type("O", (), {"chat": type("Ch", (), {"completions": _Comp()})()})()
+    assert await client.describe_images([b"a", b"b"], prompt="p") == "ok"
+    kinds = [c["type"] for c in seen["messages"][0]["content"]]
+    assert kinds == ["text", "image_url", "image_url"]

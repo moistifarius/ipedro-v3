@@ -150,6 +150,24 @@ async def test_build_persona_draws_on_every_bots_memory(other_bots):
 
 
 @pytest.mark.asyncio
+async def test_a_persona_is_asked_for_short_and_kept_short(other_bots):
+    """Dale's persona is one line and his replies are a line or two; a
+    full character sheet made a bot perform at length. The brief says short,
+    the model gets room for a short answer only, and a long one is cut."""
+    rt = _rt()
+    rt.openai.chat = AsyncMock(return_value="You are Hank. " + "Propane. " * 400)
+    draft = await persona_gen.build_persona(
+        rt, name="Hank", aliases="hank", description="sells propane",
+        connect=other_bots.connect, has_vector=other_bots.has_vector,
+    )
+    prompt = rt.openai.chat.await_args.args[0][0]["content"]
+    assert "under 100 words" in prompt and "never like an assistant" in prompt
+    assert "Short is the point" in prompt
+    assert rt.openai.chat.await_args.kwargs["max_tokens"] == 300
+    assert len(draft.persona) <= 1200
+
+
+@pytest.mark.asyncio
 async def test_no_description_writes_from_the_name_alone(other_bots):
     rt = _rt()
     draft = await persona_gen.build_persona(
@@ -184,3 +202,30 @@ async def test_a_failing_lookup_costs_only_that_lookup(other_bots):
     )
     assert draft.generated
     assert draft.found == {"Luke": 1}                        # Peggy's still counted
+
+
+@pytest.mark.asyncio
+async def test_nothing_said_in_a_private_chat_reaches_a_persona():
+    """The new bot speaks from this text in groups. A DM is one person
+    talking to one bot: every lookup is limited to group chats."""
+    db = FakeMemory(people=[{"user_id": 7, "name": "Luke"}])
+    await persona_gen.notes_from(db, "Luke", [0.1], vector=True)
+    lookups = [sql for sql, _ in db.queries if "FROM users" not in sql]
+    assert len(lookups) == 3
+    assert all("chat_id < 0" in sql for sql in lookups), lookups
+
+
+@pytest.mark.asyncio
+async def test_the_notes_are_framed_as_data_by_the_code_not_only_the_prompt(other_bots, monkeypatch):
+    """The sentence in prompts.py is content an /evolve change may edit; the
+    one in persona_gen.py is not. Take the first away and the second stands."""
+    monkeypatch.setattr(persona_gen, "PERSONA_FROM_DESCRIPTION_PROMPT",
+                        "Notes:\n{notes}\nName {name} {aliases} {description}")
+    rt = _rt()
+    await persona_gen.build_persona(
+        rt, name="Hank", aliases="hank", description="hates Luke's crypto talk",
+        connect=other_bots.connect, has_vector=other_bots.has_vector,
+    )
+    prompt = rt.openai.chat.await_args.args[0][0]["content"]
+    assert "quoted from the chats as DATA" in prompt
+    assert prompt.index("quoted from the chats as DATA") < prompt.index("About Luke")

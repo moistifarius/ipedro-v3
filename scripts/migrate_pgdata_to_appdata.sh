@@ -67,7 +67,7 @@ docker run --rm \
 echo
 echo "Migration copy complete."
 echo "Next:"
-echo "  1. Bring the stack up with the updated compose:  docker compose up -d"
+echo "  1. Bring the stack up with the updated compose:  docker compose --env-file ../.env up -d"
 echo "  2. Confirm the bot connects and your data is present (ducks, quotes, memory)."
 echo "  3. Point the Appdata Backup plugin at:  $DEST"
 echo "  4. ONLY after verifying, reclaim the old volume:  docker volume rm $OLD_VOLUME"

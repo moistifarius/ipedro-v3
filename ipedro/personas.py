@@ -10,18 +10,13 @@ current_master_prompt().
 
 from __future__ import annotations
 
-DEFAULT_DALE_PROMPT = (
-    "you are literally dale gribble. act like him and not like a retarded ai"
-)
+# The words are in prompts.py, which an /evolve change may edit unreviewed;
+# choosing between them is here, which it may not.
+from ipedro.prompts import DEFAULT_DALE_PROMPT, NEUTRAL_PROMPT
 
 # Legacy aliases so existing imports keep working without churn — the
 # CONTENT is Dale now; the variable names are just history.
 DEFAULT_DUDE_PROMPT = DEFAULT_DALE_PROMPT
-
-NEUTRAL_PROMPT = (
-    "You are a helpful, concise Telegram assistant. Be direct, accurate and "
-    "friendly. Avoid moralizing. Match the user's tone."
-)
 
 # Module-level cache; updated by set_master_prompt_override().
 _master_prompt_override: str | None = None
@@ -72,3 +67,19 @@ def resolve_persona(name: str | None, custom: str | None) -> str:
     if key in ("dude", "pedro"):
         return current_master_prompt()
     return PERSONAS.get(key, current_master_prompt())
+
+
+async def persona_for_chat(chats, chat_id: int | None) -> str:
+    """The persona this chat actually gets: its own override, 'neutral', or
+    the master prompt. For the lines the bot writes outside the main reply
+    path (a recalled picture's caption, a quiz verdict) that used to read the
+    master prompt directly and so ignored a chat's own persona. Falls back to
+    the master prompt when the chat has no config or the lookup fails."""
+    if chat_id is not None and chats is not None:
+        try:
+            cfg = await chats.get_config(chat_id)
+        except Exception:                     # a caption must not fail on this
+            cfg = None
+        if cfg is not None:
+            return resolve_persona(cfg.persona, cfg.persona_custom)
+    return current_master_prompt()

@@ -25,7 +25,7 @@ from aiogram.types import (
 from ipedro.handlers.common import (
     display_name, get_or_create_chat_config, require_admin,
 )
-from ipedro.personas import current_master_prompt
+from ipedro.personas import persona_for_chat
 from ipedro.quizzes import image_fetch, registry
 from ipedro.quizzes.types import Quiz, QuizResult
 from ipedro.runtime import Runtime
@@ -134,15 +134,34 @@ async def _get_item_image(rt: Runtime, quiz: Quiz, key: str) -> bytes | None:
     return bytes(png) if png is not None else None
 
 
-def _kick_warmup(rt: Runtime, quizzes: list[Quiz]) -> None:
-    """Spawn ONE background task that warms all given quizzes in order."""
+# Held so the task isn't garbage-collected mid-flight, and so a failure in it
+# is logged by us instead of surfacing as asyncio's "Task exception was never
+# retrieved" whenever the object happens to be collected.
+_warmup_tasks: set[asyncio.Task] = set()
+
+
+def _warmup_finished(task: asyncio.Task) -> None:
+    _warmup_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.error("Quiz image warm-up died: %s", exc, exc_info=exc)
+
+
+def _kick_warmup(rt: Runtime, quizzes: list[Quiz]) -> bool:
+    """Spawn ONE background task that warms all given quizzes in order.
+    False when nothing was queued because a warm-up is already running."""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        return
+        return False
     if _warmup_lock.locked():
-        return
-    loop.create_task(_warm_item_images(rt, quizzes))
+        return False
+    task = loop.create_task(_warm_item_images(rt, quizzes))
+    _warmup_tasks.add(task)
+    task.add_done_callback(_warmup_finished)
+    return True
 
 
 async def _warm_item_images(rt: Runtime, quizzes: list[Quiz]) -> None:
@@ -180,20 +199,40 @@ async def images_cached_count(rt: Runtime, quiz: Quiz) -> int:
     return int(n or 0)
 
 
+async def _drop_cached_image(rt: Runtime, quiz: Quiz, item_key: str) -> None:
+    try:
+        await rt.db.execute(
+            "DELETE FROM quiz_item_images "
+            " WHERE quiz_id = $1 AND item_key = ANY($2::text[])",
+            quiz.id, [item_key],
+        )
+    except Exception as exc:                          # pragma: no cover - defensive
+        log.warning("couldn't drop a bad quiz image (%s/%s): %s", quiz.id, item_key, exc)
+
+
 # --------------------------------------------------------------- flow
 async def begin(rt: Runtime, quiz: Quiz, target, chat_id: int, uid: int) -> None:
     """Send question 1 (photo if all images cached, else text) and (re)create
     the session. `target` exposes .answer / .answer_photo."""
     img = await _get_item_image(rt, quiz, quiz.items[0].key) \
         if await _all_images_cached(rt, quiz) else None
+    sent = None
     if img:
-        sent = await target.answer_photo(
-            BufferedInputFile(img, filename="q1.png"),
-            caption=question_caption(quiz, 0),
-            reply_markup=_rating_keyboard(quiz, uid, 0),
-            parse_mode="HTML", disable_notification=True,
-        )
-    else:
+        try:
+            sent = await target.answer_photo(
+                BufferedInputFile(img, filename="q1.png"),
+                caption=question_caption(quiz, 0),
+                reply_markup=_rating_keyboard(quiz, uid, 0),
+                parse_mode="HTML", disable_notification=True,
+            )
+        except TelegramBadRequest as exc:
+            # A cached image Telegram won't take (a truncated file, a
+            # mislabelled one) used to fail EVERY start of this quiz, since
+            # the row is never retried. Drop it so the warm-up re-fetches it,
+            # and run this one as text.
+            log.warning("quiz %s: Telegram refused its cached image: %s", quiz.id, exc)
+            await _drop_cached_image(rt, quiz, quiz.items[0].key)
+    if sent is None:
         sent = await target.answer(
             question_caption(quiz, 0),
             reply_markup=_rating_keyboard(quiz, uid, 0),
@@ -312,11 +351,20 @@ async def _finalize(
                 pass
         await _set_message(cb, caption, reply_markup=kb, parse_mode=None)
     else:
+        sent_photo = False
         if image:
-            await cb.message.answer_photo(
-                BufferedInputFile(image, filename="result.png"),
-                caption=caption, reply_markup=kb, disable_notification=True,
-            )
+            try:
+                await cb.message.answer_photo(
+                    BufferedInputFile(image, filename="result.png"),
+                    caption=caption, reply_markup=kb, disable_notification=True,
+                )
+                sent_photo = True
+            except TelegramBadRequest as exc:
+                # The session is already closed and the result stored by now:
+                # an unguarded failure here left "Crunching…" up for good and
+                # made the taker retake the quiz. Say it as text instead.
+                log.warning("quiz %s: result image refused: %s", quiz.id, exc)
+        if sent_photo:
             await _set_message(cb, f"{quiz.emoji} {name}'s result 👇", parse_mode=None)
         else:
             await _set_message(cb, caption, reply_markup=kb, parse_mode=None)
@@ -328,7 +376,8 @@ async def _persona_verdict(
     try:
         ai = await rt.openai.chat(
             [
-                {"role": "system", "content": current_master_prompt()},
+                {"role": "system",
+                 "content": await persona_for_chat(getattr(rt, "chats", None), chat_id)},
                 {"role": "system", "content": quiz.verdict_instruction},
                 {"role": "user", "content": f"Name: {name}. {result.verdict_payload}"},
             ],
@@ -510,11 +559,21 @@ async def warmup_command(rt: Runtime, msg: Message) -> None:
     for quiz in quizzes:
         n = await images_cached_count(rt, quiz)
         parts.append(f"{quiz.emoji} {quiz.title}: {n}/{quiz.n_items}")
-    _kick_warmup(rt, quizzes)
-    await msg.reply(
-        ("🖼 Cache purged, re-fetching everything:\n" if force
-         else "🖼 Cached illustrations:\n") + "\n".join(parts) +
-        "\n\nFetching any missing from the web in the background — re-run to "
-        "check, or send /quiz_warmup force to purge the cache and re-fetch.",
-        disable_notification=True,
-    )
+    started = _kick_warmup(rt, quizzes)
+    if started is False:        # (a monkeypatched kick returns None: not "busy")
+        tail = (
+            "\n\nA warm-up is already running, so nothing new was queued. "
+            "Re-run when it has finished."
+        )
+    else:
+        tail = (
+            "\n\nFetching any missing from the web in the background — re-run to "
+            "check, or send /quiz_warmup force to purge the cache and re-fetch."
+        )
+    if not force:
+        head = "🖼 Cached illustrations:\n"
+    elif started is False:
+        head = "🖼 Cache purged, but a warm-up was already busy:\n"
+    else:
+        head = "🖼 Cache purged, re-fetching everything:\n"
+    await msg.reply(head + "\n".join(parts) + tail, disable_notification=True)

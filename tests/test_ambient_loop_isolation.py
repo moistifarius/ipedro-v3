@@ -34,7 +34,7 @@ async def test_comic_loop_keeps_going_after_one_chat_fails(monkeypatch):
         calls.append(chat_id)
         if chat_id == 2:
             raise RuntimeError("boom")
-        return True
+        return "posted"
 
     monkeypatch.setattr("ipedro.comic._build_and_post", fake_build_and_post)
     db = SimpleNamespace(execute=AsyncMock())
@@ -50,8 +50,9 @@ async def test_comic_loop_keeps_going_after_one_chat_fails(monkeypatch):
     await run_comic_loop(bot=SimpleNamespace(), db=db, openai=SimpleNamespace(), stop=stop)
 
     assert calls == [1, 2, 3]                 # chat 3 was still attempted
-    # Only the two successes (1, 3) got their last_comic_at stamped.
-    assert db.execute.await_count == 2
+    # Every chat is stamped so none is retried next tick: the two successes
+    # as done, the failure (chat 2) as due again in a few hours.
+    assert db.execute.await_count == 3
 
 
 # ── ambient_loops.py: yearly retro ──────────────────────────────────────────
@@ -113,3 +114,32 @@ async def test_daily_fortune_keeps_going_after_one_chat_fails(monkeypatch):
         settings=SimpleNamespace(tzinfo=__import__("datetime").timezone.utc),
     )
     assert calls == [1, 2, 3]                 # chat 3 was still attempted
+
+
+# ── confessions go to groups, never into somebody's DM ──────────────────────
+
+@pytest.mark.asyncio
+async def test_a_confession_is_only_ever_surfaced_into_a_group(monkeypatch):
+    """/confess is a DM command, so a private chat is one person. The
+    surfacer drew from every chat seen lately, DMs included, and marked the
+    confession surfaced: it landed in one stranger's DM and never reached a
+    group."""
+    from ipedro import ambient_loops as al
+
+    monkeypatch.setattr(al.random, "random", lambda: 0.0)
+    seen = []
+
+    async def fetchrow(query, *a):
+        return {"id": 1, "text": "i ate the last slice"}
+
+    async def fetch(query, *a):
+        seen.append(query)
+        return [{"chat_id": -100}]
+
+    db = SimpleNamespace(fetchrow=fetchrow, fetch=fetch, execute=AsyncMock())
+    bot = SimpleNamespace(send_message=AsyncMock(
+        return_value=SimpleNamespace(message_id=5)))
+    await al._maybe_surface_confession(bot, db)
+    assert "type IN ('group', 'supergroup')" in seen[0]
+    bot.send_message.assert_awaited_once()
+    assert bot.send_message.await_args.args[0] == -100

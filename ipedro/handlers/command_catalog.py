@@ -125,7 +125,7 @@ COMMANDS: tuple[Command, ...] = (
             "facts, the summary and the bot's own messages — and leave a "
             "correction so it sticks. Never touches what people typed."),
     Command("fixname",      "ai", "/fixname",
-            "/fixname <wrong> -> <right>",
+            "/fixname <wrong> -> <right>  (chat admin)",
             "Fix a name the bot keeps getting wrong — recursively across "
             "summaries, facts, and the bot's own past messages. Never "
             "rewrites what people actually typed. Careful with names that "
@@ -141,6 +141,9 @@ COMMANDS: tuple[Command, ...] = (
     Command("meme",         "ai", "/meme",
             "/meme top text | bottom text",
             "Generate a meme image."),
+    Command("reverse",      "ai", "/reverse",
+            "/reverse [mute]  (on a video or GIF)",
+            "Play a video, GIF or round video backwards."),
     Command("redditmeme",   "ai", "/redditmeme, /rmeme",
             "/redditmeme [topic]  (or /rmeme)",
             "No topic: a post from Reddit's r/popular. With a topic: search "
@@ -267,7 +270,7 @@ COMMANDS: tuple[Command, ...] = (
             "/dates", "List all tracked dates here."),
     Command("poll",         "reminders", "/poll",
             "/poll Q | A | B | …",
-            "Create a poll."),
+            "Create a poll (quiz, public, timed…), or draft one from a reply or screenshot."),
 
     # ── Anonymous (DM only) ──────────────────────────────────────────────
     Command("confess",      "dm", "/confess",
@@ -364,6 +367,10 @@ COMMANDS: tuple[Command, ...] = (
     Command("ai_model",     "ai_admin", "/ai_model",
             "/ai_model show | [provider] <model_id>",
             "Show or switch the active text model."),
+    Command("ai_advisor",   "ai_admin", "/ai_advisor",
+            "/ai_advisor show | off | <model_id>",
+            "Show, set or turn off the stronger model Dale may consult "
+            "mid-reply on a hard question."),
     Command("master_prompt","ai_admin", "/master_prompt",
             "/master_prompt show | set <text> | setfile | reset",
             "Inspect or override the global persona prompt."),
@@ -460,9 +467,20 @@ def categories_in_order() -> tuple[Category, ...]:
     return CATEGORIES
 
 
-def commands_in_category(category: str) -> tuple[Command, ...]:
+# Commands that only the deployment that runs the other bots registers
+# (settings.manages_bots, i.e. Dale). Another bot's /manage menu must not
+# offer buttons for commands its router doesn't have.
+MANAGER_ONLY: frozenset[str] = frozenset({"evolve", "newbot", "bot_persona", "bots"})
+
+
+def commands_in_category(
+    category: str, *, manages_bots: bool = True,
+) -> tuple[Command, ...]:
     """Every command tagged ``category``, in declaration order."""
-    return tuple(c for c in COMMANDS if c.category == category)
+    return tuple(
+        c for c in COMMANDS
+        if c.category == category and (manages_bots or c.slug not in MANAGER_ONLY)
+    )
 
 
 def command_by_slug(slug: str) -> Command | None:

@@ -23,6 +23,8 @@ from urllib.parse import quote
 
 import httpx
 
+from ipedro.net_safety import PUBLIC_ONLY
+
 log = logging.getLogger(__name__)
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -43,6 +45,8 @@ async def fetch(query: str, *, timeout: float = 20.0) -> bytes | None:
         async with httpx.AsyncClient(
             headers={"User-Agent": _UA, "Accept-Language": "en-US,en;q=0.9"},
             timeout=timeout, follow_redirects=True,
+            # Result URLs come from a web search: public addresses only.
+            event_hooks=PUBLIC_ONLY,
         ) as client:
             img = await _bing(client, query.strip())
             if img:

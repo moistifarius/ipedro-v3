@@ -30,7 +30,9 @@ from anthropic import (
     APIError as AnthropicAPIError,
     APITimeoutError as AnthropicAPITimeoutError,
     AsyncAnthropic,
+    BadRequestError as AnthropicBadRequestError,
     InternalServerError as AnthropicInternalServerError,
+    OverloadedError as AnthropicOverloadedError,
 )
 from openai import (
     APIConnectionError as OpenAIAPIConnectionError,
@@ -52,6 +54,12 @@ log = logging.getLogger(__name__)
 # Crucially NOT RateLimitError (429): retrying immediately just slams the
 # limit again and inflates Anthropic's hit counter. A 429 propagates up
 # and the calling feature degrades gracefully (None response).
+#
+# This is the ONLY retry layer: both SDK clients are built with
+# max_retries=0. The SDKs retry 408/409/429 and every 5xx on their own by
+# default, which stacked underneath this made one failing call up to nine
+# requests, and retried 429s after all (the rule above was never true on
+# the wire).
 _OPENAI_RETRY = dict(
     retry=retry_if_exception_type((
         OpenAIAPIConnectionError, OpenAIAPITimeoutError,
@@ -62,10 +70,16 @@ _OPENAI_RETRY = dict(
     reraise=False,
 )
 
+_ANTHROPIC_TIMEOUT_SECONDS = 45.0
+_OPENAI_TIMEOUT_SECONDS = 120.0
+
 _CLAUDE_RETRY = dict(
     retry=retry_if_exception_type((
         AnthropicAPIConnectionError, AnthropicAPITimeoutError,
         AnthropicInternalServerError,
+        # 529: Anthropic is overloaded. Not an InternalServerError, and
+        # exactly the transient case worth a short wait.
+        AnthropicOverloadedError,
     )),
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=8),
@@ -81,6 +95,7 @@ _OPENAI_TEXT_PRICE_PER_1K = {
 }
 _CLAUDE_TEXT_PRICE_PER_1K = {
     "claude-fable-5":    (0.010, 0.050),
+    "claude-opus-5-5":   (0.004, 0.020),     # before "claude-opus-5": first match wins
     "claude-opus-5":     (0.005, 0.025),
     "claude-opus-4-8":   (0.005, 0.025),
     "claude-opus-4-7":   (0.005, 0.025),
@@ -120,6 +135,7 @@ CACHE_BREAKPOINT = "_cache_breakpoint"
 _CACHE_MIN_TOKENS: tuple[tuple[str, int], ...] = (
     ("claude-opus-5", 512),
     ("claude-fable-5", 512),
+    ("claude-mythos-5", 512),
     ("claude-opus-4-8", 1024),
     ("claude-sonnet-5", 1024),
     ("claude-sonnet-4-6", 1024),
@@ -137,6 +153,20 @@ _CACHE_MIN_DEFAULT = 4096   # unknown model: assume the strictest we know of
 _CACHE_WRITE_MULTIPLIER = 1.25        # 5-minute entries
 _CACHE_WRITE_1H_MULTIPLIER = 2.0       # 1-hour entries
 _CACHE_READ_MULTIPLIER = 0.1
+# ...except on the models that discount reads further: 0.05x on Opus 5.5,
+# 0.025x on Fable / Mythos 5.1. Longest matching prefix wins.
+_CACHE_READ_MULTIPLIER_BY_MODEL: tuple[tuple[str, float], ...] = (
+    ("claude-opus-5-5", 0.05),
+    ("claude-fable-5-1", 0.025),
+    ("claude-mythos-5-1", 0.025),
+)
+
+
+def _cache_read_multiplier(model: str) -> float:
+    for prefix, mult in _CACHE_READ_MULTIPLIER_BY_MODEL:
+        if model.startswith(prefix):
+            return mult
+    return _CACHE_READ_MULTIPLIER
 
 
 # Models that removed temperature/top_p/top_k: passing one is a 400, not a
@@ -147,16 +177,39 @@ _NO_SAMPLING_PREFIXES: tuple[str, ...] = (
     "claude-sonnet-5",
 )
 
-# Models on which OMITTING `thinking` means adaptive thinking is ON. Every
-# older model runs without thinking unless asked; these two invert that.
 # For a persona chat bot writing two-sentence replies, thinking is pure
 # cost: the reasoning tokens bill as output (5x the input price) and count
-# against the 500-token reply cap, so a chatty think would truncate the
-# actual answer. Explicitly off. (Fable 5 rejects "disabled" outright and
-# must be left alone — it is deliberately absent here.)
-_THINKS_UNLESS_TOLD_NOT_TO: tuple[str, ...] = (
-    "claude-sonnet-5", "claude-opus-5",
-)
+# against the reply's max_tokens, so a chatty think would truncate the
+# actual answer. How to turn it off differs by model, and getting it wrong
+# is a 400 on EVERY request (swallowed into a silent no-reply):
+#
+#   claude-sonnet-5, claude-opus-5   omitting `thinking` runs adaptive
+#                                    thinking; {"type": "disabled"} turns it
+#                                    off.
+#   claude-sonnet-5-5                {"type": "disabled"} is a 400. The
+#                                    lowest setting is {"type": "between_tools"}
+#                                    (no other field inside it).
+#   claude-opus-5-5, claude-fable-5*, claude-mythos-5*
+#                                    thinking can't be turned off at all, and
+#                                    "disabled" is a 400. Omit `thinking` and
+#                                    keep it short with effort "low".
+#
+# These are matched on the exact id (an optional -YYYYMMDD snapshot suffix
+# aside), never on a bare prefix: "claude-sonnet-5" is a prefix of
+# "claude-sonnet-5-5", and treating them alike is what broke it.
+_THINKING_DISABLED_OK: tuple[str, ...] = ("claude-sonnet-5", "claude-opus-5")
+_THINKING_BETWEEN_TOOLS: tuple[str, ...] = ("claude-sonnet-5-5",)
+_THINKING_ALWAYS_ON_EXACT: tuple[str, ...] = ("claude-opus-5-5",)
+_THINKING_ALWAYS_ON_PREFIXES: tuple[str, ...] = ("claude-fable-5", "claude-mythos-5")
+# Extra room in max_tokens for a model that always thinks: its thinking
+# counts against the cap, and a reply cut off (or never started) because the
+# think ate the budget is a silent no-reply. The reply's length is set by
+# the prompt, not by this cap, so the headroom costs nothing when unused.
+_THINKING_HEADROOM_TOKENS = 1024
+
+
+def _model_is(model: str, *ids: str) -> bool:
+    return any(re.fullmatch(rf"{re.escape(i)}(?:-\d{{8}})?", model) for i in ids)
 
 
 def _rejects_sampling(model: str) -> bool:
@@ -164,7 +217,29 @@ def _rejects_sampling(model: str) -> bool:
 
 
 def _thinks_by_default(model: str) -> bool:
-    return model.startswith(_THINKS_UNLESS_TOLD_NOT_TO)
+    """Thinking is on unless told otherwise, and {"type": "disabled"} is the
+    way to tell it. Only the 5 generation: the 5.5 models are NOT this."""
+    return _model_is(model, *_THINKING_DISABLED_OK)
+
+
+def _always_thinks(model: str) -> bool:
+    """Thinking can't be turned off: the best a caller can do is keep it
+    short with effort "low"."""
+    return (
+        _model_is(model, *_THINKING_ALWAYS_ON_EXACT)
+        or model.startswith(_THINKING_ALWAYS_ON_PREFIXES)
+    )
+
+
+def _thinking_param(model: str) -> dict[str, str] | None:
+    """The `thinking` field this model wants for a no-thinking chat reply,
+    or None to omit it (omitting is always valid, which is why a model this
+    table has never heard of gets None rather than a guess)."""
+    if _thinks_by_default(model):
+        return {"type": "disabled"}
+    if _model_is(model, *_THINKING_BETWEEN_TOOLS):
+        return {"type": "between_tools"}
+    return None
 
 
 def _cache_minimum(model: str) -> int:
@@ -200,6 +275,12 @@ def _openai_text_price(
     )
 
 
+def has_claude_price(model: str) -> bool:
+    """Is there a price on file for this model (else /cost counts it at the
+    default rate)?"""
+    return any(model.startswith(k) for k in _CLAUDE_TEXT_PRICE_PER_1K)
+
+
 def _claude_text_price(
     model: str, prompt_tokens: int, completion_tokens: int,
     cache_write_tokens: int = 0, cache_read_tokens: int = 0,
@@ -225,7 +306,7 @@ def _claude_text_price(
         prompt_tokens * inp
         + write_5m * inp * _CACHE_WRITE_MULTIPLIER
         + write_1h * inp * _CACHE_WRITE_1H_MULTIPLIER
-        + cache_read_tokens * inp * _CACHE_READ_MULTIPLIER
+        + cache_read_tokens * inp * _cache_read_multiplier(model)
         + completion_tokens * (rate[1] / 1000)
     )
 
@@ -316,28 +397,117 @@ ToolRunner = Callable[[str, dict], Awaitable[tuple[str, bool]]]
 # would land in a group chat in the persona's mouth. Anthropic documents
 # this failure mode; the prompt-side mitigation lives in capabilities.py.
 _LEAKED_INTERNALS_RE = re.compile(
-    r"</?\s*(?:antml:)?(?:invoke|function_calls|parameter|tool_use|thinking)\b",
+    r"</?\s*(?:antml:)?(?:invoke|function_calls|parameter|tool_use|thinking"
+    r"|server_tool_use|advisor_tool_result|advisor)\b",
     re.IGNORECASE,
 )
 
 
+_SENTENCE_END = re.compile(r"[.!?…][\"')\]]*(?=\s|$)")
+
+
+def _trim_to_sentence(text: str) -> str:
+    """A reply the token cap cut off, trimmed back to where a sentence last
+    ended, so the chat never reads one that stops mid-word (and the bot's
+    memory of its own turn doesn't either). With no sentence end worth
+    keeping, it's left whole with an ellipsis."""
+    ends = [m.end() for m in _SENTENCE_END.finditer(text)]
+    if ends and ends[-1] >= len(text) * 0.4:
+        return text[: ends[-1]].rstrip()
+    return text.rstrip() + "…"
+
+
+# The advisor tool (https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool):
+# the model writing the reply can stop and consult a stronger one mid-turn,
+# inside the same request. It is a beta, hence a different endpoint and a
+# header. The executor's text that comes BEFORE the call ("let me check with
+# my guy") is narration, never part of the reply.
+ADVISOR_BETA = "advisor-tool-2026-03-01"
+ADVISOR_TOOL_TYPE = "advisor_20260301"
+ADVISOR_TOOL_NAME = "advisor"
+_ADVISOR_MIN_TOKENS = 1024            # the API's floor for the tool's max_tokens
+# A turn can pause while the advisor runs ("pause_turn"); the answer is to send
+# it back as it came. A few times at most, never forever.
+_MAX_PAUSE_RESUMES = 3
+# A consult runs a second, stronger model inside the request, so it is given
+# longer than a plain reply (45 s). If it still doesn't come back, or the
+# request fails some other way that a plain one wouldn't, the reply is written
+# again WITHOUT the advisor rather than the chat going quiet.
+_ADVISOR_TIMEOUT_SECONDS = 90.0
+
+
+def _is_advisor_block(block: Any) -> bool:
+    kind = getattr(block, "type", None)
+    return kind == "advisor_tool_result" or (
+        kind == "server_tool_use" and getattr(block, "name", None) == ADVISOR_TOOL_NAME
+    )
+
+
+def _has_advisor_blocks(messages: Sequence[dict[str, Any]]) -> bool:
+    """Does this conversation already carry an advisor call or its result?
+    (Then the tool can't be dropped from the next request: that is a 400.)"""
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, list) and any(
+            _is_advisor_block(b) if not isinstance(b, dict) else (
+                b.get("type") == "advisor_tool_result"
+                or (b.get("type") == "server_tool_use" and b.get("name") == ADVISOR_TOOL_NAME)
+            )
+            for b in content
+        ):
+            return True
+    return False
+
+
 def _claude_text(resp: Any) -> str | None:
+    blocks = list(resp.content)
+    # Once the advisor has been called, only what was written after it is the
+    # reply; what came before is the model thinking out loud ("let me check
+    # with my guy"). That holds for a call still pending as well (the turn
+    # paused, or was cut off, before the advice came back): then there is no
+    # reply at all, and the narration is not made into one.
+    asked = [i for i, b in enumerate(blocks) if _is_advisor_block(b)]
+    if asked:
+        blocks = blocks[asked[-1] + 1:]
     parts = [
-        block.text for block in resp.content
+        block.text for block in blocks
         if getattr(block, "type", None) == "text"
     ]
-    return "\n".join(parts).strip() or None
+    text = "\n".join(parts).strip()
+    if text and getattr(resp, "stop_reason", None) == "max_tokens":
+        text = _trim_to_sentence(text)
+    return text or None
+
+
+def _written_out_call(text: str, tool_names: Sequence[str]) -> bool:
+    """Does `text` look like a tool CALL written out, rather than a reply
+    that mentions a tool? A call has the name followed by an argument list
+    or brace (`check_my_records(limit=5)`, `check_my_records {`) or sits in
+    a JSON name field. A reply that says it "checked my records
+    (check_my_records)" is prose, and the capability brief names the tools
+    to the model, so it will; dropping those silenced the bot in exactly
+    the situation the records feature exists for ("why did you ignore
+    me?")."""
+    for name in tool_names:
+        quoted = re.escape(name)
+        if re.search(rf"\b{quoted}\b\s*[({{]", text):
+            return True
+        if re.search(rf"[\"']name[\"']\s*:\s*[\"']{quoted}[\"']", text):
+            return True
+        if re.search(rf"<\s*/?\s*{quoted}\b", text):
+            return True
+    return False
 
 
 def _withhold_leaked_internals(
     text: str | None, tool_names: Sequence[str],
 ) -> str | None:
-    """Drop a reply that carries tool markup or a tool's own name — the
-    signature of a call written out as text. Silence beats the persona
-    reciting its internals to a group."""
+    """Drop a reply that carries tool markup or a tool call written out as
+    text. Silence beats the persona reciting its internals to a group; a
+    plain mention of a tool's name is not that (see _written_out_call)."""
     if not text:
         return text
-    if _LEAKED_INTERNALS_RE.search(text) or any(n in text for n in tool_names):
+    if _LEAKED_INTERNALS_RE.search(text) or _written_out_call(text, tool_names):
         log.warning("withheld a reply carrying tool markup: %r", text[:120])
         return None
     return text
@@ -369,13 +539,30 @@ class AIClient:
         embedding_dim: int = 1536,
         tts_model: str = "gpt-4o-mini-tts",
         tts_voice: str = "onyx",
+        # A stronger model the reply-writing one may consult mid-turn (see
+        # ADVISOR_BETA). None: off. Only requests that ask for it (advisor=True)
+        # carry it, and only the Claude text path can.
+        advisor_model: str | None = None,
+        advisor_max_tokens: int = _ADVISOR_MIN_TOKENS,
+        advisor_max_uses: int = 1,
     ) -> None:
+        # max_retries=0: tenacity (above) owns retrying. Timeouts are real:
+        # the SDK default is ten minutes per attempt, which let one stalled
+        # upstream pin a handler (and, on the hub, the serialized listener)
+        # for the better part of an hour across retries. Text replies are a
+        # few hundred tokens; images and transcription get more room.
         self._openai = (
-            AsyncOpenAI(api_key=api_key, organization=organization or None)
+            AsyncOpenAI(
+                api_key=api_key, organization=organization or None,
+                max_retries=0, timeout=_OPENAI_TIMEOUT_SECONDS,
+            )
             if api_key else None
         )
         self._anthropic = (
-            AsyncAnthropic(api_key=anthropic_api_key)
+            AsyncAnthropic(
+                api_key=anthropic_api_key,
+                max_retries=0, timeout=_ANTHROPIC_TIMEOUT_SECONDS,
+            )
             if anthropic_api_key else None
         )
         # Auto-default: claude if we have the key, else openai.
@@ -398,8 +585,15 @@ class AIClient:
         self.transcription_model = transcription_model
         self.embedding_model = embedding_model
         self.embedding_dim = embedding_dim
+        self._warned_embedding_dim = False
         self.tts_model = tts_model
         self.tts_voice = tts_voice
+        self.advisor_model = (advisor_model or "").strip() or None
+        self.advisor_max_tokens = advisor_max_tokens
+        self.advisor_max_uses = advisor_max_uses
+        # (executor, advisor) pairs the API turned down and that work without
+        # the advisor: not asked again until the models change.
+        self._advisor_blocked: set[tuple[str, str]] = set()
         self._usage_db: Database | None = None
 
     # back-compat property alias so callers can still poke _client.* in tests
@@ -423,6 +617,28 @@ class AIClient:
 
     def set_claude_model(self, model: str) -> None:
         self.claude_model = model
+
+    async def probe_claude_model(self, model: str) -> str | None:
+        """None when ``model`` accepts the request shape chat() would send
+        it; otherwise why not. A model id that Anthropic rejects turns
+        every reply into a swallowed 400 — the bot just goes quiet, and
+        the setting survives a restart — so /ai_model asks first. One
+        eight-token request, built by the same code as a real one so the
+        thinking and sampling rules are the ones actually in force."""
+        if self._anthropic is None:
+            return None
+        kwargs = self._claude_kwargs(
+            model=model, system=None,
+            chat_messages=[{"role": "user", "content": "ping"}],
+            max_tokens=8, temperature=1.0,
+        )
+        try:
+            await self._anthropic.messages.create(**kwargs)
+        except AnthropicAPIError as exc:
+            return str(exc)[:300]
+        except Exception as exc:                  # pragma: no cover - defensive
+            return f"{type(exc).__name__}: {exc}"[:300]
+        return None
 
     def set_openai_text_model(self, model: str) -> None:
         self.text_model = model
@@ -464,8 +680,12 @@ class AIClient:
         max_tokens: int = 600,
         temperature: float = 1.0,
         chat_id: int | None = None,
+        advisor: bool = False,
     ) -> str | None:
         """Route a chat completion to the active text provider.
+
+        ``advisor`` lets the Claude model consult the advisor model mid-reply
+        (see ADVISOR_BETA); ignored wherever it can't (OpenAI, no advisor set).
 
         The inner provider methods are decorated with tenacity; on
         exhausted retries tenacity raises a RetryError (and the inner
@@ -477,7 +697,7 @@ class AIClient:
             if self._text_provider == "claude" and self._anthropic is not None:
                 return await self._chat_claude(
                     messages, model=model, max_tokens=max_tokens,
-                    temperature=temperature, chat_id=chat_id,
+                    temperature=temperature, chat_id=chat_id, advisor=advisor,
                 )
             return await self._chat_openai(
                 messages, model=model, max_tokens=max_tokens,
@@ -590,7 +810,10 @@ class AIClient:
                 cache_read_tokens=cached,
                 cost_usd=_openai_text_price(m, pt, ct, cached),
             )
-            return (choice.message.content or "").strip() or None
+            text = (choice.message.content or "").strip()
+            if text and getattr(choice, "finish_reason", None) == "length":
+                text = _trim_to_sentence(text)      # as _claude_text does
+            return text or None
         except OpenAIAPIError:
             # Let tenacity's @retry see this and retry; the wrapping
             # chat() catches whatever survives exhaustion.
@@ -608,6 +831,7 @@ class AIClient:
         max_tokens: int,
         temperature: float,
         chat_id: int | None,
+        advisor: bool = False,
     ) -> str | None:
         if self._anthropic is None:
             log.error("Claude chat requested but no anthropic_api_key.")
@@ -616,14 +840,32 @@ class AIClient:
         system, chat_messages = _normalize_for_claude(
             messages, model=m, ttl=self.cache_ttl,
         )
+        advisor_tool = self._advisor_tool(m) if advisor else None
         kwargs = self._claude_kwargs(
             model=m, system=system, chat_messages=chat_messages,
             max_tokens=max_tokens, temperature=temperature,
+            tools=[advisor_tool] if advisor_tool else None,
         )
         try:
-            resp = await self._anthropic.messages.create(**kwargs)
+            resp = await self._claude_create(kwargs)
             await self._log_claude_usage(resp, m, chat_id)
-            return _claude_text(resp)
+            # A turn that paused while the advisor ran is sent back as it
+            # came, and carries on.
+            for _ in range(_MAX_PAUSE_RESUMES):
+                if getattr(resp, "stop_reason", None) != "pause_turn":
+                    break
+                kwargs = {**kwargs, "messages": [
+                    *kwargs["messages"],
+                    {"role": "assistant", "content": resp.content},
+                ]}
+                resp = await self._claude_create(kwargs)
+                await self._log_claude_usage(resp, m, chat_id)
+            # Only stray markup can leak on this path: a <thinking> block the
+            # model wrote out, say, or the advisor's markup. (Not the word
+            # "advisor" followed by a bracket: "my tax advisor (Gary) says" is
+            # a sentence, and the advisor is a server tool the model never
+            # has to write out.) The tool loop filters the same way.
+            return _withhold_leaked_internals(_claude_text(resp), ())
         except AnthropicAPIError:
             raise
         except Exception as exc:
@@ -644,7 +886,10 @@ class AIClient:
         caching, sampling and thinking rules can't drift between them."""
         kwargs: dict[str, Any] = {
             "model": model,
-            "max_tokens": max_tokens,
+            "max_tokens": (
+                max_tokens + _THINKING_HEADROOM_TOKENS
+                if _always_thinks(model) else max_tokens
+            ),
             "messages": chat_messages,
         }
         if tools:
@@ -656,23 +901,33 @@ class AIClient:
             kwargs["tools"] = tools
         if system:
             kwargs["system"] = system
-        if isinstance(system, list):
-            # The explicit breakpoint above covers the stable prefix. This
-            # top-level one is Anthropic's automatic caching for the growing
-            # conversation: it lands on the last block, and the next
-            # request's lookback finds that write a couple of blocks back —
-            # which only works because build_context keeps the history
-            # window anchored (append-only) rather than sliding. Default
-            # 5m TTL, after the (possibly 1h) system entry, as required.
-            kwargs["cache_control"] = {"type": "ephemeral"}
+        # No top-level (automatic) cache_control, deliberately. It caches
+        # the conversation after the system prompt, but caching is a prefix
+        # match over tools -> system -> messages, and the second system
+        # block (the minute-resolution clock stamp, this message's retrieval
+        # hits, the style reminder) sits BEFORE the messages and differs on
+        # every request. So the entry written for one reply was never read
+        # by the next: a 1.25x write premium on the whole history, every
+        # reply, for nothing. The explicit breakpoint on the stable system
+        # prefix above is the part that actually hits.
+        #
+        # To cache the conversation too, the volatile text has to leave the
+        # system prompt (into a trailing block of the last user turn, after
+        # an explicit breakpoint on the history) so the history prefix stays
+        # byte-identical between replies. Until that is done and measured
+        # (usage.cache_read_input_tokens should then exceed the stable
+        # prefix), not paying the premium is the right default.
         # Sampling parameters were removed across the newer generation, not
         # just on Opus 4.7 — sending temperature to any of them is a 400 on
         # every request. This gate is what keeps /ai_model able to point at
         # a current model at all.
         if not _rejects_sampling(model):
             kwargs["temperature"] = max(0.0, min(1.0, temperature))
-        if _thinks_by_default(model):
-            kwargs["thinking"] = {"type": "disabled"}
+        thinking = _thinking_param(model)
+        if thinking is not None:
+            kwargs["thinking"] = thinking
+        if _always_thinks(model):
+            kwargs["output_config"] = {"effort": "low"}
         return kwargs
 
     async def _log_claude_usage(
@@ -698,6 +953,23 @@ class AIClient:
             cache_write_tokens=cw, cache_read_tokens=cr,
             cost_usd=_claude_text_price(model, pt, ct, cw, cr, w1h),
         )
+        # The top-level usage above is the model writing the reply only. What
+        # the advisor model spent is billed at ITS rates and reported apart,
+        # one iteration per call.
+        for it in getattr(usage, "iterations", None) or ():
+            if getattr(it, "type", None) != "advisor_message":
+                continue
+            am = getattr(it, "model", None) or self.advisor_model or model
+            ipt = getattr(it, "input_tokens", 0) or 0
+            ict = getattr(it, "output_tokens", 0) or 0
+            icw = getattr(it, "cache_creation_input_tokens", 0) or 0
+            icr = getattr(it, "cache_read_input_tokens", 0) or 0
+            await self._log_usage(
+                kind="advisor", model=am, chat_id=chat_id,
+                prompt_tokens=ipt + icw + icr, completion_tokens=ict,
+                cache_write_tokens=icw, cache_read_tokens=icr,
+                cost_usd=_claude_text_price(am, ipt, ict, icw, icr),
+            )
 
     # ----------------------------------------------------------- tools
     @property
@@ -716,6 +988,7 @@ class AIClient:
         max_tokens: int = 600,
         temperature: float = 1.0,
         chat_id: int | None = None,
+        advisor: bool = False,
     ) -> str | None:
         """``chat()`` plus a bounded tool loop: the model may call one of
         ``tools``, ``run_tool(name, args)`` answers it, and the model
@@ -724,13 +997,13 @@ class AIClient:
         if not tools or not self.supports_tools:
             return await self.chat(
                 messages, max_tokens=max_tokens, temperature=temperature,
-                chat_id=chat_id,
+                chat_id=chat_id, advisor=advisor,
             )
         try:
             return await self._chat_claude_tools(
                 messages, tools=tools, run_tool=run_tool,
                 max_tokens=max_tokens, temperature=temperature,
-                chat_id=chat_id,
+                chat_id=chat_id, advisor=advisor,
             )
         except Exception as exc:
             log.error("chat_with_tools() final failure: %s", exc)
@@ -745,6 +1018,7 @@ class AIClient:
         max_tokens: int,
         temperature: float,
         chat_id: int | None,
+        advisor: bool = False,
     ) -> str | None:
         m = self.claude_model
         system, chat_messages = _normalize_for_claude(
@@ -755,12 +1029,36 @@ class AIClient:
         # would mangle.
         convo: list[dict[str, Any]] = list(chat_messages)
         offered = [t["name"] for t in tools]
+        # Last in the list, always: the tools are the head of the cache
+        # prefix, and a chat's list has to be byte-identical from reply to
+        # reply (the advisor is the same for every chat).
+        own_tools = tools
+        asked_for = self._advisor_tool(m) if advisor else None
         for round_no in range(_MAX_TOOL_ROUNDS + 1):
+            # Decided afresh each round: a pairing the API refused in round 0
+            # is not asked for again in round 1 (unless the conversation
+            # already holds advisor blocks, which have to keep their tool).
+            advisor_tool = asked_for if (
+                asked_for is not None
+                and ((m, asked_for["model"]) not in self._advisor_blocked
+                     or _has_advisor_blocks(convo))
+            ) else None
+            tools = [*own_tools, advisor_tool] if advisor_tool else own_tools
             kwargs = self._claude_kwargs(
                 model=m, system=system, chat_messages=convo,
                 max_tokens=max_tokens, temperature=temperature, tools=tools,
             )
             resp = await self._claude_tool_round(kwargs, m, chat_id)
+            # Paused while the advisor ran: send the turn back as it came.
+            for _ in range(_MAX_PAUSE_RESUMES):
+                if getattr(resp, "stop_reason", None) != "pause_turn":
+                    break
+                convo.append({"role": "assistant", "content": resp.content})
+                kwargs = self._claude_kwargs(
+                    model=m, system=system, chat_messages=convo,
+                    max_tokens=max_tokens, temperature=temperature, tools=tools,
+                )
+                resp = await self._claude_tool_round(kwargs, m, chat_id)
             calls = [
                 b for b in resp.content
                 if getattr(b, "type", None) == "tool_use"
@@ -796,9 +1094,114 @@ class AIClient:
     ) -> Any:
         """One request of the tool loop, retried on its own — retrying the
         whole loop instead would re-bill every round before the failure."""
-        resp = await self._anthropic.messages.create(**kwargs)
+        resp = await self._claude_create(kwargs)
         await self._log_claude_usage(resp, model, chat_id)
         return resp
+
+    # ----------------------------------------------------------- advisor
+    def advisor_available(self) -> bool:
+        """Would a reply that asks for the advisor get one? (Claude is the
+        text provider, an advisor model is set, and the API hasn't turned
+        that pairing down.)"""
+        return self._advisor_tool(self.claude_model) is not None and self.supports_tools
+
+    def _advisor_tool(self, executor: str) -> dict[str, Any] | None:
+        if not self.advisor_model:
+            return None
+        if (executor, self.advisor_model) in self._advisor_blocked:
+            return None
+        tool: dict[str, Any] = {
+            "type": ADVISOR_TOOL_TYPE,
+            "name": ADVISOR_TOOL_NAME,
+            "model": self.advisor_model,
+            "max_tokens": max(_ADVISOR_MIN_TOKENS, self.advisor_max_tokens),
+        }
+        # Never unlimited: 0 or less would otherwise leave the cap off.
+        tool["max_uses"] = max(1, self.advisor_max_uses)
+        return tool
+
+    @property
+    def advisor_turned_down(self) -> bool:
+        """Has the API refused the current executor/advisor pairing?"""
+        return (self.claude_model, self.advisor_model) in self._advisor_blocked
+
+    def set_advisor_model(self, model: str | None) -> None:
+        self.advisor_model = (model or "").strip() or None
+        self._advisor_blocked.clear()
+
+    async def probe_advisor_model(self, model: str) -> str | None:
+        """None when the API accepts ``model`` as the advisor for the model
+        that writes replies; otherwise why not. An invalid pairing is a 400,
+        so /ai_advisor asks before it saves one. One eight-token request."""
+        if self._anthropic is None:
+            return "No Anthropic key, so there is no advisor to set."
+        executor = self.claude_model
+        kwargs = self._claude_kwargs(
+            model=executor, system=None,
+            chat_messages=[{"role": "user", "content": "ping"}],
+            max_tokens=8, temperature=1.0,
+            tools=[{
+                "type": ADVISOR_TOOL_TYPE, "name": ADVISOR_TOOL_NAME,
+                "model": model, "max_tokens": _ADVISOR_MIN_TOKENS,
+                "max_uses": 1,
+            }],
+        )
+        try:
+            await self._anthropic.beta.messages.create(betas=[ADVISOR_BETA], **kwargs)
+        except AnthropicAPIError as exc:
+            return str(exc)[:300]
+        except Exception as exc:                  # pragma: no cover - defensive
+            return f"{type(exc).__name__}: {exc}"[:300]
+        return None
+
+    async def _claude_create(self, kwargs: dict[str, Any]) -> Any:
+        """One messages.create. A request that carries the advisor goes to the
+        beta endpoint, with longer to answer. If that fails in a way a plain
+        request wouldn't, the same request is made without it so the reply
+        still goes out:
+
+        * a 400 (an invalid executor/advisor pairing after an /ai_model
+          change, a beta that isn't on for this key): the pairing is also left
+          alone from then on, once the plain request shows it was the advisor;
+        * a timeout, a dropped connection, a 5xx/overloaded: transient, so
+          nothing is blocked.
+
+        Not when the conversation already holds advisor blocks: the advisor
+        can't be dropped from a request that carries them, and a pairing the
+        API refuses is always refused on a reply's first request, before any
+        exist. The retry's own failure is the real error and propagates."""
+        tools = kwargs.get("tools") or []
+        advisor = next((t for t in tools if t.get("type") == ADVISOR_TOOL_TYPE), None)
+        if advisor is None:
+            return await self._anthropic.messages.create(**kwargs)
+        try:
+            return await self._anthropic.beta.messages.create(
+                betas=[ADVISOR_BETA], timeout=_ADVISOR_TIMEOUT_SECONDS, **kwargs,
+            )
+        except (AnthropicBadRequestError, AnthropicAPITimeoutError,
+                AnthropicAPIConnectionError, AnthropicInternalServerError,
+                AnthropicOverloadedError) as exc:
+            if _has_advisor_blocks(kwargs.get("messages") or ()):
+                raise
+            plain = {**kwargs}
+            rest = [t for t in tools if t is not advisor]
+            if rest:
+                plain["tools"] = rest
+            else:
+                plain.pop("tools", None)
+            resp = await self._anthropic.messages.create(**plain)
+            if isinstance(exc, AnthropicBadRequestError):
+                self._advisor_blocked.add((kwargs["model"], advisor["model"]))
+                log.warning(
+                    "Advisor %s turned down for %s (%s); replying without it "
+                    "from now on.", advisor["model"], kwargs["model"], str(exc)[:160],
+                )
+            else:
+                log.warning(
+                    "The advisor request failed (%s); replied without it this "
+                    "time.", type(exc).__name__,
+                )
+            return resp
 
     # ----------------------------------------------------------- vision
     async def describe_image(
@@ -818,7 +1221,26 @@ class AIClient:
         Returns None when no provider can see, or the call fails — every
         caller degrades to a text label.
         """
-        b64 = base64.b64encode(image).decode("ascii")
+        return await self.describe_images(
+            [image], media_type=media_type, prompt=prompt,
+            max_tokens=max_tokens, chat_id=chat_id,
+        )
+
+    async def describe_images(
+        self,
+        images: Sequence[bytes],
+        *,
+        media_type: str = "image/jpeg",
+        prompt: str,
+        max_tokens: int = 300,
+        chat_id: int | None = None,
+    ) -> str | None:
+        """Look at one or several images together (the frames of a video, in
+        order) and return one plain-text description. Same routing and same
+        None-on-failure contract as describe_image."""
+        encoded = [base64.b64encode(i).decode("ascii") for i in images]
+        if not encoded:
+            return None
         if self._anthropic is not None:
             try:
                 resp = await self._anthropic.messages.create(
@@ -827,14 +1249,17 @@ class AIClient:
                     messages=[{
                         "role": "user",
                         "content": [
-                            {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": media_type,
-                                    "data": b64,
-                                },
-                            },
+                            *(
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": media_type,
+                                        "data": b64,
+                                    },
+                                }
+                                for b64 in encoded
+                            ),
                             {"type": "text", "text": prompt},
                         ],
                     }],
@@ -864,12 +1289,15 @@ class AIClient:
                         "role": "user",
                         "content": [
                             {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{media_type};base64,{b64}",
-                                },
-                            },
+                            *(
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:{media_type};base64,{b64}",
+                                    },
+                                }
+                                for b64 in encoded
+                            ),
                         ],
                     }],
                 )
@@ -885,7 +1313,7 @@ class AIClient:
             except Exception as exc:
                 log.warning("OpenAI vision error: %s", exc)
                 return None
-        log.debug("describe_image called with no vision-capable provider.")
+        log.debug("describe_images called with no vision-capable provider.")
         return None
 
     # ----------------------------------------------------------- embeddings (OpenAI only)
@@ -917,10 +1345,12 @@ class AIClient:
             text = text.strip()
             if not text:
                 return None
-            resp = await self._openai.embeddings.create(
-                model=self.embedding_model,
-                input=text[:8000],
-            )
+            kwargs: dict = {"model": self.embedding_model, "input": text[:8000]}
+            if self.embedding_model.startswith("text-embedding-3"):
+                # The only family that can be asked for a size. EMBEDDING_DIM
+                # sizes the database column, so the two have to agree.
+                kwargs["dimensions"] = self.embedding_dim
+            resp = await self._openai.embeddings.create(**kwargs)
             usage = getattr(resp, "usage", None)
             pt = getattr(usage, "prompt_tokens", 0) or 0
             rate = _EMBED_PRICE_PER_1K.get(self.embedding_model, 0.00002)
@@ -928,7 +1358,19 @@ class AIClient:
                 kind="embed", model=self.embedding_model, chat_id=chat_id,
                 prompt_tokens=pt, cost_usd=(pt / 1000) * rate,
             )
-            return list(resp.data[0].embedding)
+            vector = list(resp.data[0].embedding)
+            if len(vector) != self.embedding_dim:
+                # Stored in a vector(N) column, a vector of another length
+                # fails every insert and every search, quietly. Say why, once.
+                if not self._warned_embedding_dim:
+                    self._warned_embedding_dim = True
+                    log.error(
+                        "Embedding model %s returned %d numbers but EMBEDDING_DIM "
+                        "is %d: semantic memory is off until they agree.",
+                        self.embedding_model, len(vector), self.embedding_dim,
+                    )
+                return None
+            return vector
         except OpenAIAPIError:
             # Let tenacity's @retry see this and retry; the wrapping
             # embed() catches whatever survives exhaustion.
@@ -975,7 +1417,7 @@ class AIClient:
     # ----------------------------------------------------------- audio (OpenAI only)
     async def transcribe(
         self, audio: BinaryIO, filename: str = "audio.ogg",
-        chat_id: int | None = None,
+        chat_id: int | None = None, seconds: float | None = None,
     ) -> str | None:
         if self._openai is None:
             log.error("Transcribe requested but no openai_api_key.")
@@ -989,7 +1431,13 @@ class AIClient:
             )
             await self._log_usage(
                 kind="transcribe", model=self.transcription_model,
-                chat_id=chat_id, cost_usd=_AUDIO_PER_MINUTE,
+                chat_id=chat_id,
+                # Billed by the minute: a five-minute video is five of them.
+                # Without a length (a voice note) it is the flat one it was.
+                cost_usd=(
+                    _AUDIO_PER_MINUTE * max(seconds, 1.0) / 60.0
+                    if seconds else _AUDIO_PER_MINUTE
+                ),
             )
             return (getattr(resp, "text", "") or "").strip() or None
         except Exception as exc:

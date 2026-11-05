@@ -12,7 +12,7 @@ For Unraid-specific instructions see [`UNRAID.md`](UNRAID.md).
 | `DATABASE_URL` | yes | `postgresql://user:pass@host:port/db` |
 | `ADMIN_USER_IDS` | no | `315660812` is always implicitly included |
 | `TEXT_PROVIDER` | no | `claude` (default when Anthropic key present) or `openai`. Persisted at runtime via `/ai_provider`. |
-| `CLAUDE_TEXT_MODEL` | no | Default `claude-sonnet-4-6`. Runtime-tunable via `/ai_model`. |
+| `CLAUDE_TEXT_MODEL` | no | Default `claude-sonnet-5`. Runtime-tunable via `/ai_model`. |
 | `OPENAI_TEXT_MODEL` | no | Default `gpt-4o-mini`. Runtime-tunable via `/ai_model`. |
 | `OPENAI_*_MODEL` | no | Image / embedding / transcription model overrides |
 | `EVOLVE_GITHUB_TOKEN` | no | Fine-grained PAT, this repo only, Issues read/write and nothing else. Lets the owner's `/evolve` file change requests. Unset → `/evolve` says what's missing. |
@@ -20,6 +20,9 @@ For Unraid-specific instructions see [`UNRAID.md`](UNRAID.md).
 | `BOT_ALIASES` | no | Comma-separated names it answers to (and takes "bad <name>" for). Blank → just the name. |
 | `BOT_FLAVOR` | no | `dale` (default) or `plain`: plain drops Dale's own catchphrases, GIF reflexes and /start blurb. |
 | `BOT_PERSONA` | no | The persona prompt it starts with, until `/master_prompt` overrides it. Blank → Dale's. |
+| `MANAGES_BOTS` | no | `true` (default) for the deployment that runs the others. The supervisor starts every other bot with `false`: they answer to their own names only, not the generic word "bot". |
+| `DB_POOL_MAX` | no | Largest Postgres pool this process may hold (default 10; the other bots get 4). |
+| `HUB_DATABASE_URL` | no | Where the bots hear each other. Unset → this bot's own `DATABASE_URL`, which is right for Dale. |
 
 ## Other bots
 
@@ -42,6 +45,25 @@ its database (`ipedro_bot_<id>` on the same Postgres) and runs it.
 
 The supervisor needs the Postgres user to be allowed to create
 databases; the compose default user is.
+
+**Postgres connections.** Every bot holds its own pool plus a few for the hub
+(Dale's pool is up to `DB_POOL_MAX`=10, each other bot's is 4), against one
+server whose `max_connections` defaults to 100. That is comfortable for a
+handful of bots and runs out somewhere past a dozen; raise `max_connections`
+(`command: postgres -c max_connections=200` on the `postgres` service in the
+compose file) before adding many more.
+
+**Bot admins.** A bot started by the supervisor inherits Dale's environment
+apart from the few things set per bot (its token, database, name, persona,
+`MANAGES_BOTS`, and not `EVOLVE_GITHUB_TOKEN`). That includes `ADMIN_USER_IDS`,
+so Dale's bot admins are bot admins on every other bot too. The owner (the
+one id who can `/newbot` and `/evolve`) works only on Dale.
+
+**Who answers to "bot".** With several bots in a group, "bot, settle this"
+could only mean all of them. So only Dale (the deployment with
+`MANAGES_BOTS=true`) answers to the generic word "bot"; the others answer to
+their own names, replies to them, and @mentions. A lone bot you run yourself
+with the default `MANAGES_BOTS` still answers to it.
 
 The full list of tunables (memory budgets, duckhunt parameters, etc.) is in
 `.env.example`. Anything missing falls back to the defaults declared in
@@ -91,7 +113,9 @@ python -m scripts.migrate_legacy \
     --default-chat-id -1001273502662
 ```
 
-Only paths that actually exist are imported; the migrator is idempotent.
+Only paths that actually exist are imported. Run it **once**: only the chat-id
+import is repeatable. The duck-point import adds the file's counts again on
+every run, and the history import appends a second copy.
 
 ## Operational tips
 

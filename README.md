@@ -10,11 +10,18 @@ command, and ships in a Docker container that runs comfortably on Unraid.
 
 ## Highlights
 
-- **Hybrid AI stack**: Claude Sonnet 4.6 for text completions (chat,
+- **Hybrid AI stack**: Claude Sonnet 5 for text completions (chat,
   `/a`, summaries, the duck personality, etc.); OpenAI for embeddings,
   image generation, and audio (Whisper). The text provider is
   runtime-switchable via `/ai_provider` so you can flip back to OpenAI
   GPT without a redeploy.
+- **Sees pictures and watches videos**: photos, stickers and GIFs are
+  described by a vision model; a video (or GIF, or round video note) is
+  watched, meaning a few frames sampled across it plus, where the chat has
+  voice transcription on, a transcript of what was said, described together
+  and remembered like anything typed. Needs `ffmpeg` (the Docker image has
+  it); without it, or past the size/length/rate limits, it falls back to the
+  thumbnail.
 - **Postgres + pgvector** memory: raw messages, rolling summaries, durable
   facts, embeddings — assembled on demand and token-budgeted.
 - **Per-chat config**: response policy, persona, ambient probability,
@@ -29,7 +36,8 @@ command, and ships in a Docker container that runs comfortably on Unraid.
   streaks, miss tracking, leaderboards, per-user cooldowns, AI-gated
   `bef` (the duck personality decides whether to be your friend), and a
   retry-challenge mechanic. State is restart-safe.
-- **Admin gating** locked to Telegram user id `315660812` and **private DM
+- **Admin gating** by numeric Telegram user id (the owner, `315660812`,
+  plus any `ADMIN_USER_IDS`) and **private DM
   only** — sensitive commands cannot be invoked from groups.
 - **Graceful degradation**: missing `pgvector`, transient OpenAI/Anthropic
   errors, failed transcription, or unreachable Telegram do not crash the
@@ -62,7 +70,7 @@ See [`docs/UNRAID.md`](docs/UNRAID.md). TL;DR:
 ```bash
 cp .env.example .env
 # fill in TELEGRAM_BOT_TOKEN, OPENAI_API_KEY, etc.
-cd docker && docker compose up -d --build
+cd docker && docker compose --env-file ../.env up -d --build   # keep the flag
 ```
 
 ## Commands
@@ -84,13 +92,13 @@ a second message.
 | `/beneficiality` | Score whether the bot would butt in |
 | `/whatdid @user` | Confidently summarize what someone's been up to |
 | `/tldr [duration]` | Summarize the recent chat (default 24h) |
-| `/mood` | Bot's current mood + word of the day |
 | `/haiku` | Haiku about the recent chat |
 | `/this_or_that A \| B` | Bot picks, dramatically |
 | `/echo @user [topic]` | Mimic that user's style |
 | `/roast @user`, `/compliment @user` | What it says on the tin |
 | `/lyric <line>` | Bot misheard it |
 | `/meme top \| bottom` | Generate a meme image |
+| `/reverse [mute]` | Play a video, GIF or round video backwards (reply to it, or send it with `/reverse`; or say "reverse this") |
 | `/ether <text>` (or on/replying to a voice note) | Transmit a message into another ether-enabled chat as a far-away **HF radio voice** — text is TTS'd, a real voice note is used as-is, then both get a long-haul DX ffmpeg treatment (narrow SSB band, wandering pitch, fading, crush/overdrive, AGC hiss, heterodyne whistle) |
 | `/duckhunt`, `/quackflag` | Spawn / check current duck |
 | `/duckstats`, `/duckfriends`, `/duckname <id> <name>`, `/global_leaderboard` | Duckhunt stats and management |
@@ -101,7 +109,7 @@ a second message.
 | `/karma` | Chat karma leaderboard (👍/👎 reactions grant/dock) |
 | `/remind <duration> <text>` | Schedule a future reminder (e.g. `1h30m`) |
 | `/birthday MM-DD`, `/anniversary <name> MM-DD-YYYY`, `/dates` | Track / list chat dates |
-| `/poll Q \| A \| B \| …` | Create a poll |
+| `/poll Q \| A \| B \| …` | Create a poll. Reply to a message, or send a screenshot or `.txt` with `/poll` (or say "make a poll from this"), and the bot drafts one from it. Say the kind (`quiz`, `public`, "pick all that apply", "closes in 10 minutes"), or leave out what it's about and he asks |
 | `/confess <text>` | Anonymous confession (DM only, not admin-only) |
 
 ### Mod (chat admin or bot admin)
@@ -128,6 +136,7 @@ a second message.
 | `/master_prompt show \| set <text> \| setfile \| reset` | Global persona prompt (use `setfile` to upload a `.txt` for prompts >4079 chars) |
 | `/ai_provider show \| claude \| openai` | Switch text-completion provider |
 | `/ai_model show \| [provider] <model_id>` | Switch text model for the active (or named) provider |
+| `/ai_advisor show \| off \| <model_id>` | The stronger model Dale may consult mid-reply on a hard question (Anthropic's advisor tool) |
 | `/quack_chat`, `/quack_all` | Admin-spawn ducks via picker / in every enabled chat |
 | `/duckstats_reset [chat_id] [user_id\|all]` | Wipe a user's (or every user's) duck_stats counters in a chat; leaderboard-style picker if no args |
 | `/memory_facts [chat_id]` | Inline picker (or direct lookup) of stored durable facts |
@@ -148,7 +157,7 @@ dude` as a reply to a bot message deletes that message.
 
 ## AI providers
 
-Text completions default to Claude **Sonnet 4.6**; embeddings, images,
+Text completions default to Claude **Sonnet 5**; embeddings, images,
 and audio always go to OpenAI. Both keys live in `.env`:
 
 ```
@@ -162,7 +171,7 @@ Runtime knobs (admin DM only, persisted across restarts):
 /ai_provider show              # which provider is active + both models
 /ai_provider claude            # use Claude for text
 /ai_provider openai            # use OpenAI GPT for text
-/ai_model claude-opus-4-7      # change the active provider's model
+/ai_model claude-opus-5-5      # change the active provider's model (Claude ids are tried first)
 /ai_model claude claude-haiku-4-5      # explicitly set Claude's model
 /ai_model openai gpt-4.1-mini  # explicitly set OpenAI's model
 ```
@@ -196,6 +205,9 @@ them hit Postgres, Telegram, or OpenAI for real.
 - Admin gating uses **numeric Telegram user id only** — never usernames.
 - Admin commands are private-DM only.
 - `logging_setup.py` redacts plausible secrets from log lines.
+- Who can do what, what's limited, and how `/evolve` is fenced in:
+  [`docs/SECURITY.md`](docs/SECURITY.md). The latest full review:
+  [`docs/AUDIT.md`](docs/AUDIT.md).
 
 If you previously stored secrets in `agents.md` or anywhere in this repo's
 git history, **rotate them** — they are considered leaked.

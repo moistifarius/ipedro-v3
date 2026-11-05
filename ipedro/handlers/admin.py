@@ -11,8 +11,10 @@ from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message,
 )
-from aiogram.exceptions import TelegramBadRequest
+import asyncpg
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 
+from ipedro import identity
 from ipedro.auth import is_admin_user
 from ipedro.bot_messages import (
     TrackedMessage, forget as forget_tracked, recent as recent_tracked,
@@ -34,10 +36,12 @@ from ipedro.kv import kv_delete, kv_set
 from ipedro.logging_setup import recent_log_lines
 from ipedro.memory.summarizer import force_summarize
 from ipedro.memory.tokens import count_tokens
+from ipedro.openai_client import has_claude_price
 from ipedro.personas import (
     current_master_prompt, default_prompt, set_master_prompt_override,
 )
 from ipedro.runtime import Runtime
+from ipedro.text_chunks import chunk_lines
 from ipedro.silenced_chats import (
     is_silenced, list_silenced, silence as silence_chat, unsilence as unsilence_chat,
 )
@@ -72,6 +76,23 @@ def _pop_search_query(user_id: int) -> str | None:
 _MASTER_PROMPT_FILE_MAX_BYTES = 64 * 1024
 
 log = logging.getLogger(__name__)
+
+
+_TOAST_MAX = 190            # Telegram refuses an answerCallbackQuery over 200
+
+
+def _toast(prefix: str, exc: object) -> str:
+    """A callback toast carrying an error's text, short enough to be sent: a
+    long asyncpg or Telegram message made the reporting call itself fail, so
+    the admin saw a spinner and nothing else."""
+    return f"{prefix}{exc}"[:_TOAST_MAX]
+
+
+def _looks_like_chat_id(token: str) -> bool:
+    """A Telegram chat id as typed: negative for groups, or a long number for
+    a user's DM. A short number ('2019', '90') is a word in a query."""
+    digits = token[1:] if token.startswith("-") else token
+    return digits.isdigit() and (token.startswith("-") or len(digits) >= 6)
 
 
 async def _resolve_user_id(rt, chat_id: int, ref: str) -> int | None:
@@ -364,7 +385,9 @@ def _mgm_top_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _mgm_category_submenu(category_key: str) -> InlineKeyboardMarkup:
+def _mgm_category_submenu(
+    category_key: str, *, manages_bots: bool = True,
+) -> InlineKeyboardMarkup:
     """Submenu for one category: a button per command + a 'back' row.
 
     Wired commands (action != None) route to their existing mgm: leaf;
@@ -374,7 +397,7 @@ def _mgm_category_submenu(category_key: str) -> InlineKeyboardMarkup:
     # The back row links back to the hub. The category-specific submenu
     # IS the second-level screen, so 'back' from here goes to the top.
     rows: list[list[InlineKeyboardButton]] = []
-    for cmd in commands_in_category(category_key):
+    for cmd in commands_in_category(category_key, manages_bots=manages_bots):
         data = cmd.action or f"mgm:cmd:{cmd.slug}"
         rows.append([InlineKeyboardButton(text=cmd.name, callback_data=data)])
     rows.append([
@@ -403,9 +426,10 @@ def _mgm_duck_submenu() -> InlineKeyboardMarkup:
     return _mgm_category_submenu("duckhunt")
 
 
-def _mgm_ai_submenu() -> InlineKeyboardMarkup:
+def _mgm_ai_submenu(*, manages_bots: bool = True) -> InlineKeyboardMarkup:
     """AI-provider admin submenu plus cross-links into the aip:* picker."""
-    base_rows = list(_mgm_category_submenu("ai_admin").inline_keyboard)
+    base_rows = list(_mgm_category_submenu(
+        "ai_admin", manages_bots=manages_bots).inline_keyboard)
     # Insert provider/model cross-links above the 'back' row so the
     # existing aip:* dispatcher (lives in admin.py's /ai_provider section)
     # remains directly tappable from /manage.
@@ -457,10 +481,33 @@ _MGM_LEAVES: tuple[str, ...] = tuple(sorted(set(
 )))
 
 
+async def _reply_in_chunks(
+    msg: Message, lines: list[str], *, header: str | None = None,
+    max_chunks: int = 6,
+) -> None:
+    """Send `lines` as however many messages they need (see
+    ipedro/text_chunks.py), with a "(2/4)" counter when there are several,
+    and say so if more than `max_chunks` would have been needed."""
+    chunks = chunk_lines(lines)
+    shown = chunks[:max_chunks]
+    for i, chunk in enumerate(shown, 1):
+        tag = ""
+        if header:
+            tag = header + (f" ({i}/{len(chunks)})" if len(chunks) > 1 else "") + "\n"
+        await msg.reply(tag + chunk, disable_notification=True)
+    if len(chunks) > max_chunks:
+        await msg.reply(
+            f"… {len(chunks) - max_chunks} more message(s) not shown. "
+            "Ask for fewer, or filter.",
+            disable_notification=True,
+        )
+
+
 # Known text models for /ai_model and aip:list pickers. Promotes the
 # private price-table keys without coupling admin.py to openai_client
 # internals. Update by hand when adding a new model price entry.
 _KNOWN_CLAUDE_TEXT_MODELS: tuple[str, ...] = (
+    "claude-sonnet-5-5", "claude-opus-5-5",
     "claude-sonnet-5", "claude-opus-5", "claude-opus-4-8",
     "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5",
     "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5",
@@ -799,8 +846,14 @@ def build_router(rt: Runtime) -> Router:
         try:
             await rt.bot.send_message(target, body, disable_notification=True)
             await msg.reply("Sent.", disable_notification=True)
-        except TelegramBadRequest as exc:
-            await msg.reply(f"Send failed: {exc.message}", disable_notification=True)
+        except TelegramAPIError as exc:
+            # Not just BadRequest: a chat the bot was kicked from, or a user
+            # who blocked it, is Forbidden, and a flood limit is RetryAfter.
+            # Either way the admin should hear that it did NOT go out.
+            await msg.reply(
+                f"Send failed: {getattr(exc, 'message', None) or exc}",
+                disable_notification=True,
+            )
 
     @r.message(Command("logs"))
     async def logs_cmd(msg: Message) -> None:
@@ -828,21 +881,7 @@ def build_router(rt: Runtime) -> Router:
                 disable_notification=True,
             )
             return
-        # Telegram caps a single message at 4096 chars; chunk and send.
-        chunks: list[str] = []
-        buf = ""
-        for ln in lines:
-            extra = ln + "\n"
-            if len(buf) + len(extra) > 3800:
-                chunks.append(buf)
-                buf = extra
-            else:
-                buf += extra
-        if buf:
-            chunks.append(buf)
-        for i, chunk in enumerate(chunks[:5], 1):
-            header = f"-- logs ({i}/{len(chunks)}) --\n" if len(chunks) > 1 else ""
-            await msg.reply(header + chunk, disable_notification=True)
+        await _reply_in_chunks(msg, lines, header="-- logs --", max_chunks=12)
 
     @r.message(Command("cmdlog"))
     async def cmdlog(msg: Message) -> None:
@@ -859,7 +898,7 @@ def build_router(rt: Runtime) -> Router:
             + (f" err={r['error']}" if r["error"] else "")
             for r in rows
         ]
-        await msg.reply("Recent commands:\n" + "\n".join(lines), disable_notification=True)
+        await _reply_in_chunks(msg, lines, header="Recent commands:")
 
     @r.message(Command("activity"))
     async def activity_cmd(msg: Message) -> None:
@@ -903,7 +942,7 @@ def build_router(rt: Runtime) -> Router:
             + (f": {r['detail']}" if r["detail"] else "")
             for r in rows
         ]
-        await msg.reply("Recent activity:\n" + "\n".join(lines), disable_notification=True)
+        await _reply_in_chunks(msg, lines, header="Recent activity:", max_chunks=12)
 
     @r.message(Command("quack_all"))
     async def quack_all(msg: Message) -> None:
@@ -1002,7 +1041,7 @@ def build_router(rt: Runtime) -> Router:
             await rt.bot.send_message(target, text, disable_notification=True)
         except Exception as exc:
             log.warning("quack_chat failed for chat %s: %s", target, exc)
-            await cb.answer(f"Failed: {exc}", show_alert=True)
+            await cb.answer(_toast("Failed: ", exc), show_alert=True)
             return
         log.info(
             "quack_chat: spawned in chat=%s event_id=%s",
@@ -1139,14 +1178,25 @@ def build_router(rt: Runtime) -> Router:
             # so the wizard isn't an empty shell on first open. We don't have
             # a Message scoped to that chat here, so use settings directly.
             s = rt.settings
-            cfg = await rt.chats.upsert_default_config(
-                target_chat_id,
-                response_policy=s.default_response_policy_group,
-                ambient_probability=s.default_ambient_probability,
-                persona=s.default_persona,
-                duckhunt_enabled=s.duckhunt_enabled_by_default,
-                share_photo_enabled=s.share_photo_enabled_by_default,
-            )
+            try:
+                cfg = await rt.chats.upsert_default_config(
+                    target_chat_id,
+                    response_policy=s.default_response_policy_group,
+                    ambient_probability=s.default_ambient_probability,
+                    persona=s.default_persona,
+                    duckhunt_enabled=s.duckhunt_enabled_by_default,
+                    share_photo_enabled=s.share_photo_enabled_by_default,
+                )
+            except asyncpg.ForeignKeyViolationError:
+                # chat_config references chats: an id the bot has never seen
+                # (usually a typo) has no row to hang settings on.
+                if reply_to is not None:
+                    await reply_to.reply(
+                        "I've never seen that chat. /list_chat_ids shows the "
+                        "ones I know.",
+                        disable_notification=True,
+                    )
+                return
         body = _config_wizard_header(cfg, target_chat_id, is_dm_scoped=True)
         kb = _config_keyboard(cfg, target_chat_id=target_chat_id)
         if reply_to:
@@ -1485,10 +1535,13 @@ def build_router(rt: Runtime) -> Router:
         chat_id: int,
         n: int,
         edit_in: Message | None = None,
-    ) -> None:
+    ) -> str:
+        """Delete the last n tracked bot messages and say what happened.
+        Returns a toast-sized summary of the real outcome."""
         entries = recent_tracked(chat_id)[:n]
         if not entries:
             body = f"No recent bot messages tracked for chat {chat_id}."
+            toast = "Nothing to delete."
         else:
             ok = 0
             for e in entries:
@@ -1497,6 +1550,7 @@ def build_router(rt: Runtime) -> Router:
             body = (
                 f"Deleted {ok}/{len(entries)} message(s) in chat {chat_id}."
             )
+            toast = f"Deleted {ok}/{len(entries)}."
         if target_msg is not None:
             await target_msg.reply(body, disable_notification=True)
         elif edit_in is not None:
@@ -1504,6 +1558,7 @@ def build_router(rt: Runtime) -> Router:
                 await edit_in.edit_text(body)
             except TelegramBadRequest:
                 pass
+        return toast
 
     @r.callback_query(F.data.startswith("dlastch:"))
     async def on_delete_last_chat(cb: CallbackQuery) -> None:
@@ -1567,8 +1622,8 @@ def build_router(rt: Runtime) -> Router:
             await cb.answer()
             return
         # N == 1, just do it.
-        await _execute_delete_last(None, target, 1, edit_in=cb.message)
-        await cb.answer("Deleted.")
+        await cb.answer(
+            await _execute_delete_last(None, target, 1, edit_in=cb.message))
 
     @r.callback_query(F.data.startswith("dlast:"))
     async def on_delete_last_confirm(cb: CallbackQuery) -> None:
@@ -1593,8 +1648,8 @@ def build_router(rt: Runtime) -> Router:
                     pass
             await cb.answer()
             return
-        await _execute_delete_last(None, target, n, edit_in=cb.message)
-        await cb.answer("Deleted.")
+        await cb.answer(
+            await _execute_delete_last(None, target, n, edit_in=cb.message))
 
     # -------------------------------- silenced-chats (admin-only override) ---
     @r.message(Command("silenced_chats"))
@@ -1820,6 +1875,16 @@ def build_router(rt: Runtime) -> Router:
             slot = rt.openai.text_provider
             new_model = parts[1]
         if slot == "claude":
+            # Ask Anthropic first: a model id it rejects makes every reply
+            # a swallowed 400, and the saved setting outlives a restart.
+            problem = await rt.openai.probe_claude_model(new_model)
+            if problem:
+                await msg.reply(
+                    f"Anthropic rejected {new_model}, so nothing changed "
+                    f"(still {rt.openai.claude_model}):\n{problem}",
+                    disable_notification=True,
+                )
+                return
             rt.openai.set_claude_model(new_model)
             await kv_set(rt.db, "claude_text_model", new_model)
         else:
@@ -1827,6 +1892,87 @@ def build_router(rt: Runtime) -> Router:
             await kv_set(rt.db, "openai_text_model", new_model)
         await msg.reply(
             f"{slot} text model is now {new_model}.",
+            disable_notification=True,
+        )
+
+    @r.message(Command("ai_advisor"))
+    async def ai_advisor(msg: Message) -> None:
+        """The stronger model Dale may consult mid-reply (Anthropic's advisor
+        tool, a beta).
+
+        /ai_advisor show
+        /ai_advisor off
+        /ai_advisor <model_id>
+        """
+        if not await require_admin(msg, admin_ids):
+            return
+        ai = rt.openai
+        # The setting is saved either way, but only Dale, on the Claude path,
+        # ever consults one: say so wherever it would otherwise look like it
+        # did something.
+        notes = ""
+        if not identity.from_settings(rt.settings).dale_flavor:
+            notes += "\n(Only Dale consults an advisor; this bot never does.)"
+        if getattr(ai, "text_provider", "claude") != "claude":
+            notes += (
+                f"\n(Inactive while the text provider is {ai.text_provider}: "
+                "only the Claude path has an advisor.)"
+            )
+        parts = (msg.text or "").split()
+        sub = parts[1] if len(parts) > 1 else "show"
+        if sub.lower() == "show":
+            if not ai.advisor_model:
+                state = "off"
+            elif ai.advisor_turned_down:
+                state = (
+                    f"{ai.advisor_model}, but the API turned the pairing with "
+                    f"{ai.claude_model} down, so replies go without it"
+                )
+            else:
+                state = ai.advisor_model
+            await msg.reply(
+                f"Advisor: {state}\n"
+                f"  writes the replies: {ai.claude_model}\n"
+                f"  at most {max(1, ai.advisor_max_uses)} consult(s) per request "
+                f"(a reply that also uses a tool takes a few requests), "
+                f"{max(1024, ai.advisor_max_tokens)} tokens each\n"
+                "He is told to ask rarely: hard questions, not banter. Its "
+                "tokens bill at its own rates (/cost, kind 'advisor').\n"
+                "Change with: /ai_advisor <model_id>  or  /ai_advisor off"
+                + notes,
+                disable_notification=True,
+            )
+            return
+        if sub.lower() in ("off", "none", "disable", "disabled"):
+            ai.set_advisor_model(None)
+            await kv_set(rt.db, "advisor_model", "off")
+            await msg.reply(
+                "No advisor. Replies are written without one." + notes,
+                disable_notification=True,
+            )
+            return
+        # Ask Anthropic first: a pairing it refuses is dropped at the first
+        # reply, but the saved setting outlives a restart.
+        problem = await ai.probe_advisor_model(sub)
+        if problem:
+            await msg.reply(
+                f"Anthropic won't take {sub} as the advisor for "
+                f"{ai.claude_model}, so nothing changed (still "
+                f"{ai.advisor_model or 'off'}):\n{problem}",
+                disable_notification=True,
+            )
+            return
+        ai.set_advisor_model(sub)
+        await kv_set(rt.db, "advisor_model", sub)
+        priced = ""
+        if not has_claude_price(sub):
+            priced = (
+                f"\nNo price on file for {sub}, so /cost counts it at the "
+                "default $3/$15 per million tokens until a row is added to "
+                "_CLAUDE_TEXT_PRICE_PER_1K."
+            )
+        await msg.reply(
+            f"Advisor is now {sub}." + priced + notes,
             disable_notification=True,
         )
 
@@ -2002,9 +2148,13 @@ def build_router(rt: Runtime) -> Router:
         for r in rows:
             c = float(r["cost"] or 0)
             total += c
-            cached_total += int(r["cached"] or 0)
-            written_total += int(r["written"] or 0)
-            prompt_total += int(r["prompt"] or 0)
+            if r["kind"] != "advisor":
+                # The advisor's prompts are read in full and never cached (it
+                # is a different model reading a different transcript): in
+                # this line they would read as the main prompt cache failing.
+                cached_total += int(r["cached"] or 0)
+                written_total += int(r["written"] or 0)
+                prompt_total += int(r["prompt"] or 0)
             lines.append(
                 f"  {r['kind']:<10}  {r['calls']:>5} calls  "
                 f"{int(r['tokens']):>8} tokens  ${c:.4f}"
@@ -2143,7 +2293,7 @@ def build_router(rt: Runtime) -> Router:
         if not chats:
             await msg.reply("No known chats yet.", disable_notification=True)
             return
-        sections: list[str] = []
+        lines: list[str] = []
         total_facts = 0
         chats_with_facts = 0
         for c in chats:
@@ -2152,38 +2302,21 @@ def build_router(rt: Runtime) -> Router:
                 continue
             chats_with_facts += 1
             total_facts += len(facts)
-            head = f"━ {_chat_label(c)} [{c['chat_id']}] ({len(facts)}):"
-            body = "\n".join(f"  [{f.id}] {f.fact}" for f in facts)
-            sections.append(f"{head}\n{body}")
-        if not sections:
+            if lines:
+                lines.append("")
+            lines.append(f"━ {_chat_label(c)} [{c['chat_id']}] ({len(facts)}):")
+            lines.extend(f"  [{f.id}] {f.fact}" for f in facts)
+        if not lines:
             await msg.reply(
                 "No facts stored in any known chat yet.",
                 disable_notification=True,
             )
             return
-        footer = (
-            f"\n\nTotal: {total_facts} facts across "
-            f"{chats_with_facts} chat(s)."
+        lines.append("")
+        lines.append(
+            f"Total: {total_facts} facts across {chats_with_facts} chat(s)."
         )
-        # Telegram caps outbound at 4096; chunk sections so each reply fits.
-        chunks: list[str] = []
-        current = ""
-        for section in sections:
-            piece = ("\n\n" if current else "") + section
-            if len(current) + len(piece) > 3900:
-                chunks.append(current)
-                current = section
-            else:
-                current += piece
-        if current:
-            chunks.append(current)
-        # Footer attaches to the last chunk if it fits, else gets its own.
-        if chunks and len(chunks[-1]) + len(footer) <= 3900:
-            chunks[-1] += footer
-        else:
-            chunks.append(footer.lstrip())
-        for chunk in chunks:
-            await msg.reply(chunk, disable_notification=True)
+        await _reply_in_chunks(msg, lines, max_chunks=12)
 
     @r.message(Command("memory_stats"))
     async def memory_stats(msg: Message) -> None:
@@ -2515,11 +2648,12 @@ def build_router(rt: Runtime) -> Router:
         target: int | None = None
         query: str
         if len(parts) >= 3:
-            try:
+            if _looks_like_chat_id(parts[1]):
                 target = int(parts[1])
                 query = parts[2].strip()
-            except ValueError:
-                # `parts[1]` isn't an int → treat whole tail as the query.
+            else:
+                # Not a chat id (a word, or a short number like "2019 road
+                # trip") → the whole tail is the query.
                 query = (parts[1] + " " + parts[2]).strip()
         else:
             query = parts[1].strip()
@@ -2685,6 +2819,12 @@ def build_router(rt: Runtime) -> Router:
             target, include_facts=include_facts,
         )
         parts = [f"{v} {k}" for k, v in counts.items()]
+        # There is no undo, so leave a trace of who did it, to what, and when.
+        await rt.command_log.add(
+            msg.chat.id, msg.from_user.id if msg.from_user else None,
+            "/memory_wipe",
+            f"chat={target} facts={include_facts} {', '.join(parts)}"[:500], True,
+        )
         await msg.reply(
             f"🧹 Wiped chat {target}'s conversation memory: "
             f"{', '.join(parts)}.\n"
@@ -2755,14 +2895,14 @@ def build_router(rt: Runtime) -> Router:
             except ValueError:
                 await msg.reply("Invalid chat id.", disable_notification=True)
                 return
-            if parts[2].lower() == "all":
+            if " ".join(parts[2:]).lower() == "all":
                 n = await _do_reset_all_in_chat(chat_id)
                 await msg.reply(
                     f"Wiped duck_stats for chat {chat_id} ({n} row(s) deleted).",
                     disable_notification=True,
                 )
                 return
-            ref = parts[2]
+            ref = " ".join(parts[2:])        # a display name may be several words
             user_id = await _resolve_user_id(rt, chat_id, ref)
             if user_id is None:
                 await msg.reply(
@@ -2985,10 +3125,11 @@ def build_router(rt: Runtime) -> Router:
             except ValueError:
                 await msg.reply("Invalid chat id.", disable_notification=True)
                 return
-            user_id = await _resolve_user_id(rt, chat_id, parts[2])
+            ref = " ".join(parts[2:])
+            user_id = await _resolve_user_id(rt, chat_id, ref)
             if user_id is None:
                 await msg.reply(
-                    f"User '{parts[2]}' not found in chat {chat_id}.",
+                    f"User '{ref}' not found in chat {chat_id}.",
                     disable_notification=True,
                 )
                 return
@@ -3162,7 +3303,7 @@ def build_router(rt: Runtime) -> Router:
                 # Wrap transient pool failures so the editor doesn't dead-end
                 # on a silent traceback. The admin gets a real error toast.
                 log.warning("dse:delta DB write failed: %s", exc)
-                await cb.answer(f"DB error: {exc}", show_alert=True)
+                await cb.answer(_toast("DB error: ", exc), show_alert=True)
                 return
             if not ok:
                 # Row disappeared (concurrent reset, etc.). Bounce back to
@@ -3204,7 +3345,7 @@ def build_router(rt: Runtime) -> Router:
                 )
             except Exception as exc:
                 log.warning("dse:zero DB write failed: %s", exc)
-                await cb.answer(f"DB error: {exc}", show_alert=True)
+                await cb.answer(_toast("DB error: ", exc), show_alert=True)
                 return
             if not ok:
                 await cb.answer(
@@ -3617,7 +3758,8 @@ def build_router(rt: Runtime) -> Router:
                 try:
                     await msg.edit_text(
                         "🤖 AI providers:",
-                        reply_markup=_mgm_ai_submenu(),
+                        reply_markup=_mgm_ai_submenu(
+                            manages_bots=rt.settings.manages_bots),
                     )
                 except TelegramBadRequest:
                     pass
@@ -3655,7 +3797,8 @@ def build_router(rt: Runtime) -> Router:
                 try:
                     await msg.edit_text(
                         f"{cat.label}\n{cat.blurb}",
-                        reply_markup=_mgm_category_submenu(cat_key),
+                        reply_markup=_mgm_category_submenu(
+                            cat_key, manages_bots=rt.settings.manages_bots),
                     )
                 except TelegramBadRequest:
                     pass
@@ -4005,7 +4148,7 @@ def build_router(rt: Runtime) -> Router:
             try:
                 rt.openai.set_text_provider(arg)
             except ValueError as exc:
-                await cb.answer(f"Can't switch: {exc}", show_alert=True)
+                await cb.answer(_toast("Can't switch: ", exc), show_alert=True)
                 return
             await kv_set(rt.db, "text_provider", arg)
             body = (

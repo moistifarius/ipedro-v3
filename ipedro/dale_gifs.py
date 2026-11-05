@@ -17,6 +17,12 @@ Identity is ``file_unique_id``, not ``file_id`` — the latter is per-bot and ca
 be re-issued, the former is stable, so it's what answers "do we already have
 this GIF?".
 
+A GIF goes out only when it FITS: a tag with no GIF in it sends nothing (the
+keyword bit says its text line instead) rather than some other clip, a chat
+doesn't get the same clip twice in a row, and a keyword bit can't fire again
+the moment after it did (see :func:`pace_ok`). Which GIF fits an unprompted
+moment is ipedro/gif_reaction.py.
+
 Plain module functions taking ``db``, the pattern used by reminders.py and
 silenced_chats.py; the command router lives in handlers/dale.py.
 """
@@ -24,7 +30,11 @@ silenced_chats.py; the command router lives in handlers/dale.py.
 from __future__ import annotations
 
 import logging
+import random
 import re
+import time
+from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import httpx
@@ -59,6 +69,69 @@ class StoredGif:
     file_unique_id: str | None
     url: str | None
     send_count: int
+
+
+# ── pacing ───────────────────────────────────────────────────────────────────
+# In memory, per chat, and reset by a restart (at worst one extra GIF).
+_RECENT_PER_CHAT = 6            # GIFs remembered per chat, to not repeat them
+TRIGGER_CHAT_GAP = 15.0         # s: no keyword bit right after any GIF here
+TRIGGER_TAG_GAP = 90.0          # s: the same bit again in the same chat
+_STATE_LIMIT = 500              # entries before stale ones are swept
+FAIL_REST = 1800.0              # s a clip that couldn't be sent is left alone
+_now = time.monotonic
+_failing: dict[int, float] = {}                 # gif id -> not before this
+_recent_ids: dict[int, deque[int]] = {}
+_last_gif_at: dict[int, float] = {}
+_last_tag_at: dict[tuple[int, str], float] = {}
+
+
+def recent_ids(chat_id: int) -> list[int]:
+    """The GIFs this chat saw lately, oldest first."""
+    return list(_recent_ids.get(chat_id, ()))
+
+
+def pace_ok(chat_id: int, tag: str) -> bool:
+    """May a keyword bit for ``tag`` fire in this chat now? Not within
+    TRIGGER_CHAT_GAP of any GIF here, nor TRIGGER_TAG_GAP of the same bit:
+    "propane propane propane" is one joke, not three."""
+    now = _now()
+    if now - _last_gif_at.get(chat_id, -1e9) < TRIGGER_CHAT_GAP:
+        return False
+    return now - _last_tag_at.get((chat_id, normalize_tag(tag)), -1e9) >= TRIGGER_TAG_GAP
+
+
+def note_gif(chat_id: int, tag: str = "", gif_id: int | None = None) -> None:
+    """Remember that a GIF (or the text line standing in for one) just went
+    out in this chat, for the pacing above and the no-repeat rule."""
+    now = _now()
+    _last_gif_at[chat_id] = now
+    if tag:
+        _last_tag_at[(chat_id, normalize_tag(tag))] = now
+    if gif_id is not None:
+        _recent_ids.setdefault(chat_id, deque(maxlen=_RECENT_PER_CHAT)).append(gif_id)
+    if len(_last_tag_at) > _STATE_LIMIT or len(_last_gif_at) > _STATE_LIMIT:
+        for key in [k for k, t in _last_tag_at.items() if now - t > 3600]:
+            del _last_tag_at[key]
+        for key in [k for k, t in _last_gif_at.items() if now - t > 3600]:
+            del _last_gif_at[key]
+            _recent_ids.pop(key, None)
+
+
+def _note_failed(gif_id: int) -> None:
+    """A clip that couldn't be sent: leave it be for a while. Bounded."""
+    if len(_failing) > _STATE_LIMIT:
+        now = _now()
+        for key in [k for k, until in _failing.items() if until <= now]:
+            del _failing[key]
+    _failing[gif_id] = _now() + FAIL_REST
+
+
+def forget_state() -> None:
+    """Clear the pacing state (tests, and nothing else)."""
+    _failing.clear()
+    _recent_ids.clear()
+    _last_gif_at.clear()
+    _last_tag_at.clear()
 
 
 def normalize_tag(raw: str) -> str:
@@ -120,26 +193,40 @@ async def add(
     return int(row["id"]), bool(row["inserted"])
 
 
-async def random_for_tag(db: Database, tag: str) -> StoredGif | None:
-    """A random GIF for ``tag``; falls back to any GIF in the library.
+async def random_for_tag(
+    db: Database, tag: str, *, avoid: Sequence[int] = (),
+    exclude_tags: frozenset[str] = frozenset(),
+) -> StoredGif | None:
+    """A GIF for ``tag``, or None when that bucket is empty.
 
-    The fallback matters: a trigger should never silently do nothing just
-    because that bucket hasn't been filled yet. A propane GIF answering
-    "chemtrails" is still Dale, and still beats plain text.
+    There is deliberately no "any GIF" fallback: a clip that doesn't fit what
+    was just said (a propane GIF answering "chemtrails") is worse than the
+    text line the caller falls back to. ``avoid`` is what this chat just saw,
+    oldest first: those are passed over, the least-sent of the rest preferred;
+    and when the chat has seen them all, the one seen longest ago comes round
+    again. So a bucket of three is rotated, never rolled. A clip that couldn't
+    be sent a moment ago (a dead link) is left alone for FAIL_REST, so it can't
+    keep winning its tag; ``exclude_tags`` drops any clip carrying one of them.
     """
     tag = normalize_tag(tag)
-    if tag:
-        row = await db.fetchrow(
-            f"SELECT {_COLUMNS} FROM dale_gifs WHERE $1 = ANY(tags) "
-            " ORDER BY random() LIMIT 1",
-            tag,
-        )
-        if row:
-            return _row(row)
-    row = await db.fetchrow(
-        f"SELECT {_COLUMNS} FROM dale_gifs ORDER BY random() LIMIT 1"
+    if not tag:
+        return None
+    rows = await db.fetch(
+        f"SELECT {_COLUMNS} FROM dale_gifs WHERE $1 = ANY(tags) ORDER BY id",
+        tag,
     )
-    return _row(row) if row else None
+    gifs = [g for g in map(_row, rows) if not set(g.tags) & exclude_tags]
+    now = _now()
+    gifs = [g for g in gifs if _failing.get(g.id, 0.0) <= now] or gifs
+    if not gifs:
+        return None
+    seen = list(avoid)
+    fresh = [g for g in gifs if g.id not in seen]
+    if fresh:
+        least = min(g.send_count for g in fresh)
+        return random.choice([g for g in fresh if g.send_count <= least + 1])
+    last_seen = {gif_id: place for place, gif_id in enumerate(seen)}   # latest wins
+    return min(gifs, key=lambda g: last_seen[g.id])
 
 
 async def list_all(db: Database, tag: str | None = None) -> list[StoredGif]:
@@ -167,14 +254,17 @@ async def note_sent(
 ) -> None:
     """Record a successful send, learning the file_id when we just got one.
 
-    Once a seeded url-row knows its file_id we drop the url: every later send
-    is a bare string hand-off to Telegram with no download, and the row stops
-    caring whether the original host is still up.
+    Once a seeded url-row knows its file_id every later send is a bare string
+    hand-off to Telegram with no download, and the row stops caring whether
+    the original host is still up. The url STAYS on the row, though: it is
+    what `/dalegif seed` dedupes on (ON CONFLICT (url)). Clearing it, as
+    this used to, made the next seed run insert a second copy of every GIF
+    that had been sent once, and a third on the run after.
     """
     if file_id:
         await db.execute(
             "UPDATE dale_gifs SET send_count = send_count + 1, "
-            "       file_id = $2, url = NULL "
+            "       file_id = $2 "
             " WHERE id = $1",
             gif_id, file_id,
         )
@@ -258,6 +348,7 @@ async def _download(url: str) -> bytes | None:
 
 async def send_one(
     db: Database, msg: Message, gif: StoredGif, caption: str | None = None,
+    *, tag: str = "",
 ) -> Message | None:
     """Send one GIF as a reply. None if it couldn't be delivered."""
     payload: str | BufferedInputFile
@@ -266,6 +357,7 @@ async def send_one(
     elif gif.url:
         data = await _download(gif.url)
         if data is None:
+            _note_failed(gif.id)
             return None
         payload = BufferedInputFile(data, filename="dale.gif")
     else:
@@ -277,7 +369,9 @@ async def send_one(
         )
     except Exception as exc:
         log.warning("dale gif send failed in %s: %s", msg.chat.id, exc)
+        _note_failed(gif.id)
         return None
+    _failing.pop(gif.id, None)
 
     # Learn the file_id Telegram just handed back, so the next send is free.
     # Never let a bookkeeping failure undo a message the user already saw.
@@ -286,6 +380,7 @@ async def send_one(
         await note_sent(db, gif.id, learned if learned != gif.file_id else None)
     except Exception as exc:
         log.warning("dale gif bookkeeping failed for %s: %s", gif.id, exc)
+    note_gif(msg.chat.id, tag, gif.id)
     track(msg.chat.id, sent.message_id, caption or "[dale gif]")
     return sent
 
@@ -293,14 +388,23 @@ async def send_one(
 async def send_random(
     db: Database, msg: Message, tag: str, *,
     caption: str | None = None, fallback: str | None = None,
+    pace: bool = False,
 ) -> bool:
-    """Reply with a random Dale GIF for ``tag``. True when one went out.
+    """Reply with a Dale GIF for ``tag``. True when one went out.
 
-    Falls back to ``fallback`` text on an empty library, a dead URL or a
-    Telegram refusal, so a trigger never degrades into silence.
+    Falls back to ``fallback`` text on an empty bucket, a dead URL or a
+    Telegram refusal, so a trigger never degrades into silence. ``pace`` is for
+    a keyword bit that fired on somebody's words: when the same bit (or any GIF)
+    just went out in this chat it stays quiet, text line included, and either
+    way a bit that fires counts as having just gone off.
     """
-    gif = await random_for_tag(db, tag)
-    if gif is not None and await send_one(db, msg, gif, caption) is not None:
+    chat_id = msg.chat.id
+    if pace:
+        if not pace_ok(chat_id, tag):
+            return False
+        note_gif(chat_id, tag)
+    gif = await random_for_tag(db, tag, avoid=recent_ids(chat_id))
+    if gif is not None and await send_one(db, msg, gif, caption, tag=tag) is not None:
         return True
     if fallback:
         sent = await msg.reply(fallback, disable_notification=True)

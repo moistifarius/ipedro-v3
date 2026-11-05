@@ -127,7 +127,7 @@ async def test_tool_rounds_keep_the_caching_and_thinking_rules():
     await client.chat_with_tools(long_prefix, tools=TOOLS, run_tool=_runner())
     for s in sent:
         assert s["thinking"] == {"type": "disabled"}
-        assert s["cache_control"] == {"type": "ephemeral"}
+        assert "cache_control" not in s          # see _claude_kwargs
         assert s["system"][0]["cache_control"]["type"] == "ephemeral"
         assert "temperature" not in s
 
@@ -196,6 +196,26 @@ async def test_a_tool_call_written_out_as_text_is_never_sent(leaked):
     assert out is None
 
 
+@pytest.mark.parametrize("prose", [
+    "Checked my records (check_my_records): I let that one pass, nobody was talking to me.",
+    "check_my_health says two warnings about the hub, nothing else.",
+    "I ran list_my_chats and I'm in four of them.",
+    "Matt asked me to check_my_records and I did.",
+])
+@pytest.mark.asyncio
+async def test_naming_a_tool_in_prose_is_not_a_leak(prose):
+    """The brief hands the model these names. A reply that echoes one while
+    explaining itself must be sent, not swallowed: silence on 'why did you
+    ignore me?' is the one failure this feature can't have."""
+    client, _ = _client(_text(prose))
+    out = await client.chat_with_tools(
+        MESSAGES, tools=TOOLS + [
+            {"name": "list_my_chats"}, {"name": "check_my_health"},
+        ], run_tool=_runner(),
+    )
+    assert out == prose
+
+
 @pytest.mark.asyncio
 async def test_an_ordinary_reply_passes_the_leak_guard():
     client, _ = _client(_text("I keep records, Matt. Detailed ones."))
@@ -262,6 +282,7 @@ async def test_the_owner_dm_reply_offers_the_cross_chat_tools(monkeypatch):
     kw = rt.openai.chat_with_tools.await_args.kwargs
     assert [t["name"] for t in kw["tools"]] == [
         "check_my_records", "list_my_chats", "check_my_health",
+        "pass_it_along",        # Dale only; see tests/test_relay.py
     ]
     assert "list_my_chats" in captured["capabilities"]
 
@@ -302,3 +323,57 @@ async def test_a_reaction_lands_in_the_records(monkeypatch):
     await _handler(rt)(msg)
     types = [c.args[1] for c in rt.activity.log.await_args_list]
     assert "reaction" in types
+
+
+# ── the same guard on the plain path (no tools offered) ──────────────────────
+
+@pytest.mark.asyncio
+async def test_a_thinking_block_in_a_plain_reply_is_never_sent():
+    """Impersonation turns, hub replies and the cheap classifiers don't offer
+    tools, so the loop's guard never saw them: a stray <thinking> block went
+    out verbatim."""
+    client, _ = _client(_text("<thinking>they want a roast</thinking> sh-sha."))
+    assert await client.chat(MESSAGES, max_tokens=50) is None
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_plain_reply_still_goes_out():
+    client, _ = _client(_text("thinking about it, sh-sha."))   # the word, no markup
+    assert await client.chat(MESSAGES, max_tokens=50) == "thinking about it, sh-sha."
+
+
+# ── a reply the token cap cut off never posts stopping mid-word ──────────────
+
+def _cut(text):
+    return SimpleNamespace(
+        content=[SimpleNamespace(type="text", text=text)],
+        stop_reason="max_tokens",
+        usage=SimpleNamespace(input_tokens=10, output_tokens=300),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_reply_cut_off_at_the_cap_is_trimmed_to_its_last_sentence():
+    client, _ = _client(_cut("First point made. Second point made in full. And the third poi"))
+    out = await client.chat(MESSAGES, max_tokens=50)
+    assert out == "First point made. Second point made in full."
+
+
+@pytest.mark.asyncio
+async def test_with_no_sentence_worth_keeping_it_is_left_whole_with_an_ellipsis():
+    client, _ = _client(_cut("Ok. and then it just kept going and going without ever stopping for brea"))
+    out = await client.chat(MESSAGES, max_tokens=50)
+    assert out.endswith("brea…") and out.startswith("Ok. and then")
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_finished_is_untouched():
+    client, _ = _client(_text("First point made. And the third poi"))      # end_turn
+    assert await client.chat(MESSAGES, max_tokens=50) == "First point made. And the third poi"
+
+
+@pytest.mark.asyncio
+async def test_the_tool_loop_trims_a_cut_off_reply_too():
+    client, _ = _client(_cut("Done and dusted. Then I started to expl"))
+    out = await client.chat_with_tools(MESSAGES, tools=TOOLS, run_tool=_runner())
+    assert out == "Done and dusted."

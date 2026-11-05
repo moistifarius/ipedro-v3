@@ -99,7 +99,8 @@ async def _fetch_day_messages(
            AND m.role = 'user'
            AND m.created_at >= $2 AND m.created_at < $3
            AND char_length(TRIM(m.content)) >= $4
-           AND LEFT(TRIM(m.content), 1) <> '/'
+           AND LEFT(TRIM(m.content), 1) NOT IN ('/', '[')
+           AND u.is_bot IS NOT TRUE
          ORDER BY char_length(m.content) DESC
          LIMIT 12
         """,

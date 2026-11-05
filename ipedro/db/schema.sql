@@ -214,6 +214,14 @@ CREATE TABLE IF NOT EXISTS bot_posts (
 
 CREATE INDEX IF NOT EXISTS bot_posts_created_idx ON bot_posts (created_at);
 
+-- One row per chat: when a bot last answered another bot there. Every bot
+-- claims this row (atomically) before it replies to a bot, so across ALL
+-- bots a chat gets at most one bot-to-bot reply per window; see hub.py.
+CREATE TABLE IF NOT EXISTS hub_chat_claims (
+    chat_id     BIGINT PRIMARY KEY,
+    claimed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Duckhunt ------------------------------------------------------------------
 -- Persistent state for active spawns. At most one active duck per chat.
 CREATE TABLE IF NOT EXISTS duck_events (
@@ -488,6 +496,13 @@ CREATE TABLE IF NOT EXISTS bef_challenges (
 
 CREATE INDEX IF NOT EXISTS bef_challenges_prompt_idx
     ON bef_challenges (chat_id, prompt_message_id);
+
+-- The duck a challenge was issued over (duck_events.id). Another player who
+-- answers it first can take THAT duck, and no other: a duck that has spawned
+-- since is a different one. NULL (older rows, admin-forced challenges) means
+-- nothing to steal.
+ALTER TABLE bef_challenges
+    ADD COLUMN IF NOT EXISTS duck_id BIGINT;
 
 -- Disgust personality test -------------------------------------------------
 -- In-progress quiz state: one session per (chat, user), so concurrent takers

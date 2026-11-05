@@ -376,3 +376,34 @@ async def test_apply_radio_effect_decode_failure_returns_none(monkeypatch):
                         lambda audio: np.zeros(0, dtype=np.float32))
     out = await radio_fx.apply_radio_effect(b"garbage", intensity=0.5)
     assert out is None
+
+
+# ── a live fetch asks for less audio than it has time to receive ─────────────
+
+def test_the_clip_asked_for_fits_inside_the_time_allowed():
+    """A live stream arrives at 1x. Asking for 30 s inside a 25 s budget
+    timed out every time (the ffmpeg path then threw away what it had)."""
+    assert radio_fx._LIVE_FETCH_DURATION_SECONDS < radio_fx._LIVE_FETCH_TIMEOUT_SECONDS
+
+
+def _timeout_with(monkeypatch, stdout):
+    import subprocess
+
+    def fake_run(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, kw.get("timeout"), output=stdout)
+
+    monkeypatch.setattr(radio_fx.subprocess, "run", fake_run)
+
+
+def test_a_fetch_that_runs_long_keeps_the_audio_it_got(monkeypatch):
+    two_seconds = (np.sin(np.arange(2 * SR) / 7.0) * 0.5).astype(np.float32)
+    _timeout_with(monkeypatch, two_seconds.tobytes() + b"\x01\x02")   # + a torn sample
+    out = radio_fx._fetch_live_from_url("https://relay.example/stream")
+    assert out.size == 2 * SR and out.dtype == np.float32
+
+
+def test_a_fetch_that_timed_out_with_nothing_is_empty(monkeypatch):
+    _timeout_with(monkeypatch, None)
+    assert radio_fx._fetch_live_from_url("https://relay.example/stream").size == 0
+    _timeout_with(monkeypatch, np.zeros(SR // 2, dtype=np.float32).tobytes())  # < 1 s
+    assert radio_fx._fetch_live_from_url("https://relay.example/stream").size == 0

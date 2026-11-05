@@ -20,6 +20,99 @@ Generate an image with the configured image model (default `gpt-image-1`).
 ### `/aitranslate`
 Reply to a voice note with this command to translate the audio to English.
 
+### `/poll`, and "make a poll from this"
+`/poll Question | Option A | Option B | …` makes a poll from what you typed
+(2 to 10 options, anonymous), exactly as before, with no model and no limit.
+
+Give it *material* instead and the bot drafts the question and the options
+from it. The material can be:
+
+- **words:** `/poll where should we eat friday` (a topic or a question: it
+  writes the question and the likeliest answers), or a pasted list or message
+  (a list of choices is used exactly as written, in its order; a long text is
+  boiled down to the one thing the group could vote on);
+- **a message you reply to:** reply to it with `/poll`, or in plain words;
+- **a screenshot or photo:** send it with `/poll` as its caption, or reply to
+  one (a menu, a list of options, a chat asking what to do), in a chat with
+  `vision` on;
+- **a small text file:** a `.txt`, `.md` or `.csv` under 100 KB, sent with
+  `/poll` or replied to.
+
+In plain words it takes an ask at the *start* of a message, to a bot that is
+answering you anyway: "make a poll from this", "poll this: pizza or tacos",
+"turn this into a poll", "can you make us a poll about friday". Talk *about*
+polls ("did you make a poll", "i hate polls", "get the poll results") makes
+nothing, and a poll typed whole after the ask ("make a poll: where | pizza |
+tacos") is posted as typed. A drafted poll, or one typed whole in plain words,
+is posted as a reply to your message, in the same topic of a forum group (the
+typed `/poll Q | A | B` posts as it always has). When asked in plain words it is
+also written into the chat's history, so he knows it exists.
+
+**What kind of poll.** Say it in the ask or in what you type, or lead with it
+before a colon:
+
+| Kind | Say | Notes |
+|---|---|---|
+| quiz | "make a quiz poll", "make it a quiz", `quiz:` | one right answer, and a one-line *why* shown after someone answers. He works the answer out; in a poll you type, mark it: `Paris*` or `✓ Paris` |
+| public votes | "make a public poll", "make it public", "non-anonymous", "show who voted", `public:` | people's votes show by name; "not public" and "anonymous" mean the opposite |
+| pick several | "pick all that apply", "select all", "multiple answers" | ("multiple choice" means pick one) |
+| pick one | "pick only one" | the default |
+| timer | "closes in 10 minutes", "poll ends in 2 hours", "a 10 minute poll", "timer of 1 day", `closes in 10 minutes:` | 5 seconds to 30 days (also "2 hours 30 minutes", "an hour and a half"); Telegram closes it itself |
+
+Combine them: `/poll quiz, public, closes in 10 minutes: Capital of France? |
+London | Paris* | Rome`, or "make a public poll about lunch that closes in 2
+hours". Only the phrasings above count, so a topic like "public transport", "pub
+quiz night", "the movie ends in 5 minutes" or "bowling, quiz, karaoke" stays a
+topic (a bare "10 minutes" or "quiz" counts only where it can only be the kind: in
+the ask itself, before a colon, or as the answer to his question). What you say
+wins over what the drafter guesses. A quiz with several right answers lets people
+pick several.
+
+**He asks.** When you ask for a poll and give him nothing to go on ("dale make a
+poll", or `/poll` alone), he asks what it's about and offers the kinds. Say "ask
+me what kind" and he asks the kind (and takes any topic you already gave; with
+none, he asks what it's about first). "A timed poll" with no length gets "how
+long?" (with no topic, one question asks both); if you still give no length the
+poll stays open and he says so. The drafter may also ask one thing
+it can't guess (a long text with two decisions in it: which one?). Each question
+is sent as a force-reply: **in a group, answer by replying to his question** (and
+only the person who asked can answer it); in a private chat your next message is
+the answer. "never mind" or "cancel" drops it (so does a bare "no" when he
+asked what it's about; to "what kind?" or "how long?" a "no" just means no kind,
+no timer). A question waits three
+minutes, he never asks a second one, and nothing is charged until he drafts.
+
+The drafted poll is one cheap model call, checked against Telegram's limits in
+code (question 300 characters, options 100 each, no duplicates, numbering a
+model put on the whole list taken off), so a model that ignores the limits still
+can't make Telegram refuse the poll. Whatever is in the material is treated as
+data in the prompt, never as an instruction, and nothing from any other chat is
+used.
+
+### Spend limits
+The commands that cost real money are limited per person per hour, and the
+bot says when to come back: `/aigen` / `/meme` / "make a meme about …" 5,
+`/ether` 3 (and 10 per chat), `/a` 30, `/aitranslate` 10, `/duckhunt` 6
+summons, a drafted poll 10 (and 20 per chat; a poll typed out whole isn't
+counted). Bot admins are exempt. The counters are in memory, so a restart
+forgets them.
+
+### `/fixname <wrong> -> <right>`
+Chat admins only (and bot admins). Replaces a name, as a whole word, in the
+bot's own notes about this chat (its summaries, remembered facts and past
+replies) when it learned someone's name wrong. Both sides have to look like a
+name (up to 4 words and 40 characters, letters and numbers), not a sentence,
+because those notes are fed back into the bot's prompt. There is no undo.
+
+### `/shutup @user [duration]`, `/unshutup @user`, `/snark_at @user`, `/unsnark @user`, `/flags`
+Chat admins and bot admins. The bot ignores (or needles) that person in this
+chat, optionally for a while; `/flags` lists who. A chat admin can't do this to
+a bot admin. Reply-to works in place of `@user`.
+
+### `/unquote <#>`
+Deletes quote number `#` from this chat's list (the number `/quotes` shows).
+Any member can: the list is communal.
+
 ### `/catfact`
 Returns a single dubious cat fact.
 
@@ -33,17 +126,25 @@ Returns the current chat's id.
 ### `/chat_config [<field> <value>]`
 Without arguments, prints the current per-chat config. With arguments, sets
 one field. Editable by chat admins (creator/admin in groups) and by the
-bot's admin user. Fields:
+bot's admin user. Switches take `on` or `off` (also `yes`/`no`,
+`true`/`false`, `1`/`0`); anything else changes nothing and says so. Fields:
 
 | Field | Values |
 |---|---|
 | `policy` | `commands` \| `mention` \| `reply` \| `ambient` \| `always` |
 | `ambient` | `0.0`–`1.0` probability used by the `ambient` policy |
-| `persona` | `pedro` \| `neutral` \| any free-form name + custom prompt |
+| `persona` | `dude` (the master persona, `pedro` is the same) \| `neutral` \| any free-form name + custom prompt |
 | `duckhunt` | `on` / `off` |
+| `sharephoto` | `on` / `off` — Dale's occasional shared photo (Dale only) |
+| `comic` | `on` / `off` — the daily four-panel comic |
+| `fortune` | `on` / `off` — the daily fortune |
+| `monthlyrecap` | `on` / `off` — the month-in-review post |
+| `onthisday` | `on` / `off` — the daily look back |
+| `vision` | `on` / `off` — look at photos, stickers, GIFs and videos. A video is watched, not just glanced at: a few frames from across it, and (where `voice` is on) a transcript of what was said, described together. See "Watching videos". |
+| `automod` | `on` / `off` — the canned copypasta / meme bits |
 | `voice` | `on` / `off` — transcribe inbound voice notes |
 | `memory` | `on` / `off` — store messages and build context from history |
-| `ether` | `on` / `off` — make this chat reachable as a destination for `/ether` radio transmissions sent from other ether-enabled chats. Off by default. Needs ≥ 2 chats opted in for a transmission to have anywhere to land. |
+| `ether` | `on` / `off` — make this chat reachable as a destination for `/ether` radio transmissions sent from other ether-enabled chats. Off by default. Needs ≥ 2 chats opted in for a transmission to have anywhere to land. Also what lets Dale pass a message to or from this chat (see "Dale passing a message on"). |
 | `ducknames` | `on` / `off` — include this chat's named befriended ducks in the global `/ducknames` listing. Default `on`. Turn off if you want your roster private (your in-chat `/duckfriends` and `/duckstats` still work either way). |
 
 **Long personas:** `/chat_config persona <name> setfile` — send a `.txt`
@@ -108,6 +209,28 @@ rare one barely punches through at all. If TTS or the audio toolchain
 (ffmpeg) is unavailable, a text `/ether` falls back to a garbled text
 broadcast. Requires another chat to have `ether` enabled.
 
+### Dale passing a message on
+
+Not a command: something Dale decides. In a chat tuned into the ether, or in
+the owner's DM, he has a tool (`pass_it_along`) that posts a message into
+another chat. His default answer is no; he does it only when someone has
+really worked on what makes him tick, and begging, flattery or insisting
+doesn't count. What the code enforces whatever he decides:
+
+- Both chats must have `ether` on. The destination must be a group (never a
+  DM), not set to commands-only, and not silenced; it is found by its name, and
+  only if exactly one chat matches.
+- It goes out signed: `<name>, over in <chat>, had me pass this along:` and
+  then the message. So it is never anonymous, and never in someone else's voice.
+- At most 500 characters (longer is refused, not cut), and no links, @-mentions
+  or /commands. Each person can get two through an hour (bot admins aren't held
+  to that one), each chat three, and each destination takes two. A refused
+  attempt doesn't use up anyone's allowance. One per reply.
+- The destination's memory records it as something he said, and both chats'
+  records show it (`relay` / `relay_in` in what he can look up about himself).
+
+Only Dale is offered it; other bots made with `/newbot` never are.
+
 ### Duckhunt
 
 - `/duckhunt` — force-spawn a duck (requires duckhunt enabled for this chat).
@@ -153,8 +276,46 @@ as answers, and a challenge auto-expires after 1h (the next message
 clears it and is handled normally). An admin can also force-clear a
 stuck challenge with `/debug_clear_challenge [chat_id]`.
 
+#### Stealing a duck
+
+A challenge is a race. While someone is working on theirs, **anyone else can
+reply to that challenge message with the answer** and, if they are first and
+right, they take the duck: it is theirs (a befriend, no dice), they get the
+point and the naming prompt, and the owner's challenge is gone. The owner is
+gated, so they can't take it themselves meanwhile.
+
+- Only a **reply** to the prompt counts for anyone but its owner. Other chat is
+  never judged as somebody's answer.
+- Judged **strictly**: the owner's retry is judged generously ("close enough"),
+  but a duck is the prize here, so a near miss or a list of guesses doesn't
+  win it. A wrong answer gets a plain "Not quite." and never a hint.
+- It has to be the duck the challenge was issued over (a duck that has arrived
+  since isn't; a challenge forced by an admin has none), never a boss, and only
+  while the owner's clock is running.
+- **First means first to arrive.** Answers to one challenge are judged one at a
+  time in the order they came in, so a slow model call can't let a later answer
+  win. The owner answering at the same moment as a thief has exactly one
+  winner; the other is told they were too late.
+- Taking a duck is a duck action: if you have a challenge of your own you clear
+  that first (one that has run out of time no longer counts), and the usual
+  action cooldown applies.
+- Three tries each per challenge; a wrong answer costs only the try, and so
+  does a judge that couldn't answer.
+
 Ducks may also wander off on their own at any time — more likely as they
 hang around longer, and almost certainly gone after a day.
+
+### Replying to him
+
+When you reply to one of his messages, in a group he answers **as a reply to
+you** (in a DM it is a plain message), and he is told which message you replied
+to, word for word (up to 500 characters; the passage you quoted, if you quoted
+one; a poll's question and options). That matters most for his own canned bits
+(the "gay" copypasta, keyword lines, GIF captions), which are deliberately never
+saved to his memory: without it he saw only your line and answered whatever was
+nearest in the chat. A reply to a picture or GIF gets its description instead,
+where `vision` is on. Replying to someone else's message and naming him tells him
+what you replied to as well, but his answer is a plain message.
 
 ### "bad bot" / "bad dale"
 Reply to one of the bot's messages with "bad bot" or "bad <any of its
@@ -171,10 +332,22 @@ These commands are silently ignored when used in groups, and reply with
 List chats the bot has been added to.
 
 ### `/send_message <chat_id> <text>`
-Send a literal message to a known chat as the bot.
+Send a literal message to a known chat as the bot. Replies "Sent." or says why
+Telegram refused (kicked from the chat, blocked, rate limited).
 
 ### `/logs`
-Tail the in-DB command audit log.
+Tail the bot's program log (what the process printed), newest last, split
+across messages when it's long.
+
+### `/cmdlog`
+The command audit log: who ran what, where, and whether it worked. Also
+records `/memory_wipe`, which has no undo.
+
+### `/memory_wipe [chat_id] [facts]`
+Deletes a chat's conversation memory (messages, summaries, embeddings, media),
+this chat by default; add `facts` to clear the remembered facts too. For
+resetting a persona that keeps leaking through old context. No confirmation,
+no undo; it writes a `/cmdlog` row.
 
 ### `/activity [N] [chat_id] [event_type]`
 The durable "why did/didn't he answer" log: every AI reply (and whether it
@@ -310,8 +483,28 @@ re-applied on the next startup.
 ### `/ai_model show | <model_id> | claude <model_id> | openai <model_id>`
 Switch the text model used by the active provider. With no provider word
 the new model is applied to whichever provider is currently active.
-Examples: `/ai_model claude-opus-4-7`, `/ai_model openai gpt-4.1-mini`.
-Persisted in `kv_store`.
+Examples: `/ai_model claude-opus-5-5`, `/ai_model openai gpt-4.1-mini`.
+A Claude id is sent to Anthropic first and refused if it can't answer, so a
+typo never gets saved. Persisted in `kv_store`.
+
+### `/ai_advisor show | off | <model_id>`
+The advisor: a stronger model that the model writing Dale's replies may
+consult in the middle of a reply, on a hard question (Anthropic's advisor
+tool, a beta; default `ADVISOR_MODEL=claude-opus-5-5`). It runs inside the same
+request, reads the whole conversation, and tells him what it would do; the reply
+is still his, in his voice. He is told to ask rarely, for a question where being
+wrong would matter and never for banter, and to ask at most
+`ADVISOR_MAX_USES` (1) times per request (a reply that also uses a tool takes a
+few requests); the advisor writes at most `ADVISOR_MAX_TOKENS` (1024, the API's
+floor) tokens. `ADVISOR_MODEL=off` (or empty) turns it off, and a max below 1
+is read as 1. A consult that is slow (it gets 90 seconds), or fails in a way a
+plain reply wouldn't, is answered again without it, so the chat doesn't go quiet.
+While it runs "typing…" stays up. Its tokens bill at its own
+rates, logged as `advisor` in `/cost`. Only Dale's own chat replies use it
+(not `/a`, summaries, other bots, impersonations or the cheap classifiers). A
+`<model_id>` is tried against Anthropic before it is saved, and a pairing the API
+later turns down (say after `/ai_model`) is dropped, replies carrying on without
+it. Persisted in `kv_store`; `off` survives a restart.
 
 ### `/debug_toggle [<name> on|off]`
 Admin-scoped duckhunt cheats for testing flows end-to-end without
@@ -328,8 +521,8 @@ name and `on`/`off` flips one toggle. Valid names:
 - `always_fail_challenge` — bef-challenge judge auto-fails.
 - `always_refuse_bef` — `bef` always rolls the REFUSE branch, so the
   refusal challenge fires every time.
-- `bypass_cooldowns` — skip the 15-second per-user cooldown on
-  `bang`/`bef`/`ignore`.
+- `bypass_cooldowns` — skip the per-user action cooldown on
+  `bang`/`bef`/`ignore` (`DUCKHUNT_ACTION_COOLDOWN_SECONDS`, 4s by default).
 
 `always_hit` and `always_miss` are mutually exclusive — if both are on,
 `always_hit` wins. Same for `always_pass_challenge` /
@@ -369,10 +562,13 @@ bot. Silently ignored in groups.
 ### `/evolve <what you want changed>`
 Ask the bot to change its own code. Shows the exact GitHub issue first;
 tap **File it** and a GitHub Action turns it into a pull request. Your
-words go to the coding agent verbatim. The PR merges itself only if its
-tests pass and it touches nothing but content (prompts, personas, canned
-lines, the GIF seed list, tests); anything else waits for you. Needs
-`EVOLVE_GITHUB_TOKEN` on the bot host.
+words go to the coding agent verbatim. The PR merges itself only if the
+agent finished cleanly, its tests pass (and are at least as many as main's),
+and it touches nothing but content: the prompts, the automod bits, the GIF
+seed list (each checked to still be plain data) and new test files. Anything
+else, including any change to code, any deleted file and any edit to an
+existing test, waits for you. Needs `EVOLVE_GITHUB_TOKEN` on the bot host and
+the one-time GitHub setup at the top of `.github/workflows/dale-evolve.yml`.
 
 ### `/newbot <token> <Name>[, other names]` + a short description
 Add another bot: its own Telegram account (make it in @BotFather first,
@@ -402,3 +598,106 @@ The other bots, whether each is running, and why one died.
 Stop, restart or remove one. A removed bot's database is kept, and
 `/newbot` with its token brings it back (with a freshly written persona).
 
+
+
+### Watching videos
+
+With `vision` on, a video, a GIF or a round video note is watched when it
+arrives:
+
+- **What he gets:** up to `VIDEO_VISION_FRAMES` frames (default 6, never more
+  than 8; 4 for a clip under 8 seconds) spread evenly across it and, in a chat
+  with `voice` transcription on, a transcript of what was said in the first five
+  minutes. Both go to the vision model together, and the description is stored
+  as the transcript line (`[video: …]`), so he can talk about it, and recall it
+  later, like anything typed. Silence is not transcribed, and neither is the
+  filler a transcriber invents for music and noise ("Thanks for watching",
+  "[Music]", a looping line). Music mostly won't come through as words.
+- **A glimpse says so:** a video that could only be glimpsed (too big, too long,
+  over a limit, `ffmpeg` couldn't open it) is noted `[video, one frame only: …]`,
+  and he is told what that means, so a one-picture description is never taken
+  for a watched video.
+- **Limits:** videos over 20 MB (Telegram's limit for bots), over
+  `VIDEO_VISION_MAX_SECONDS` (default 300), or bigger than 4K by the real picture
+  size (not the size the file claims) get the one-frame thumbnail look instead,
+  as does everything while a person is over their limit (8 videos an hour each,
+  20 a chat; GIFs and round notes count; bot admins are exempt), when `ffmpeg`
+  can't give a video a turn within 15 seconds (two run at a time), when `ffmpeg`
+  is missing, or with `VIDEO_VISION_FRAMES=0`. A video that was turned away before
+  anything was done doesn't use up your limit. The same file posted twice at once
+  is watched once.
+- **Replying to a video** ("rusty what is this") uses only what is already known
+  about it, or its thumbnail. It never starts a fresh watch, which would be
+  charged to whoever posted it.
+- **Safety:** only real MP4/MOV/WebM files are opened (a text file posing as a
+  video, like a playlist, never reaches `ffmpeg`), with only local files
+  allowed, a time, CPU, memory and output limit per process, and none of the
+  bot's secrets in its environment.
+- What was said, and any text on screen, is treated as data in the prompt, never
+  as an instruction. Each bot process (Dale and every `/newbot`) watches for
+  itself, with its own limits and its own `/cost`.
+
+### Dale's GIFs: when they fire
+
+He sends GIFs of himself two ways, and each only when it fits.
+
+- **Keyword bits** ("propane", "chemtrails", "pocket sand", …): the GIF comes
+  from that bit's own tag. If the tag has none, he says the bit's text line, and
+  never some other clip. The same bit can't go off again in a chat for 90
+  seconds, no bit goes off within 15 seconds of any GIF, and a chat is never sent
+  the same clip twice running when the tag has more than one (the least-sent are
+  rotated, and a clip that couldn't be sent, say a dead link, is left alone for
+  half an hour).
+- **Unprompted reactions** (a group, `automod` on, a message that isn't for him):
+  about one message in seventeen is even considered. It has to be fair game: two
+  words to a short sentence, no question (a "?", or a message that opens like one:
+  what, how, is, can…), no link (bare domains too), no command, not forwarded, and
+  nothing that mentions illness, death, accidents, crime, grief and the like. The chat has to be ready: no unprompted GIF there for 20
+  minutes, no more than three an hour, a look at most once a minute, nothing from
+  him in the last three minutes, no other GIF in the last 15 seconds. Then one
+  cheap model call, shown the last few messages and the reactions the library
+  really has (`agree`, `doubt`, `conspiracy`, `paranoia`, `smug`, `expert`,
+  `panic`, `flee`, `chaos`, `deadpan`), says whether one plainly fits and which.
+  The usual answer is no, and anything but exactly one of those tags counts as
+  no. So most days he sends none; the ones he sends fit what was just said.
+  A clip tagged `pocketsand`, `shsha` or `guns` (the stock "guns, conspiracy" one
+  too) is never sent unprompted: those belong to their keywords.
+
+`/dalegif test <tag>` is for the owner poking the library and isn't paced.
+
+### `/reverse`, and "reverse this"
+
+Plays a video backwards. Reply to a **video, a GIF or a round video** with
+`/reverse` (or send one with `/reverse` as its caption), or say it at the start of
+a message to a bot that is answering you anyway: "reverse this", "can you reverse
+this video", "play this backwards", "make this go backwards", "rewind that gif".
+Add `mute` ("reverse this and mute it", `/reverse mute`) to leave the sound out.
+Anything after the ask that isn't pointing at the video makes it not an ask
+("reverse psychology", "reverse the order of the list", "do the alphabet
+backwards"). "reverse" and "rewind" are about a video however it is worded;
+"play/do/make it backwards" only counts when there is a video to hand, and
+otherwise gets an ordinary reply.
+
+It comes back as a reply of the same kind: a video, a looping GIF, or a round
+video. The sound is reversed with it and kept in step. No model is used, so it
+costs nothing but CPU; a video sent with the ask as its caption isn't also
+*watched*.
+
+- **Limits:** up to 30 seconds and 20 MB (Telegram's limit for what a bot can
+  download), with a picture no bigger than 4096x2160. Too long or too big is said
+  at once, from what Telegram says of the file, before anything is downloaded.
+- **Quality:** `ffmpeg` has to hold every frame of the clip in memory to reverse
+  it, so the frames are kept to 400 MB in all: at most 30 frames a second, and the
+  picture is scaled down until the clip fits. A 10 second 720p clip is untouched;
+  a 30 second one comes out about 720x400.
+- **Limits per person:** 6 an hour each, 15 an hour a chat (bot admins exempt). A
+  refusal because he was busy or has no `ffmpeg` doesn't use one up, and neither
+  does one from what Telegram says of the file (that's said before it counts); one
+  after the download (not a video, a picture too big) does, since it cost a
+  download. Reversing shares `ffmpeg`'s two slots with watching videos; when both
+  are busy he says so.
+- **Privacy:** the copy carries none of the original's metadata (a phone video can
+  hold where it was shot), subtitles or data streams.
+- **Safety:** only real MP4/MOV/WebM files are opened, with only local files
+  allowed and a time, CPU, memory and output limit per process, as for watching
+  videos.

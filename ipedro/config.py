@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     openai_text_model: str = "gpt-4o-mini"
     openai_image_model: str = "gpt-image-1"
     openai_transcription_model: str = "whisper-1"
+    # Watching videos (ipedro/vision.py, ipedro/video_frames.py): how many
+    # frames to sample from a video, at most (0 = look at the thumbnail only,
+    # as before), and how long a video may be before it isn't worth the
+    # tokens. Telegram won't let a bot download more than 20 MB anyway. The
+    # sound is transcribed only in chats that have voice transcription on.
+    video_vision_frames: int = 6
+    video_vision_max_seconds: int = 300
     openai_embedding_model: str = "text-embedding-3-small"
     openai_embedding_dim: int = 1536
     # Text-to-speech for the /ether radio-voice broadcast. The synthesized
@@ -51,6 +58,20 @@ class Settings(BaseSettings):
     # with a separate rate-limit quota). Override via env if you want a
     # different cheap default.
     claude_cheap_model: str = "claude-haiku-4-5"
+    # The advisor (Anthropic beta): the model writing a chat reply may stop
+    # and consult a stronger one mid-reply, inside the same request, and the
+    # stronger model's tokens bill at ITS rates. Dale's main replies only. He
+    # is told to ask rarely (hard questions, not banter) and `max_uses` caps
+    # it at one consult per REQUEST (a reply that also uses a tool takes a few
+    # requests); `advisor_max_tokens` caps what the advisor may write (the
+    # API's floor is 1024); `advisor_max_uses` below 1 is read as 1, never as
+    # unlimited. Empty (or "off") turns it off.
+    # /ai_advisor changes it live. The pairing has to be one the API allows
+    # (the advisor at least as capable as the model it advises); one it
+    # refuses is dropped and replies carry on without it.
+    advisor_model: str = "claude-opus-5-5"
+    advisor_max_tokens: int = 1024
+    advisor_max_uses: int = 1
     openai_cheap_model: str = "gpt-4o-mini"
     text_provider: Literal["claude", "openai"] = "claude"
 
@@ -69,6 +90,11 @@ class Settings(BaseSettings):
     # supervisor starts every other bot with it off, since their DMs
     # aren't where the registry lives.
     manages_bots: bool = True
+    # Largest pool of Postgres connections this process may hold. Every bot
+    # (Dale and each /newbot bot) holds its own pool plus two for the hub,
+    # against one server whose max_connections defaults to 100; the
+    # supervisor starts the other bots with a small one.
+    db_pool_max: int = 10
     # Where the bots hear each other (ipedro/hub.py): Dale's database. Unset
     # means this bot's own DATABASE_URL, which is right for Dale; the
     # supervisor points every other bot at Dale's.
@@ -80,6 +106,10 @@ class Settings(BaseSettings):
     # should be a fine-grained PAT scoped to the one repo with Issues
     # read/write and NOTHING else: the bot only ever files issues, and the
     # code itself is written by the Action under its own credentials.
+    # Know what it is worth, though: the workflow starts an agent on any
+    # issue the owner's account opens with the bot's marker, so whoever
+    # holds this token can start one as the owner. (Anything but plain
+    # content still waits for the owner's review.)
     # Unset = /evolve explains what's missing instead of failing.
     evolve_github_token: str | None = None
     evolve_github_repo: str = "moistifarius/ipedro-v3"
@@ -89,6 +119,10 @@ class Settings(BaseSettings):
 
     # Logging
     log_level: str = "INFO"
+    # How many days of "why did / didn't it reply" records (activity_log) to
+    # keep. It gets a row per reply and per silence, in every chat, so it
+    # grows with total message volume. 0 keeps everything.
+    activity_retention_days: int = 90
 
     # Memory / context
     context_recent_messages: int = 20

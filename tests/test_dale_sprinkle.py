@@ -9,7 +9,7 @@ import pytest
 from types import SimpleNamespace
 
 from ipedro import dale_gifs as dale
-from ipedro import vision
+from ipedro import gif_reaction, vision
 from ipedro.handlers import chat
 from tests.test_captcha_intercept import _msg, _rt_with
 
@@ -24,7 +24,7 @@ def _handler(rt):
 def sprinkle(monkeypatch):
     """Force the roll, stub the sender, and stop on_message before the AI."""
     sent = AsyncMock(return_value=True)
-    monkeypatch.setattr(dale, "send_random", sent)
+    monkeypatch.setattr(gif_reaction, "ambient", sent)
     monkeypatch.setattr(chat, "_DALE_GIF_PROBABILITY", 1.0)
     monkeypatch.setattr(chat, "_REACT_PROBABILITY", 0.0)
     monkeypatch.setattr(chat, "should_respond", lambda *a, **k: False)
@@ -44,7 +44,9 @@ async def test_fires_on_an_ordinary_unaddressed_message(sprinkle):
     rt = _rt()
     await _handler(rt)(_msg(text="anyway the kitchen tap is dripping"))
     sprinkle.assert_awaited_once()
-    assert sprinkle.await_args.args[2] == ""      # any tag → any Dale GIF
+    # It is handed what was typed, to judge whether a reaction FITS: the old
+    # "" meant any GIF at all, and landed a clip on whatever came along.
+    assert sprinkle.await_args.args[2] == "anyway the kitchen tap is dripping"
 
 
 @pytest.mark.asyncio
@@ -80,7 +82,7 @@ async def test_the_automod_switch_turns_it_off(sprinkle):
 @pytest.mark.asyncio
 async def test_probability_actually_gates_it(monkeypatch):
     sent = AsyncMock(return_value=True)
-    monkeypatch.setattr(dale, "send_random", sent)
+    monkeypatch.setattr(gif_reaction, "ambient", sent)
     monkeypatch.setattr(chat, "_DALE_GIF_PROBABILITY", 0.0)
     monkeypatch.setattr(chat, "_REACT_PROBABILITY", 0.0)
     monkeypatch.setattr(chat, "should_respond", lambda *a, **k: False)
@@ -92,7 +94,7 @@ async def test_probability_actually_gates_it(monkeypatch):
 async def test_a_send_failure_never_breaks_the_message_pipeline(
     monkeypatch, caplog,
 ):
-    monkeypatch.setattr(dale, "send_random",
+    monkeypatch.setattr(gif_reaction, "ambient",
                         AsyncMock(side_effect=RuntimeError("telegram said no")))
     monkeypatch.setattr(chat, "_DALE_GIF_PROBABILITY", 1.0)
     monkeypatch.setattr(chat, "_REACT_PROBABILITY", 0.0)

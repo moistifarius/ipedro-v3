@@ -42,6 +42,19 @@ class PendingBefChallenge:
     kind: str
     prompt_message_id: int | None
     created_at: datetime
+    duck_id: int | None = None      # the duck it was issued over; None: none
+
+
+@dataclass
+class StealResult:
+    """How a try at taking someone else's duck came out.
+
+    ``status`` is ``stolen`` (the duck is the thief's now), ``too_late`` (the
+    challenge's owner, or someone faster, had already cleared it) or
+    ``no_duck`` (there is no duck of that challenge left to take)."""
+    status: str
+    outcome: ActionOutcome | None = None
+    duck: ActiveDuck | None = None
 
 
 def _row_to_active_duck(row) -> ActiveDuck:
@@ -99,6 +112,18 @@ class DuckhuntService:
             "BOSS " if is_boss else "", chat_id, row["id"],
         )
         return _row_to_active_duck(row)
+
+    async def retire_unannounced(self, duck_id: int) -> None:
+        """Take back a duck whose announcement never went out. The row is
+        written before the message is sent, so a failed send used to leave
+        an active duck nobody could see: it blocked every new spawn for the
+        rest of its lifetime (up to a day) and could only be found by typing
+        `bang` blind."""
+        await self.db.execute(
+            "UPDATE duck_events SET resolved = TRUE, resolved_action = 'expired', "
+            " resolved_at = NOW() WHERE id = $1 AND resolved = FALSE",
+            duck_id,
+        )
 
     async def expire_old_ducks(self, chat_id: int | None = None) -> int:
         if chat_id is not None:
@@ -277,8 +302,12 @@ class DuckhuntService:
             claimed = await self._resolve(
                 duck.id, user_id, "bang", outcome.points_delta,
             )
-            if claimed:
-                await self._bump_stats(chat_id, user_id, display_name, "bang", outcome)
+            if not claimed:
+                # Someone else's shot landed first. Telling the loser "you
+                # shot the duck! +1" while paying nothing was the old answer;
+                # "there's no duck" is true, and isn't a miss either.
+                return None, None
+            await self._bump_stats(chat_id, user_id, display_name, "bang", outcome)
         else:
             await self._bump_stats(chat_id, user_id, display_name, "bang", outcome)
         return outcome, duck
@@ -286,11 +315,26 @@ class DuckhuntService:
     async def _handle_bang_boss(
         self, duck: ActiveDuck, user_id: int, display_name: str,
         rng: random.Random | None = None,
-    ) -> tuple[ActionOutcome, ActiveDuck]:
+    ) -> tuple[ActionOutcome, ActiveDuck] | tuple[None, None]:
         """A bang on a boss duck. Bosses always take the hit; killing blow
         awards a bonus to the killer; everyone who contributed gets credit."""
         from ipedro.duckhunt.scoring import ActionOutcome  # local import
-        # Increment boss hit counter & per-user attribution row.
+        required = duck.boss_required_hits or 1
+        # Count the hit only while the boss is still standing: unresolved AND
+        # short of its last hit. Hits that arrive together, or after the kill
+        # or the boss wandering off, get NULL back and no credit (they used to
+        # pay out on a dead duck and show "(4/3)").
+        new_hits = await self.db.fetchval(
+            "UPDATE duck_events SET boss_current_hits = boss_current_hits + 1 "
+            " WHERE id = $1 AND resolved = FALSE AND boss_current_hits < $2 "
+            " RETURNING boss_current_hits",
+            duck.id, required,
+        )
+        if new_hits is None:
+            # Not a miss (a miss can draw a challenge): the boss is simply no
+            # longer there, which is what "no active duck" already says.
+            return None, None
+        # Per-user attribution row, for the participation credit at the kill.
         await self.db.execute(
             """
             INSERT INTO duck_boss_hits (duck_id, user_id, display_name, hits)
@@ -301,12 +345,6 @@ class DuckhuntService:
             """,
             duck.id, user_id, display_name,
         )
-        new_hits = await self.db.fetchval(
-            "UPDATE duck_events SET boss_current_hits = boss_current_hits + 1 "
-            " WHERE id = $1 RETURNING boss_current_hits",
-            duck.id,
-        )
-        required = duck.boss_required_hits or 1
         small_pts = max(1, base_points(duck.rarity) // 4)
         # == , not >=: boss_current_hits increments by exactly 1 per call
         # and RETURNING is atomic per row, so exactly one call ever sees
@@ -387,8 +425,9 @@ class DuckhuntService:
             claimed = await self._resolve(
                 duck.id, user_id, "ignore", outcome.points_delta,
             )
-            if claimed:
-                await self._bump_stats(chat_id, user_id, display_name, "ignore", outcome)
+            if not claimed:
+                return None, None               # it was already gone
+            await self._bump_stats(chat_id, user_id, display_name, "ignore", outcome)
         else:
             await self._bump_stats(chat_id, user_id, display_name, "ignore", outcome)
         return outcome, duck
@@ -449,8 +488,12 @@ class DuckhuntService:
             claimed = await self._resolve(
                 duck.id, user_id, "bef", outcome.points_delta,
             )
-            if claimed:
-                await self._bump_stats(chat_id, user_id, display_name, "bef", outcome)
+            if not claimed:
+                # Befriended by someone else a moment earlier. The loser used
+                # to get the celebration and a prompt to name a duck that
+                # isn't theirs.
+                return None, None
+            await self._bump_stats(chat_id, user_id, display_name, "bef", outcome)
         # Refusal => no stat bump, duck stays.
 
         return outcome, duck
@@ -582,12 +625,65 @@ class DuckhuntService:
     async def quack_flag(self, chat_id: int) -> bool:
         return await self.active_duck(chat_id) is not None
 
+    # ------------------------------------------------------------ stealing
+    async def stealable_duck(
+        self, challenge: PendingBefChallenge,
+    ) -> ActiveDuck | None:
+        """The duck this challenge was issued over, if it is still there to be
+        taken. A challenge records the duck it was issued over; a duck that
+        spawned since is a different one, and a challenge with no duck on it
+        (an admin's forced one, or one from before this existed) has nothing
+        to steal. A boss can't be befriended, so it can't be stolen either."""
+        if challenge.duck_id is None:
+            return None
+        duck = await self.active_duck(challenge.chat_id)
+        if duck is None or duck.is_boss or duck.id != challenge.duck_id:
+            return None
+        return duck
+
+    async def handle_steal(
+        self, *, challenge: PendingBefChallenge, thief_id: int,
+        thief_name: str, ai_line: str | None = None,
+    ) -> StealResult:
+        """Someone other than the challenge's owner answered it correctly.
+        If they are first, the duck the owner was working on is theirs.
+
+        The duck is claimed FIRST, by the row-level guard every bang and bef
+        uses, and the owner's challenge is cleared only once the duck is
+        really the thief's. The other order destroyed a challenge for nothing
+        whenever a bang or bef landed in between, leaving its owner un-gated.
+        Who is first between the owner and a thief is decided before this,
+        by arrival order (handlers.duckhunt.challenge_lock); the check here is
+        that the challenge is still the one that was answered."""
+        duck = await self.stealable_duck(challenge)
+        if duck is None:
+            return StealResult("no_duck")
+        current = await self.get_bef_challenge(challenge.chat_id, challenge.user_id)
+        if (
+            current is None
+            or current.prompt_message_id != challenge.prompt_message_id
+        ):
+            return StealResult("too_late")
+        outcome = bef_success_outcome(duck.rarity, ai_line)
+        if not await self._resolve(
+            duck.id, thief_id, "bef", outcome.points_delta,
+        ):
+            return StealResult("no_duck")
+        await self.claim_bef_challenge(
+            challenge.chat_id, challenge.user_id, challenge.prompt_message_id,
+        )
+        await self._bump_stats(
+            challenge.chat_id, thief_id, thief_name, "bef", outcome,
+        )
+        return StealResult("stolen", outcome, duck)
+
     # ------------------------------------------------------------ bef challenges
     async def get_bef_challenge(
         self, chat_id: int, user_id: int,
     ) -> PendingBefChallenge | None:
         row = await self.db.fetchrow(
-            "SELECT chat_id, user_id, challenge, kind, prompt_message_id, created_at "
+            "SELECT chat_id, user_id, challenge, kind, prompt_message_id, "
+            "       created_at, duck_id "
             "  FROM bef_challenges WHERE chat_id = $1 AND user_id = $2",
             chat_id, user_id,
         )
@@ -595,20 +691,21 @@ class DuckhuntService:
 
     async def set_bef_challenge(
         self, chat_id: int, user_id: int, challenge: str, kind: str,
-        prompt_message_id: int | None,
+        prompt_message_id: int | None, duck_id: int | None = None,
     ) -> None:
         await self.db.execute(
             """
             INSERT INTO bef_challenges (chat_id, user_id, challenge, kind,
-                                        prompt_message_id, created_at)
-            VALUES ($1, $2, $3, $4, $5, NOW())
+                                        prompt_message_id, created_at, duck_id)
+            VALUES ($1, $2, $3, $4, $5, NOW(), $6)
             ON CONFLICT (chat_id, user_id) DO UPDATE SET
                 challenge = EXCLUDED.challenge,
                 kind = EXCLUDED.kind,
                 prompt_message_id = EXCLUDED.prompt_message_id,
-                created_at = NOW()
+                created_at = NOW(),
+                duck_id = EXCLUDED.duck_id
             """,
-            chat_id, user_id, challenge, kind, prompt_message_id,
+            chat_id, user_id, challenge, kind, prompt_message_id, duck_id,
         )
 
     async def clear_bef_challenge(self, chat_id: int, user_id: int) -> None:
@@ -616,6 +713,23 @@ class DuckhuntService:
             "DELETE FROM bef_challenges WHERE chat_id = $1 AND user_id = $2",
             chat_id, user_id,
         )
+
+    async def claim_bef_challenge(
+        self, chat_id: int, user_id: int, prompt_message_id: int | None,
+    ) -> bool:
+        """Take THIS challenge (the one posted as `prompt_message_id`) out of
+        play. True only for the one caller that actually removed it; a second
+        caller, or one holding a challenge that has since been replaced by a
+        newer one, gets False."""
+        status = await self.db.execute(
+            "DELETE FROM bef_challenges WHERE chat_id = $1 AND user_id = $2 "
+            "   AND prompt_message_id IS NOT DISTINCT FROM $3",
+            chat_id, user_id, prompt_message_id,
+        )
+        try:
+            return int(status.split()[-1]) > 0
+        except (AttributeError, ValueError, IndexError):
+            return False
 
     async def clear_all_bef_challenges(self, chat_id: int) -> int:
         """Drop every pending bef challenge in a chat. Returns the count.
@@ -635,7 +749,8 @@ class DuckhuntService:
         self, chat_id: int, prompt_message_id: int,
     ) -> PendingBefChallenge | None:
         row = await self.db.fetchrow(
-            "SELECT chat_id, user_id, challenge, kind, prompt_message_id, created_at "
+            "SELECT chat_id, user_id, challenge, kind, prompt_message_id, "
+            "       created_at, duck_id "
             "  FROM bef_challenges "
             " WHERE chat_id = $1 AND prompt_message_id = $2",
             chat_id, prompt_message_id,

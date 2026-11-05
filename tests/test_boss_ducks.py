@@ -38,6 +38,7 @@ class _BossFakeDB:
         self._next_hits = next_hits          # value RETURNING boss_current_hits
         self._contributors = contributors or []
         self.bumps: list[tuple] = []         # duck_stats INSERT args
+        self.hit_rows: list[tuple] = []      # duck_boss_hits INSERT args
 
     async def fetchrow(self, query, *args):
         if "FROM duck_events" in query and "resolved = FALSE" in query:
@@ -63,6 +64,8 @@ class _BossFakeDB:
     async def execute(self, query, *args):
         if "INSERT INTO duck_stats" in query:
             self.bumps.append(args)
+        if "INSERT INTO duck_boss_hits" in query:
+            self.hit_rows.append(args)
         return "UPDATE 1"
 
 
@@ -73,20 +76,21 @@ _KILLED = 3
 
 @pytest.mark.asyncio
 async def test_a_hit_after_the_boss_is_already_dead_does_not_re_kill_it():
-    """boss_current_hits increments by 1 per call and RETURNING is atomic
-    per row, so new_hits climbs through every integer — a >= check meant
-    ANY hit landing after the boss died (new_hits > required, e.g. a late
-    concurrent hit, or an admin debug always_hit) re-entered the
-    killing-blow branch and handed out a second bonus + a second kill."""
-    db = _BossFakeDB(_boss(required=3), next_hits=4)   # already past required
+    """A hit landing after the kill (a late concurrent one, or an admin debug
+    always_hit) used to re-enter the killing-blow branch and hand out a second
+    bonus + a second kill; then, once that was fixed, it still paid a small
+    "hit" on a dead duck and showed "(4/3)". The increment only counts while
+    the boss is unresolved and short of its last hit, so a late one gets
+    nothing back and is told so."""
+    db = _BossFakeDB(_boss(required=3), next_hits=None)   # the guarded UPDATE matched no row
     svc = DuckhuntService(db)  # type: ignore[arg-type]
-    outcome, _ = await svc.handle_bang(
+    outcome, duck = await svc.handle_bang(
         chat_id=42, user_id=1, display_name="Matt",
     )
-    assert not outcome.resolves_duck                    # not treated as a kill
-    assert "killing blow" not in outcome.message.lower()
-    assert len(db.bumps) == 1
-    assert db.bumps[0][_KILLED] == 0
+    # "No duck", not a miss: a miss can draw a challenge, and this isn't one.
+    assert outcome is None and duck is None
+    assert db.bumps == []                               # no credit at all
+    assert db.hit_rows == []                            # and no attribution row
 
 
 @pytest.mark.asyncio
@@ -236,3 +240,21 @@ async def test_bef_with_no_duck_on_cooldown_gets_no_captcha():
     text = msg.reply.await_args.args[0].lower()
     assert "challenge" not in text
     rt.duckhunt.get_bef_challenge.assert_awaited()   # gate still consulted
+
+
+@pytest.mark.asyncio
+async def test_the_increment_only_counts_while_the_boss_stands():
+    seen = []
+
+    class _DB(_BossFakeDB):
+        async def fetchval(self, query, *args):
+            if "RETURNING boss_current_hits" in query:
+                seen.append((query, args))
+            return await super().fetchval(query, *args)
+
+    db = _DB(_boss(required=3), next_hits=1)
+    await DuckhuntService(db).handle_bang(chat_id=42, user_id=1, display_name="Matt")  # type: ignore[arg-type]
+    sql, args = seen[0]
+    assert "resolved = FALSE" in sql and "boss_current_hits < $2" in sql
+    assert args == (7, 3)
+    assert db.hit_rows and db.hit_rows[0][:2] == (7, 1)    # the attribution row follows

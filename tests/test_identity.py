@@ -14,10 +14,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from ipedro import addressed, identity, personas
+from ipedro import addressed, gif_reaction, identity, personas
 from ipedro import dale_gifs as dale
 from ipedro.capabilities import _REFLEXES, capability_brief
-from ipedro.handlers import automod, basics, chat
+from ipedro.handlers import automod, automod_bits, basics, chat
 from ipedro.memory.context_builder import BuiltContext
 from ipedro.user_flags import is_insult_to_bot
 from tests.test_addressed import _mention_rt
@@ -258,25 +258,33 @@ async def test_only_dale_takes_credit_in_his_own_words(credit_roll):
 @pytest.fixture
 def gif_sender(monkeypatch):
     sent = AsyncMock(return_value=True)
-    monkeypatch.setattr(dale, "send_random", sent)
+    monkeypatch.setattr(dale, "send_random", sent)             # the keyword bits
+    monkeypatch.setattr(gif_reaction, "ambient", sent)         # the unprompted ones
     monkeypatch.setattr(chat, "should_respond", lambda *a, **k: False)
     return sent
+
+
+def _group_rt():
+    """A group chat on the default policy: where the ambient bits live."""
+    rt = _rt_with()
+    rt.chats.get_config.return_value.response_policy = "mention"
+    return rt
 
 
 @pytest.mark.asyncio
 async def test_another_bot_never_rolls_for_an_ambient_dale_gif(gif_sender, monkeypatch):
     monkeypatch.setattr(chat, "_DALE_GIF_PROBABILITY", 1.0)
-    await _handler(_as_hank(_rt_with())).callback(_msg(text="anyway the tap drips"))
+    await _handler(_as_hank(_group_rt())).callback(_msg(text="anyway the tap drips"))
     gif_sender.assert_not_awaited()
-    await _handler(_rt_with()).callback(_msg(text="anyway the tap drips"))
+    await _handler(_group_rt()).callback(_msg(text="anyway the tap drips"))
     gif_sender.assert_awaited_once()              # control: Dale still does
 
 
 @pytest.mark.asyncio
 async def test_another_bot_skips_the_dale_gif_triggers(gif_sender):
-    await _handler(_as_hank(_rt_with())).callback(_msg(text="pocket sand!"))
+    await _handler(_as_hank(_group_rt())).callback(_msg(text="pocket sand!"))
     gif_sender.assert_not_awaited()
-    await _handler(_rt_with()).callback(_msg(text="pocket sand!"))
+    await _handler(_group_rt()).callback(_msg(text="pocket sand!"))
     gif_sender.assert_awaited_once()              # control: Dale still does
 
 
@@ -287,7 +295,7 @@ def test_skipping_dale_gifs_lets_a_later_trigger_answer():
     assert automod._automod_response("pocket sand", dale_gifs=False) is None
     assert (
         automod._automod_response("pocket sand and stonks", dale_gifs=False)
-        == automod._M_STONKS
+        == automod_bits._M_STONKS
     )
     assert automod._automod_response("based", dale_gifs=False) == (
         "Based? Based on what?"
@@ -351,13 +359,68 @@ async def test_the_chat_handler_briefs_another_bot_as_itself(monkeypatch):
     assert briefs and "GIF of yourself" not in briefs[0]
 
 
+# ── how long a reply may run ─────────────────────────────────────────────────
+
+def test_dales_reply_length_is_what_it_always_was():
+    """Dale is the standard other bots are held to, so none of this may
+    touch him: the caps are the ones the handlers hard-coded before."""
+    assert identity.DALE.terse is False
+    assert (identity.DALE.reply_tokens, identity.DALE.hub_reply_tokens) == (400, 300)
+    unset = identity.from_settings(SimpleNamespace())
+    assert unset is identity.DALE
+
+
+def test_every_other_bot_is_held_to_a_shorter_reply():
+    assert HANK.terse is True
+    assert HANK.reply_tokens < identity.DALE.reply_tokens
+    assert HANK.hub_reply_tokens < identity.DALE.hub_reply_tokens
+    # even a bot named Dale that has been given a different flavor
+    odd = identity.from_settings(SimpleNamespace(
+        bot_name="Dale", bot_flavor="plain", manages_bots=False))
+    assert odd.terse is True
+
+
+@pytest.mark.asyncio
+async def test_another_bots_reply_gets_the_length_rule_and_a_tight_cap(monkeypatch):
+    rt = _as_hank(_mention_rt(monkeypatch))
+    seen = []
+
+    async def fake_build(**kwargs):
+        seen.append(kwargs["terse"])
+        return BuiltContext(messages=[{"role": "user", "content": "x"}], tokens=1)
+
+    monkeypatch.setattr(chat, "build_context", fake_build)
+    msg = _msg(text="hank you there")
+    msg.answer = AsyncMock(return_value=SimpleNamespace(message_id=1))
+    await _handler(rt).callback(msg)
+    assert seen == [True]
+    assert rt.openai.chat.await_args.kwargs["max_tokens"] == HANK.reply_tokens
+
+
+@pytest.mark.asyncio
+async def test_dales_reply_asks_for_no_length_rule(monkeypatch):
+    rt = _mention_rt(monkeypatch)
+    seen = []
+
+    async def fake_build(**kwargs):
+        seen.append(kwargs["terse"])
+        return BuiltContext(messages=[{"role": "user", "content": "x"}], tokens=1)
+
+    monkeypatch.setattr(chat, "build_context", fake_build)
+    msg = _msg(text="dale you there")
+    msg.answer = AsyncMock(return_value=SimpleNamespace(message_id=1))
+    await _handler(rt).callback(msg)
+    assert seen == [False]
+    assert rt.openai.chat.await_args.kwargs["max_tokens"] == 400
+
+
 # ── insults ──────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("text", [
     "dale you're useless",              # never registered before: wrong names
     "rusty is so dumb",
     "shut up rusty shackleford",
-    "dude this is garbage",             # the legacy names still count
+    "dude you're garbage",              # the legacy names still count
     "pedro is trash",
     "useless bot",
 ])
@@ -452,3 +515,106 @@ def test_no_starting_persona_means_dale(fresh_personas, unset):
     personas.set_default_prompt("You are Hank Hill.")
     personas.set_default_prompt(unset)
     assert personas.current_master_prompt() == personas.DEFAULT_DALE_PROMPT
+
+
+# ── the generic word "bot" is not every bot's name ───────────────────────────
+
+def _settings_for(**kw):
+    return SimpleNamespace(bot_name="Hank", bot_aliases="hank, hank hill",
+                           bot_flavor="plain", bot_persona=None, **kw)
+
+
+def test_only_the_bot_that_runs_the_others_answers_to_the_word_bot():
+    """With Dale and Hank in one group, "bot, settle this" would otherwise
+    be answered by both, and "shut up bot" would earn the speaker a grudge
+    in each bot's own database."""
+    dale = identity.from_settings(SimpleNamespace())          # nothing set: Dale
+    hank_child = identity.from_settings(_settings_for(manages_bots=False))
+    hank_alone = identity.from_settings(_settings_for(manages_bots=True))
+    assert dale is identity.DALE and dale.answers_to_bot_word
+    assert hank_alone.answers_to_bot_word              # the only bot: "bot" is it
+    assert not hank_child.answers_to_bot_word
+    assert "bad bot" in dale.rebuke_phrases and "bad bot" in hank_alone.rebuke_phrases
+    assert "bad bot" not in hank_child.rebuke_phrases
+    assert "bad hank" in hank_child.rebuke_phrases     # its own name still works
+
+
+def test_a_child_bot_is_addressed_by_its_names_only():
+    hank = identity.from_settings(_settings_for(manages_bots=False))
+    dale = identity.DALE
+    for line in ("bot which one of you is right", "the chatbot is broken", "ok robot"):
+        assert chat._mentions_pedro(line, dale), line
+        assert not chat._mentions_pedro(line, hank), line
+    assert chat._mentions_pedro("hank which one of you is right", hank)
+    assert chat._mentions_pedro("what do you think hank hill", hank)
+
+
+def test_a_child_bot_holds_no_grudge_for_an_insult_to_bots_in_general():
+    from ipedro.user_flags import is_insult_to_bot
+
+    hank = identity.from_settings(_settings_for(manages_bots=False))
+    assert is_insult_to_bot("shut up bot", identity.DALE.names_pattern)
+    assert not is_insult_to_bot("shut up bot", hank.names_pattern, bot_word=False)
+    assert not is_insult_to_bot("you stupid bot", hank.names_pattern, bot_word=False)
+    assert is_insult_to_bot("shut up hank", hank.names_pattern, bot_word=False)
+
+
+def test_the_bot_noun_only_opens_the_classifier_for_the_bot_that_owns_it():
+    from ipedro.addressed import quick_verdict
+
+    line = "honestly the bot gets this wrong"
+    assert quick_verdict(line, in_conversation=False) is None          # worth a look
+    assert quick_verdict(line, in_conversation=False, bot_word=False) is False
+
+
+# ── what a bot offers depends on whether it runs the others ──────────────────
+
+def _help_msg(chat_type, user_id=7):
+    return SimpleNamespace(
+        chat=SimpleNamespace(id=-5 if chat_type != "private" else user_id, type=chat_type, title="t"),
+        from_user=SimpleNamespace(id=user_id, is_bot=False, username="a", first_name="A", last_name=None),
+        text="/help", reply=AsyncMock(),
+    )
+
+
+def _help_rt(*, manages_bots=True):
+    from ipedro.config import Settings
+
+    settings = Settings(telegram_bot_token="t", openai_api_key="k",   # type: ignore[call-arg]
+                        database_url="postgresql://t/t", admin_user_ids="7",
+                        manages_bots=manages_bots)
+    return SimpleNamespace(
+        settings=settings,
+        chats=SimpleNamespace(upsert_chat=AsyncMock(), get_config=AsyncMock(return_value=None),
+                              upsert_default_config=AsyncMock(
+                                  return_value=SimpleNamespace(memory_enabled=True))),
+        users=SimpleNamespace(upsert_user=AsyncMock()),
+        command_log=SimpleNamespace(add=AsyncMock()),
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_admin_help_is_only_ever_posted_in_a_private_chat():
+    """It is headed "DM only"; in a group it told everyone which admin
+    commands exist."""
+    rt = _help_rt()
+    handler = next(h.callback for h in basics.build_router(rt).observers["message"].handlers
+                   if h.callback.__name__ == "help_")
+    group, dm = _help_msg("supergroup"), _help_msg("private")
+    await handler(group)
+    await handler(dm)
+    assert group.reply.await_count == 1                       # the public help only
+    assert dm.reply.await_count == 2
+    assert "Bot admin (DM only)" in dm.reply.await_args.args[0]
+    assert "/evolve" in dm.reply.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_a_bot_the_manager_runs_does_not_advertise_the_managers_commands():
+    rt = _help_rt(manages_bots=False)
+    handler = next(h.callback for h in basics.build_router(rt).observers["message"].handlers
+                   if h.callback.__name__ == "help_")
+    dm = _help_msg("private")
+    await handler(dm)
+    assert "/newbot" not in dm.reply.await_args.args[0]
+    assert "/evolve" not in dm.reply.await_args.args[0]

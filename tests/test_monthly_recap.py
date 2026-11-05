@@ -264,3 +264,94 @@ async def test_loop_does_not_stamp_on_transient_send_failure():
     await mr._maybe_post(bot, db, _openai(), settings,
                          now=datetime(2026, 8, 2, 10, 0, tzinfo=settings.tzinfo))
     assert not db.stamped        # retries next tick
+
+
+@pytest.mark.asyncio
+async def test_other_bots_are_not_counted_as_people_or_quoted():
+    """Hub-relayed lines from other bots are stored as role='user' under the
+    bot's id; they'd show up as members, top yapper and 'exactly who said
+    it' in the recap."""
+    seen = []
+
+    class _DB(_RecapFakeDB):
+        async def fetch(self, query, *args):
+            seen.append(query)
+            return await super().fetch(query, *args)
+
+    db = _DB(stats_rows=[{"name": "Matt", "n": 3}], quotes_count=0, saved=[],
+             pool=[("Matt", "hello there everyone")])
+    await _build(db, _openai())
+    stats_sql = next(q for q in seen if "GROUP BY m.user_id" in q)
+    pool_sql = next(q for q in seen if "WITH month AS" in q)
+    assert "u.is_bot IS NOT TRUE" in stats_sql
+    assert "u.is_bot IS NOT TRUE" in pool_sql
+
+
+# ── a bad hour must not spend the month's recap ──────────────────────────────
+
+@pytest.fixture(autouse=True)
+def _forget_built_recaps():
+    mr._built.clear()
+    yield
+    mr._built.clear()
+
+
+@pytest.mark.asyncio
+async def test_a_model_that_is_down_early_in_the_month_waits_instead_of_posting_filler():
+    """One failed call on the 2nd used to post "Another month in the books"
+    and stamp the month: that was the recap, for good."""
+    db = _db()
+    bot = SimpleNamespace(send_message=AsyncMock())
+    settings = _settings()
+    await mr._maybe_post(bot, db, _openai(None), settings,
+                         now=datetime(2026, 8, 2, 10, 0, tzinfo=settings.tzinfo))
+    bot.send_message.assert_not_awaited()
+    assert not db.stamped                              # tries again next hour
+
+
+@pytest.mark.asyncio
+async def test_a_model_that_stays_down_does_get_the_plain_recap_later():
+    db = _db()
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=1)))
+    settings = _settings()
+    await mr._maybe_post(bot, db, _openai(None), settings,
+                         now=datetime(2026, 8, 4, 10, 0, tzinfo=settings.tzinfo))
+    assert mr._FALLBACK_RECAP in bot.send_message.await_args.args[1]
+    assert db.stamped
+
+
+@pytest.mark.asyncio
+async def test_a_send_that_fails_for_a_moment_retries_without_paying_the_model_again():
+    db = _db()
+    openai = _openai()
+    bot = SimpleNamespace(send_message=AsyncMock(side_effect=[
+        RuntimeError("blip"), SimpleNamespace(message_id=2)]))
+    settings = _settings()
+    now = datetime(2026, 8, 2, 10, 0, tzinfo=settings.tzinfo)
+    await mr._maybe_post(bot, db, openai, settings, now=now)
+    assert openai.chat.await_count == 1 and not db.stamped
+    await mr._maybe_post(bot, db, openai, settings, now=now)          # next hour
+    assert openai.chat.await_count == 1                                # same text, no new call
+    assert bot.send_message.await_count == 2 and db.stamped
+    assert not mr._built                                               # and forgotten once sent
+
+
+@pytest.mark.asyncio
+async def test_tracking_or_stamping_failing_after_a_post_does_not_abort_the_other_chats(monkeypatch):
+    db = _db(eligible=(100, 101))
+    sent = []
+
+    async def send(chat_id, text, **kw):
+        sent.append(chat_id)
+        return SimpleNamespace(message_id=len(sent))
+
+    async def failing_stamp(db_, chat_id, prev_first):
+        raise RuntimeError("db blip")
+
+    monkeypatch.setattr(mr, "_stamp", failing_stamp)
+    monkeypatch.setattr(mr, "track", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+    bot = SimpleNamespace(send_message=AsyncMock(side_effect=send))
+    settings = _settings()
+    await mr._maybe_post(bot, db, _openai(), settings,
+                         now=datetime(2026, 8, 2, 10, 0, tzinfo=settings.tzinfo))
+    assert sent == [100, 101]                                          # both got theirs

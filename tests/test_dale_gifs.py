@@ -69,7 +69,6 @@ class _FakeDB:
                     r["send_count"] += 1
                     if len(args) > 1:
                         r["file_id"] = args[1]
-                        r["url"] = None
             return "UPDATE 1"
         return "OK"
 
@@ -169,12 +168,13 @@ async def test_random_for_tag_prefers_the_tag():
 
 
 @pytest.mark.asyncio
-async def test_random_for_tag_falls_back_to_any_gif():
-    """An unfilled bucket must still produce a GIF, not silence."""
+async def test_random_for_tag_never_falls_back_to_some_other_gif():
+    """A clip that doesn't fit is worse than the text line the caller says
+    instead (a propane GIF answering "chemtrails"): an empty bucket is None."""
     db = _FakeDB()
     await dg.add(db, ["conspiracy"], file_id="CON", file_unique_id="U1")
-    got = await dg.random_for_tag(db, "propane")
-    assert got is not None and got.file_id == "CON"
+    assert await dg.random_for_tag(db, "propane") is None
+    assert await dg.random_for_tag(db, "") is None
 
 
 @pytest.mark.asyncio
@@ -226,8 +226,23 @@ async def test_note_sent_upgrades_a_url_row_to_a_file_id():
 
     upgraded = (await dg.list_all(db))[0]
     assert upgraded.file_id == "TELEGRAM123"
-    assert upgraded.url is None                 # no longer needed
+    assert upgraded.url == "https://media.tenor.com/x.gif"   # kept: the seed dedupes on it
     assert upgraded.send_count == 1
+
+
+@pytest.mark.asyncio
+async def test_reseeding_after_the_gifs_have_been_sent_adds_nothing():
+    """The bug end to end: seed, send them all once (each learns its
+    file_id), seed again. The second run used to insert every one again."""
+    db = _FakeDB()
+    added, _, _ = await dg.apply_seed(db)
+    assert added > 0
+    for gif in await dg.list_all(db):
+        await dg.note_sent(db, gif.id, file_id=f"file-{gif.id}")
+    again_added, again_skipped, _ = await dg.apply_seed(db)
+    assert again_added == 0
+    assert again_skipped == added
+    assert len(await dg.list_all(db)) == added
 
 
 # ── sending ──────────────────────────────────────────────────────────────────
@@ -271,7 +286,8 @@ async def test_send_downloads_a_url_row_then_upgrades_it(monkeypatch):
 
     row = db.rows[0]
     assert row["file_id"] == "TG-123"    # learned from the sent message
-    assert row["url"] is None            # host no longer needed
+    # The url stays (the seed dedupes on it); sends use the file_id from now on.
+    assert row["url"] == "https://media.tenor.com/x.gif"
     assert row["send_count"] == 1
 
 
@@ -400,3 +416,18 @@ async def test_seeded_rows_start_as_urls_awaiting_upgrade():
     db = _FakeDB()
     await dg.apply_seed(db)
     assert all(r["url"] and not r["file_id"] for r in db.rows)
+
+
+@pytest.mark.asyncio
+async def test_learning_a_file_id_keeps_the_url_the_seed_dedupes_on():
+    """note_sent used to set url = NULL once a seeded GIF had a file_id, so
+    ON CONFLICT (url) no longer saw it and the next /dalegif seed inserted
+    a second copy of every GIF that had ever been sent."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    db = SimpleNamespace(execute=AsyncMock())
+    await dg.note_sent(db, 3, "AgACfileid")
+    sql, *args = db.execute.await_args.args
+    assert "url" not in sql
+    assert args == [3, "AgACfileid"]

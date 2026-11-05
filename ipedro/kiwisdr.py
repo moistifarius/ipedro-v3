@@ -50,6 +50,8 @@ from typing import Optional
 
 import numpy as np
 
+from ipedro.net_safety import redact_url
+
 try:
     import websockets
     import websockets.exceptions
@@ -305,7 +307,7 @@ def fetch_pcm_from_url(url: str, *, duration_s: float = 30.0,
     empty array on bad URL or fetch failure."""
     params = parse_kiwi_url(url)
     if params is None:
-        log.info("kiwisdr: malformed URL %s", url)
+        log.info("kiwisdr: malformed URL %s", redact_url(url))
         return np.zeros(0, dtype=np.int16)
     return fetch_pcm(
         host=params["host"], port=params["port"],
