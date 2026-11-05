@@ -244,10 +244,16 @@ _POINTER_LEAD = re.compile(
 # an emoji can't also be read as a gap), and only the first _SCAN_CHARS of a
 # message are ever read. The "@" is left out of the gap so an @mention can
 # follow a word ("hey @dale_bot make a poll").
+def lead_in(names: str) -> str:
+    """The regex for what may come before an ask: a few filler words, the
+    bot's names and @mentions (bounded, possessive; see above). Shared with
+    the other plain-words asks (ipedro/reverser.py)."""
+    return rf"(?:(?:@\w+|{names}|{_FILLER})(?![\w'’])[^\w@]*+){{0,{_MAX_LEAD_TOKENS}}}"
+
+
 @functools.lru_cache(maxsize=32)
 def _ask_re(names: str) -> re.Pattern:
-    lead = rf"(?:(?:@\w+|{names}|{_FILLER})(?![\w'’])[^\w@]*+){{0,{_MAX_LEAD_TOKENS}}}"
-    return re.compile(rf"^\W*{lead}(?P<ask>{_ASK})", re.IGNORECASE)
+    return re.compile(rf"^\W*{lead_in(names)}(?P<ask>{_ASK})", re.IGNORECASE)
 
 
 # Politeness words and the bot's own names, found anywhere, flat: no repeated
@@ -258,6 +264,9 @@ def _polite_re(names: str) -> re.Pattern:
         rf"(?<![\w'’])(?:please|pls|plz|thanks|thx|ty|{names})(?![\w'’])",
         re.IGNORECASE,
     )
+
+
+polite_re = _polite_re      # politeness words and the bot's names, found anywhere
 
 
 def _trim(s: str) -> str:

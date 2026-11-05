@@ -664,3 +664,34 @@ He sends GIFs of himself two ways, and each only when it fits.
   too) is never sent unprompted: those belong to their keywords.
 
 `/dalegif test <tag>` is for the owner poking the library and isn't paced.
+
+### `/reverse`, and "reverse this"
+
+Plays a video backwards. Reply to a **video, a GIF or a round video** with
+`/reverse` (or send one with `/reverse` as its caption), or say it at the start of
+a message to a bot that is answering you anyway: "reverse this", "can you reverse
+this video", "play this backwards", "make this go backwards", "rewind that gif".
+Add `mute` ("reverse this and mute it", `/reverse mute`) to leave the sound out.
+Anything after the ask that isn't pointing at the video makes it not an ask
+("reverse psychology", "reverse the order of the list").
+
+It comes back as a reply of the same kind: a video, a looping GIF, or a round
+video. The sound is reversed with it and kept in step. No model is used, so it
+costs nothing but CPU; a video sent with the ask as its caption isn't also
+*watched*.
+
+- **Limits:** up to 30 seconds and 20 MB (Telegram's limit for what a bot can
+  download), with a picture no bigger than 4096x2160. Too long or too big is said
+  at once, from what Telegram says of the file, before anything is downloaded.
+- **Quality:** `ffmpeg` has to hold every frame of the clip in memory to reverse
+  it, so the frames are kept to 400 MB in all: at most 30 frames a second, and the
+  picture is scaled down until the clip fits. A 10 second 720p clip is untouched;
+  a 30 second one comes out about 720x400.
+- **Limits per person:** 6 an hour each, 15 an hour a chat (bot admins exempt). A
+  refusal before anything was done doesn't use one up. Reversing shares
+  `ffmpeg`'s two slots with watching videos; when both are busy he says so.
+- **Privacy:** the copy carries none of the original's metadata (a phone video can
+  hold where it was shot), subtitles or data streams.
+- **Safety:** only real MP4/MOV/WebM files are opened, with only local files
+  allowed and a time, CPU, memory and output limit per process, as for watching
+  videos.

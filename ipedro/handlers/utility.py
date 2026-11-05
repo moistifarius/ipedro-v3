@@ -20,7 +20,7 @@ from aiogram.types import (
     InlineKeyboardMarkup, Message,
 )
 
-from ipedro import poll_maker
+from ipedro import poll_maker, reverser
 from ipedro.bot_messages import track
 from ipedro.auth import is_admin_user
 from ipedro.handlers.common import (
@@ -371,6 +371,16 @@ def build_router(rt: Runtime) -> Router:
             )
         except Exception as exc:
             await msg.reply(f"Poll failed: {exc}", disable_notification=True)
+
+    @r.message(Command("reverse"))
+    async def reverse(msg: Message) -> None:
+        """/reverse on a video, GIF or round video (replied to, or sent with
+        the command as its caption): it comes back played backwards.
+        "/reverse mute" leaves the sound out."""
+        words = (msg.text or msg.caption or "").lower().split()[1:]
+        await reverser.make_reverse(
+            rt, msg, mute=any(w in ("mute", "muted", "silent", "nosound") for w in words),
+        )
 
     @r.message(Command("quote"))
     async def quote(msg: Message) -> None:

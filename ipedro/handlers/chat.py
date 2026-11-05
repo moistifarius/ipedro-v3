@@ -16,7 +16,7 @@ from aiogram.types import BufferedInputFile, Message, ReactionTypeEmoji
 
 from ipedro import (
     addressed, gif_reaction, identity, introspection, media_library, poll_maker,
-    relay, vision,
+    relay, reverser, vision,
 )
 from ipedro.bot_messages import track
 from ipedro.capabilities import capability_brief
@@ -736,7 +736,13 @@ def build_router(rt: Runtime) -> Router:
         # user's images never cost a vision call.
         text = typed
         seen = None
-        if cfg.vision_enabled and cfg.response_policy != "commands":
+        # A video sent to be played backwards isn't also to be WATCHED (a paid
+        # look at something nobody asked him about).
+        reverse_ask = reverser.detect_reverse_request(typed, names=ident.names_pattern)
+        if (
+            cfg.vision_enabled and cfg.response_policy != "commands"
+            and reverse_ask is None
+        ):
             # "typing…" only while he is likely to answer: a video in a busy
             # group that he'll just read shouldn't look like a reply coming.
             seen = await vision.look(
@@ -1102,6 +1108,15 @@ def build_router(rt: Runtime) -> Router:
                 rt, msg, poll_ask.rest, ask_text=poll_ask.ask,
                 vision_ok=cfg.vision_enabled,
             )
+            if made:
+                await _record_bot_turn(rt, cfg, msg.chat.id, made)
+            return
+
+        # "dale reverse this" → the video it is about (replied to, or sent with
+        # the words as its caption), played backwards and sent back. No model
+        # and no money: rate limited, and ahead of the picture-recall bit.
+        if reverse_ask is not None:
+            made = await reverser.make_reverse(rt, msg, mute=reverse_ask.mute)
             if made:
                 await _record_bot_turn(rt, cfg, msg.chat.id, made)
             return

@@ -120,14 +120,21 @@ _ULIMITS = (
 )
 
 
-async def _run(argv: list[str]) -> tuple[int, bytes, bytes]:
+async def _run(
+    argv: list[str], *, cpu: int = 60, timeout: float | None = None,
+) -> tuple[int, bytes, bytes]:
+    """Run `argv` under the limits above. `cpu` (seconds) and `timeout` (wall
+    seconds) are for the one job that legitimately needs more than a frame
+    grab, re-encoding a clip (ipedro/video_reverse.py); everything else gets
+    the defaults. The memory and file-size limits are never raised."""
+    script = _ULIMITS if cpu == 60 else _ULIMITS.replace("cap -t 60;", f"cap -t {int(cpu)};")
     proc = await asyncio.create_subprocess_exec(
-        "sh", "-c", _ULIMITS, "limited", *argv,
+        "sh", "-c", script, "limited", *argv,
         stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE, env=_SAFE_ENV,
     )
     try:
-        out, err = await asyncio.wait_for(proc.communicate(), _STEP_TIMEOUT)
+        out, err = await asyncio.wait_for(proc.communicate(), timeout or _STEP_TIMEOUT)
     except BaseException:
         if proc.returncode is None:
             proc.kill()

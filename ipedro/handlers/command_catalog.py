@@ -141,6 +141,9 @@ COMMANDS: tuple[Command, ...] = (
     Command("meme",         "ai", "/meme",
             "/meme top text | bottom text",
             "Generate a meme image."),
+    Command("reverse",      "ai", "/reverse",
+            "/reverse [mute]  (on a video or GIF)",
+            "Play a video, GIF or round video backwards."),
     Command("redditmeme",   "ai", "/redditmeme, /rmeme",
             "/redditmeme [topic]  (or /rmeme)",
             "No topic: a post from Reddit's r/popular. With a topic: search "

@@ -57,7 +57,7 @@ _DUBIOUS_CAT_FACTS: tuple[str, ...] = (
 
 _LIMIT_NOUNS = {
     "image": "images", "ether": "transmissions", "ask": "questions",
-    "translate": "translations", "duck": "duck summons", "poll": "polls",
+    "translate": "translations", "duck": "duck summons", "poll": "polls", "reverse": "reversals",
 }
 
 

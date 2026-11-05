@@ -89,6 +89,7 @@ _CAN = (
     "- Make a poll (quiz, public, timed) from what they give you ('poll this: "
     "pizza or tacos', a reply, a screenshot). If you're answering in words "
     "none was made: never say one is up.\n"
+    "- Reverse a video or GIF when asked ('reverse this').\n"
     "- Remember people and what they say here: facts, running jokes, who "
     "said what. Karma comes from 👍/👎 reactions people leave on each "
     "other's messages."

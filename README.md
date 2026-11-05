@@ -98,6 +98,7 @@ a second message.
 | `/roast @user`, `/compliment @user` | What it says on the tin |
 | `/lyric <line>` | Bot misheard it |
 | `/meme top \| bottom` | Generate a meme image |
+| `/reverse [mute]` | Play a video, GIF or round video backwards (reply to it, or send it with `/reverse`; or say "reverse this") |
 | `/ether <text>` (or on/replying to a voice note) | Transmit a message into another ether-enabled chat as a far-away **HF radio voice** — text is TTS'd, a real voice note is used as-is, then both get a long-haul DX ffmpeg treatment (narrow SSB band, wandering pitch, fading, crush/overdrive, AGC hiss, heterodyne whistle) |
 | `/duckhunt`, `/quackflag` | Spawn / check current duck |
 | `/duckstats`, `/duckfriends`, `/duckname <id> <name>`, `/global_leaderboard` | Duckhunt stats and management |
