@@ -154,8 +154,40 @@ async def build_runtime(settings: Settings) -> Runtime:
     )
 
 
+def from_another_bot(message) -> bool:
+    """A message another bot sent, as Telegram delivered it to this one.
+
+    Telegram now hands bots each other's group messages. Those must not
+    reach the handlers: the chat path would answer them as if a person had
+    spoken, with none of the hub's loop rules (depth cap, one bot-to-bot
+    reply per chat per window), and two bots replying to each other's
+    replies looped without end (2026-11-12, Dale and a persona bot, a
+    reply every few seconds until one was stopped). Bots hear each other
+    through the hub (ipedro/hub.py) only.
+
+    Not an anonymous group admin or a channel posting in the group:
+    Telegram fills `from_user` with a placeholder bot for those, and
+    `sender_chat` is what tells them apart."""
+    sender = getattr(message, "from_user", None)
+    return (
+        sender is not None
+        and bool(getattr(sender, "is_bot", False))
+        and getattr(message, "sender_chat", None) is None
+    )
+
+
+async def _drop_other_bots(handler, event, data):
+    if from_another_bot(event):
+        return None
+    return await handler(event, data)
+
+
 def build_dispatcher(rt: Runtime) -> Dispatcher:
     dp = Dispatcher()
+
+    # Before every router: another bot's message is the hub's to handle.
+    dp.message.outer_middleware(_drop_other_bots)
+    dp.edited_message.outer_middleware(_drop_other_bots)
 
     # Last-resort error handler: an unhandled handler exception otherwise
     # means the user's message silently gets no reply and no trace of why.
