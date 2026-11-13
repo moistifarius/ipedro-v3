@@ -317,6 +317,11 @@ nearest in the chat. A reply to a picture or GIF gets its description instead,
 where `vision` is on. Replying to someone else's message and naming him tells him
 what you replied to as well, but his answer is a plain message.
 
+In a group he is also told, by name, whose message he is answering. When
+several people speak at once their lines reach the model run together, and
+without the name he could credit one person's line to another (he once
+answered Luke's line with "…is generous, Matt").
+
 ### "bad bot" / "bad dale"
 Reply to one of the bot's messages with "bad bot" or "bad <any of its
 names>" (Dale: dale, rusty, pedro, dude, duder, boomhauer) to make it

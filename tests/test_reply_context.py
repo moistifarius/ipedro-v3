@@ -223,3 +223,63 @@ def test_the_docs_say_how_a_reply_is_answered():
     docs = " ".join((Path(__file__).resolve().parent.parent / "docs" / "COMMANDS.md").read_text().split())
     assert "### Replying to him" in docs and "answers **as a reply to you**" in docs
     assert "never saved to his memory" in docs
+
+
+# ── who he is answering is named (2026-11-12) ───────────────────────────────
+# Luke replied "Giving his ass pipe" to him right after Matt's "lmao"; the two
+# lines reached the model as one merged user turn, the notes said only "this
+# message", and he answered "…is generous, Matt".
+
+def test_the_speaker_note_names_them_by_their_line_label():
+    got = chat._speaker_note("Luke")
+    assert "You are answering Luke" in got and "starting 'Luke: '" in got
+    assert "LAST line" in got
+
+
+def test_a_nameless_speaker_is_someone_as_their_line_is_labelled():
+    assert "You are answering someone" in chat._speaker_note(None)
+    assert "You are answering someone" in chat._speaker_note("  ")
+
+
+def test_the_reply_note_says_whose_message_is_the_reply():
+    quoted = _bare(text="ass, pipe, same difference down here",
+                   from_user=_from(BOT_ID, "Bill", True))
+    got = chat._reply_context(SimpleNamespace(reply_to_message=quoted), BOT_ID,
+                              speaker="Luke")
+    assert got.startswith("Luke's message is a reply to one of your own earlier messages")
+
+
+@pytest.mark.asyncio
+async def test_the_reported_case_he_is_told_it_was_luke(monkeypatch):
+    rt, captured = _group_rt(monkeypatch)
+    quoted = _bare(text="ass, pipe, same difference down here",
+                   from_user=_from(BOT_ID, "Bill", True))
+    msg = _reply("Giving his ass pipe", quoted=quoted)
+    msg.from_user.first_name = "Luke"
+    await _handler(rt)(msg)
+    told = captured["extra_system"]
+    assert "You are answering Luke" in told
+    assert "Luke's message is a reply to one of your own" in told
+    assert captured["latest_user_name"] == "Luke"   # the label on his line matches
+
+
+@pytest.mark.asyncio
+async def test_in_a_dm_there_is_no_one_else_to_name(monkeypatch):
+    rt, captured = _group_rt(monkeypatch)
+    msg = _reply("hello again", quoted=_bare(text="hi", from_user=_from(BOT_ID, "R", True)),
+                 chat_type="private")
+    await _handler(rt)(msg)
+    told = captured.get("extra_system") or ""
+    assert "You are answering" not in told
+    assert told.startswith("This message is a reply")
+
+
+@pytest.mark.asyncio
+async def test_a_group_message_that_is_no_reply_still_names_who_he_answers(monkeypatch):
+    rt, captured = _group_rt(monkeypatch)
+    msg = _msg(text="dale what do you reckon")
+    msg.chat.type = "group"
+    msg.from_user.first_name = "Matt"
+    msg.answer = AsyncMock(return_value=SimpleNamespace(message_id=9))
+    await _handler(rt)(msg)
+    assert "You are answering Matt" in (captured.get("extra_system") or "")
