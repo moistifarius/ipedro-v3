@@ -94,6 +94,7 @@ _OPENAI_TEXT_PRICE_PER_1K = {
     "gpt-4.1": (0.002, 0.008),
 }
 _CLAUDE_TEXT_PRICE_PER_1K = {
+    "claude-fable-5-2":  (0.008, 0.040),     # before "claude-fable-5": first match wins
     "claude-fable-5":    (0.010, 0.050),
     "claude-opus-5-5":   (0.004, 0.020),     # before "claude-opus-5": first match wins
     "claude-opus-5":     (0.005, 0.025),
@@ -154,9 +155,10 @@ _CACHE_WRITE_MULTIPLIER = 1.25        # 5-minute entries
 _CACHE_WRITE_1H_MULTIPLIER = 2.0       # 1-hour entries
 _CACHE_READ_MULTIPLIER = 0.1
 # ...except on the models that discount reads further: 0.05x on Opus 5.5,
-# 0.025x on Fable / Mythos 5.1. Longest matching prefix wins.
+# 0.025x on Fable 5.2 and Fable / Mythos 5.1. Longest matching prefix wins.
 _CACHE_READ_MULTIPLIER_BY_MODEL: tuple[tuple[str, float], ...] = (
     ("claude-opus-5-5", 0.05),
+    ("claude-fable-5-2", 0.025),
     ("claude-fable-5-1", 0.025),
     ("claude-mythos-5-1", 0.025),
 )

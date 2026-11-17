@@ -498,6 +498,12 @@ def test_5_5_prices_and_cache_read_discounts():
     # Fable 5.1 reads are 0.025x.
     fable = _claude_text_price("claude-fable-5-1", 0, 0, cache_read_tokens=1000)
     assert fable == pytest.approx(1000 * 0.010 / 1000 * 0.025)
+    # Fable 5.2 is cheaper than 5.1 ($8/$40 vs $10/$50), same 0.025x reads:
+    # it must not fall through to the "claude-fable-5" row.
+    fable52 = _claude_text_price("claude-fable-5-2", 1000, 100, cache_read_tokens=10000)
+    assert fable52 == pytest.approx(1000 * 0.008 / 1000 + 100 * 0.040 / 1000
+                                    + 10000 * 0.008 / 1000 * 0.025)
+    assert fable52 < _claude_text_price("claude-fable-5-1", 1000, 100, cache_read_tokens=10000)
 
 
 def test_mythos_cache_minimum_is_not_the_unknown_model_default():
